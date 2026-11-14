@@ -6,5 +6,7 @@ Refraktal is a meta-harness: give it a task and it fans the work out to subagent
 
 This repository and the `refraktal` packages on npm and PyPI are early placeholders. Nothing to use yet.
 
+Licensed under the [Apache License 2.0](LICENSE).
+
 - Website: https://refraktal.dev
 - Go: `go install refraktal.dev/refraktal/cmd/refraktal@latest`
