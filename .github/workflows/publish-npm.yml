@@ -1,19 +1,17 @@
 name: Publish to npm
-# Token-free: npm trusted publishing (OIDC). No NPM_TOKEN.
-# npm side: package "refraktal" -> Settings -> Trusted Publisher ->
-#   GitHub Actions, org "refraktal", repo "refraktal", workflow "publish-npm.yml".
-# Release: bump npm/package.json version, then run this workflow (or push tag npm-vX.Y.Z).
+# Token-free: npm trusted publishing (OIDC), staged mode.
+# This workflow stages a release; the owner approves it on npmjs.com
+# (Staged Packages) with 2FA. No NPM_TOKEN anywhere.
+# Release: bump npm/package.json version, run this workflow, approve on npm.
 on:
-  push:
-    tags: ["npm-v*"]
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  publish:
+  stage:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write   # OIDC for trusted publishing + provenance
+      id-token: write   # OIDC for trusted publishing
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,5 +19,5 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
       - run: npm install -g npm@latest   # trusted publishing needs npm >= 11.5.1
-      - run: npm publish --access public --provenance
+      - run: npm stage publish --access public
         working-directory: npm
