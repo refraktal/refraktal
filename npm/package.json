@@ -1,6 +1,6 @@
 {
   "name": "refraktal",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Refraktal: a meta-harness. One prompt in, a spectrum of agents out. (Early placeholder.)",
   "homepage": "https://refraktal.dev",
   "repository": { "type": "git", "url": "git+https://github.com/refraktal/refraktal.git", "directory": "npm" },
