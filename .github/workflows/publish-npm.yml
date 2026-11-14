@@ -1,24 +1,25 @@
 name: Publish to npm
-# First release: stages the package with a stage-only token (NPM_TOKEN);
-# the owner approves it on npmjs.com (Staged Packages) with their own 2FA.
-# After the package exists, switch to npm trusted publishing and delete the token.
+# Token-free: npm trusted publishing (OIDC). No NPM_TOKEN.
+# npm side: package "refraktal" -> Settings -> Trusted Publisher ->
+#   GitHub Actions, org "refraktal", repo "refraktal", workflow "publish-npm.yml".
+# Release: bump npm/package.json version, then run this workflow (or push tag npm-vX.Y.Z).
 on:
+  push:
+    tags: ["npm-v*"]
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  stage:
+  publish:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
+      id-token: write   # OIDC for trusted publishing + provenance
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-      - run: npm install -g npm@latest
-      - run: npm stage publish --access public
+      - run: npm install -g npm@latest   # trusted publishing needs npm >= 11.5.1
+      - run: npm publish --access public --provenance
         working-directory: npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
