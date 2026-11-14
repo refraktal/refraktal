@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "refraktal"
+version = "0.0.1"
+description = "Refraktal: a meta-harness. One prompt in, a spectrum of agents out. (Early placeholder.)"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Adhish Thite" }]
+keywords = ["agents", "ai", "harness", "claude-code", "codex"]
+classifiers = ["Development Status :: 1 - Planning"]
+
+[project.urls]
+Homepage = "https://refraktal.dev"
+Repository = "https://github.com/refraktal/refraktal"

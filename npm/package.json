@@ -1,0 +1,13 @@
+{
+  "name": "refraktal",
+  "version": "0.0.1",
+  "description": "Refraktal: a meta-harness. One prompt in, a spectrum of agents out. (Early placeholder.)",
+  "homepage": "https://refraktal.dev",
+  "repository": { "type": "git", "url": "git+https://github.com/refraktal/refraktal.git", "directory": "npm" },
+  "bugs": "https://github.com/refraktal/refraktal/issues",
+  "license": "UNLICENSED",
+  "author": "Adhish Thite",
+  "bin": { "refraktal": "bin/refraktal.js" },
+  "files": ["bin", "README.md"],
+  "keywords": ["agents", "ai", "harness", "claude-code", "codex", "cli"]
+}
