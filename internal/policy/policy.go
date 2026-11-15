@@ -141,14 +141,27 @@ func paths(req acp.PermissionRequest, in map[string]any) []string {
 	for _, l := range loc.ToolCall.Locations {
 		out = append(out, l.Path)
 	}
-	for _, k := range []string{"file_path", "path", "Path", "notebook_path", "new_path", "old_path"} {
-		if s, ok := in[k].(string); ok && s != "" {
-			out = append(out, s)
+	out = append(out, pathFields(in)...)
+	if ch, ok := in["changes"].(map[string]any); ok { // Codex file changes, keyed by path; a change may also move the file
+		for k, v := range ch {
+			out = append(out, k)
+			if m, ok := v.(map[string]any); ok {
+				out = append(out, pathFields(m)...)
+			}
 		}
 	}
-	if ch, ok := in["changes"].(map[string]any); ok { // Codex file changes, keyed by path
-		for k := range ch {
-			out = append(out, k)
+	return out
+}
+
+// pathKeys are the fields harnesses use for a file path or a destination.
+var pathKeys = []string{"file_path", "path", "Path", "notebook_path", "new_path", "old_path",
+	"move_path", "destination", "target", "dest", "to", "from"}
+
+func pathFields(m map[string]any) []string {
+	var out []string
+	for _, k := range pathKeys {
+		if s, ok := m[k].(string); ok && s != "" {
+			out = append(out, s)
 		}
 	}
 	return out

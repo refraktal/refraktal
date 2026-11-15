@@ -107,6 +107,11 @@ func TestDecide(t *testing.T) {
 		{"codex argv list", request(t, "execute", map[string]any{"command": []any{"git", "push"}, "cwd": wt}), false},
 		{"codex file change", request(t, "edit", map[string]any{"changes": map[string]any{filepath.Join(wt, "a"): map[string]any{}}}), true},
 		{"codex file change out", request(t, "edit", map[string]any{"changes": map[string]any{filepath.Join(outside, "a"): map[string]any{}}}), false},
+		{"codex move out of the worktree", request(t, "edit", map[string]any{"changes": map[string]any{
+			filepath.Join(wt, "a"): map[string]any{"type": "update", "move_path": filepath.Join(outside, "a")}}}), false},
+		{"codex move inside", request(t, "edit", map[string]any{"changes": map[string]any{
+			filepath.Join(wt, "a"): map[string]any{"type": "update", "move_path": filepath.Join(wt, "b")}}}), true},
+		{"move with a destination outside", request(t, "move", map[string]any{"path": filepath.Join(wt, "a"), "destination": filepath.Join(outside, "a")}), false},
 		// Antigravity
 		{"agy command line", request(t, "execute", map[string]any{"CommandLine": "echo hi"}), true},
 		{"agy push", request(t, "execute", map[string]any{"CommandLine": "git push"}), false},
