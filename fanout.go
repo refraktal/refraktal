@@ -524,10 +524,27 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 	// 3. The harness judge, only for a close call.
 	winner, close, v := choose(cands, plan, scored, e.cfg.MarginOr())
 	if close != nil {
-		jh := judgeHarness(hs, cands, close)
-		v.Judge = jh.Name()
-		e.log.Event("judge_start", map[string]any{"judge": jh.Name(), "close_call": v.CloseCall, "reason": v.Reason})
-		j := e.child(jh, childSpec{suffix: "judge", share: 1, prompt: judgePrompt(e.o.Task, close), judge: true})
+		e.log.Event("judge_start", map[string]any{"close_call": v.CloseCall, "reason": v.Reason})
+		var j *Candidate
+		prompt := judgePrompt(e.o.Task, close)
+		for _, jh := range judgeOrder(e.o.Harnesses, hs, cands, close) {
+			j = e.child(jh, childSpec{suffix: "judge-" + jh.Name(), share: 1, prompt: prompt, judge: true})
+			if j.Outcome != candUnusable {
+				v.Judge = jh.Name()
+				break
+			}
+			// Could not be started or logged in: no turn was spent; try the next.
+			v.JudgesTried = append(v.JudgesTried, jh.Name())
+			e.log.Event("judge_unusable", map[string]any{"judge": jh.Name()})
+		}
+		for _, c := range close {
+			if c.Harness == v.Judge {
+				v.JudgedOwn = true
+			}
+		}
+		if v.JudgedOwn {
+			e.notice(fmt.Sprintf("the judge, %s, is one of the close-call candidates: no other harness was available and usable", v.Judge))
+		}
 		res.Judge = j
 		if j != nil {
 			res.LeftRunning += j.LeftRunning
@@ -538,7 +555,7 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 			labels = append(labels, c.Label)
 		}
 		w := parseWinner(j.Reply, labels)
-		e.log.Event("judge_end", map[string]any{"judge": jh.Name(), "outcome": j.Outcome, "answer": w})
+		e.log.Event("judge_end", map[string]any{"judge": v.Judge, "judged_own": v.JudgedOwn, "tried": v.JudgesTried, "outcome": j.Outcome, "answer": w})
 		switch {
 		case j.Outcome == candTimedOut:
 			res.Verdict = &v
@@ -601,22 +618,33 @@ func (c *Candidate) wtKept(all []Candidate) (string, string) {
 	return "", ""
 }
 
-// judgeHarness picks the judge: a harness of this run that is not in the
-// close call and could be started, else the first close-call candidate.
-func judgeHarness(hs []harness.Harness, cands []*Candidate, close []*Candidate) harness.Harness {
-	inClose := map[string]bool{}
+// judgeOrder is the order judges are tried in: harnesses outside the close
+// call first (this run's that could be started, then the other configured
+// ones), then the close-call candidates. A judge that cannot be started is
+// skipped for the next.
+func judgeOrder(all, run []harness.Harness, cands []*Candidate, close []*Candidate) []harness.Harness {
+	inClose, ran := map[string]bool{}, map[string]bool{}
 	for _, c := range close {
 		inClose[c.Harness] = true
 	}
-	for i, h := range hs {
+	var out []harness.Harness
+	for i, h := range run {
+		ran[h.Name()] = true
 		if !inClose[h.Name()] && cands[i].Outcome != candUnusable {
-			return h
+			out = append(out, h)
 		}
 	}
-	for _, h := range hs {
-		if h.Name() == close[0].Harness {
-			return h
+	for _, h := range all {
+		if !ran[h.Name()] {
+			out = append(out, h)
 		}
 	}
-	return hs[0]
+	for _, c := range close {
+		for _, h := range run {
+			if h.Name() == c.Harness {
+				out = append(out, h)
+			}
+		}
+	}
+	return out
 }

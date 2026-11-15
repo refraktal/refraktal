@@ -190,6 +190,12 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 		fmt.Fprintf(stdout, "verdict: %s by %s (%s)", cmpOr(v.Winner, "no winner"), v.Method, v.Reason)
 		if v.Judge != "" {
 			fmt.Fprintf(stdout, "; judge %s", v.Judge)
+			if v.JudgedOwn {
+				fmt.Fprint(stdout, " (judged its own candidate)")
+			}
+		}
+		if len(v.JudgesTried) > 0 {
+			fmt.Fprintf(stdout, "; could not start %s", strings.Join(v.JudgesTried, ", "))
 		}
 		fmt.Fprintln(stdout)
 	}

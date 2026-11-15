@@ -514,8 +514,14 @@ changes. In order:
 3. **Harness judge**, only for a close call: the top two pre-scores are
    within the margin (`judge.margin` in the config, default 0.10), or there
    is no pre-score and more than one candidate shares the top rank, or the
-   leader is flagged. The judge is a harness that is not a close-call
-   candidate when one is available (else the first in order). It runs in a
+   leader is flagged. The judge is a harness outside the close call when one
+   is available and usable: this run's harnesses that could be started,
+   then the other configured harnesses; one that cannot be started (not
+   installed, logged out) is skipped. Only when none is left does a
+   close-call candidate judge. The verdict records the judge, whether it
+   judged its own candidate (`judged_own`, also a notice) and any judges
+   that could not be started, in `--json`, the run log and, from M7,
+   `show`. It runs in a
    fresh worktree of its own, read-only (the policy denies every edit and
    command), with its own grant. Its prompt holds the task and the
    candidates' diffs under anonymous letters; it answers `WINNER: <letter>`

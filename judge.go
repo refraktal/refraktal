@@ -247,8 +247,11 @@ type Verdict struct {
 	Reason    string   `json:"reason"`
 	CloseCall []string `json:"close_call,omitempty"` // harnesses sent to the judge
 	Judge     string   `json:"judge,omitempty"`      // the judging harness
-	Checks    string   `json:"checks"`               // where the check came from: config, make, go, npm or none
-	Margin    float64  `json:"margin"`
+	JudgedOwn bool     `json:"judged_own,omitempty"` // the judge was one of the close-call candidates
+	// JudgesTried are judges that could not be started, in the order tried.
+	JudgesTried []string `json:"judges_tried,omitempty"`
+	Checks      string   `json:"checks"` // where the check came from: config, make, go, npm or none
+	Margin      float64  `json:"margin"`
 }
 
 // choose ranks the candidates that ended with changes and picks a winner,

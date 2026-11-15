@@ -155,6 +155,8 @@ and judging).
   decremented, nested run folders.
 - `show`: render a run, including nested runs, costs by source, decisions and
   verdicts.
+- `show` prints a run's verdict: the winner, the method, the judge and
+  whether it judged its own candidate (`judged_own` in the run log).
 
 **Done when:** a Refraktal drives a child Refraktal that drives a harness, and
 `show` renders the whole tree.

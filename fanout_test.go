@@ -176,6 +176,9 @@ func TestFanOutCloseCallGoesToTheJudge(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(r.repo, "out.txt")); string(b) != "good-2\n" {
 		t.Fatalf("out.txt = %q", b)
 	}
+	if !res.Verdict.JudgedOwn {
+		t.Fatal("claude judged a close call it was in: the verdict must say so")
+	}
 	if j := res.Judge; j == nil || j.Denied != 1 || j.Allowed != 0 || j.Files != nil {
 		t.Fatalf("judge %+v: its write must be denied and nothing collected", j)
 	}
@@ -247,7 +250,7 @@ func TestFanOutMinsDuringJudging(t *testing.T) {
 		t.Fatalf("want the two candidates' worktrees, have %d", len(entries))
 	}
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), "-judge") {
+		if strings.Contains(e.Name(), "-judge-") {
 			t.Fatal("the judge's worktree was kept")
 		}
 	}
@@ -517,5 +520,30 @@ func TestSessionCostChargesTheDelta(t *testing.T) {
 	second := s.charges("claude", "m", turn(0.025), price.Table{})
 	if len(first) != 1 || !near(first[0].USD, 0.01) || len(second) != 1 || !near(second[0].USD, 0.015) || second[0].Source != budget.Reported {
 		t.Fatalf("first %+v second %+v", first, second)
+	}
+}
+
+// The judge comes from a usable harness outside the close call when one is
+// available, even one the fan-out did not run; the verdict records it.
+func TestJudgeIsPickedOutsideTheCloseCall(t *testing.T) {
+	r := newRunRig(t)
+	outsider := fake{name: "agy", agentMode: "turn", env: []string{"ACPTEST_JUDGE=WINNER: B"}}
+	res := r.fan(t, []harness.Harness{writer("claude", "a.txt=1", "ACPTEST_JUDGE=WINNER: A"), writer("codex", "b.txt=2")},
+		func(o *RunOptions) { o.Harnesses = append(o.Harnesses, outsider) })
+	if v := res.Verdict; v == nil || v.Judge != "agy" || v.JudgedOwn || v.Winner != "codex" || len(res.Candidates) != 2 {
+		t.Fatalf("verdict %+v", res.Verdict)
+	}
+	// An outsider that cannot be started (logged out) is skipped: a
+	// candidate judges, and the verdict says it judged its own candidate.
+	os.Remove(filepath.Join(r.repo, "b.txt"))
+	res = r.fan(t, []harness.Harness{writer("claude", "a.txt=1", "ACPTEST_JUDGE=WINNER: A"), writer("codex", "b.txt=2")},
+		func(o *RunOptions) { o.Harnesses = append(o.Harnesses, fake{name: "agy", agentMode: "noauth"}) })
+	if v := res.Verdict; v == nil || v.Judge != "claude" || !v.JudgedOwn || v.Winner != "claude" || len(v.JudgesTried) != 1 || v.JudgesTried[0] != "agy" {
+		t.Fatalf("fallback verdict %+v", res.Verdict)
+	}
+	// show (M7) renders the run log: the verdict there names the judge.
+	events, _ := os.ReadFile(filepath.Join(r.repo, res.Run, "events.jsonl"))
+	if !strings.Contains(string(events), `"judge":"claude","judged_own":true`) {
+		t.Fatal("the run log's verdict does not record that the judge judged its own candidate")
 	}
 }
