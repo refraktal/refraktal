@@ -437,7 +437,39 @@ A System 1 decision model chooses; harnesses are System 2.
 - Starting thresholds are in `spikes/routing`; untuned. The fan-out questions
   are the weak part: do not retune on a handful of samples.
 - On the free tier, Google uses request data to improve its products. Say so
-  in the docs.
+  in the docs. (Done in the README.)
+
+**As built (M5):**
+
+- `internal/route` keeps the spike's questions, fallback rules, policy and
+  thresholds byte for byte, so the spike's samples route identically: the ten
+  recorded live answers replay to the same decisions offline, the fallback
+  matches the spike's outputs, and live the ten samples gave the same
+  decisions and outcomes as the spike's run.
+- The questions name the spike's harness labels; they map to Refraktal's
+  harnesses (`claude-code` → claude, `antigravity` → agy). `refraktal` cannot
+  run as a harness until M7: the next most probable harness runs, with a
+  notice.
+- Until fan-out (M6), a fan-out decision runs its top harness and an
+  escalation runs the most probable harness; both are reported as notices.
+  `--harness` skips the router; `--fan 1` forces one harness; wider `--fan` is
+  refused until M6. `--dry` routes and plans only (exit 0): no worktree, no
+  harness.
+- The key comes from `GEMINI_API_KEY` in the environment, else the
+  repository's gitignored `.env`; it goes only in the `x-goog-api-key`
+  header, never in a URL, log or output. The router's call runs alongside
+  the price fetch and worktree setup, under the run's `--mins` deadline.
+- Cache: `os.UserCacheDir()/refraktal/decisions/<sha256 of the exact
+  request>.json`, 24 hours; only Gemini answers are cached.
+- Decision log: `.refraktal/decisions.jsonl` in the repository (gitignored),
+  one record per decision with the request input, every probability, the
+  thresholds, the outcome and the provider's response; the run log gets a
+  summarised `route` event.
+- `doctor` reports the decider: no key means fallback; with a key, one probe
+  decision on a trivial task shows whether the API answers in time (else
+  fallback, with the reason).
+- `go test` never talks to Google: from a test binary the client accepts only
+  a loopback test server, unless `REFRAKTAL_LIVE=1`.
 
 ## Not in v1
 
