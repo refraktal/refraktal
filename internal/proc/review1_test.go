@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -68,13 +69,13 @@ func appendRecord(t *testing.T, path string, p Proc) {
 func TestASessionSeenEmptyIsNeverSwept(t *testing.T) {
 	const reused = 999999 // the recorded leader's PID; no such process exists
 	stranger := startSleep(t, &syscall.SysProcAttr{Setsid: true})
-	var reusedNow bool
+	var reusedNow atomic.Bool // written by the test, read by the session poller
 	orig := membersOf
 	membersOf = func(sid int) ([]Proc, bool, error) {
 		if sid != reused {
 			return orig(sid)
 		}
-		if !reusedNow {
+		if !reusedNow.Load() {
 			return nil, false, nil // the recorded session has emptied
 		}
 		all, _ := List()
@@ -93,7 +94,7 @@ func TestASessionSeenEmptyIsNeverSwept(t *testing.T) {
 	gc := readPID(t, bufio.NewReader(c.Stdout))
 	defer syscall.Kill(gc, syscall.SIGKILL)
 	time.Sleep(300 * time.Millisecond) // several session polls see it empty
-	reusedNow = true
+	reusedNow.Store(true)
 	c.Shutdown(time.Second)
 	if !running(stranger) {
 		t.Fatal("a stranger in a reused session ID was killed")

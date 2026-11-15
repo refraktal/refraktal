@@ -395,7 +395,7 @@ func TestSlowPriceFetchHonoursTheDeadline(t *testing.T) {
 }
 
 // Hardening 4. Durable run events never carry raw harness error text: a code
-// and a short digest only; the raw text goes to the gitignored stderr capture.
+// and a coarse length only; the raw text goes to the gitignored stderr capture.
 func TestRunEventsCarryNoRawHarnessErrors(t *testing.T) {
 	r := newRunRig(t)
 	res := r.run(t, fake{name: "claude", agentMode: "noauth"}, nil)

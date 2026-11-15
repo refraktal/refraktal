@@ -242,7 +242,9 @@ process-group kill does not reach them.
   child and every descendant tracked so far, and is rewritten as tracking
   grows. It is removed on a clean shutdown. `doctor` and `run` clean up the
   entries of dead runs (owner no longer running as recorded): they kill the
-  listed processes with the identity check, then remove the file. This also
+  listed processes with the identity check, then remove the file. A failed
+  lookup is `unknown`, never proof that a process is gone: it is not signalled,
+  and its live record stays for the next cleanup attempt. This also
   covers Refraktal itself being killed. The folder is global because runs in
   different repositories share one machine.
 - Keep a process-group kill as well; it is free.
@@ -261,7 +263,8 @@ process-group kill does not reach them.
   that guarantee falls back to the identity checks.)
 - **Run events and errors.** Durable run events never carry a harness's raw
   error text, which can hold account details: they log a structured code and
-  a digest; the raw text goes only to the gitignored stderr capture.
+  a coarse byte-length bucket (rounded up to a power of two, capped at
+  64 KiB); the raw text goes only to the gitignored stderr capture.
 - **ACP frames** are at most 16 MiB; a harness that writes more without a
   newline has its connection closed with a clear error. A response that
   arrives together with the agent's exit is still delivered.

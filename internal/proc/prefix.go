@@ -2,6 +2,7 @@ package proc
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 )
 
 // Claude Code's Bash tool starts each command's shell as the leader of a new
@@ -157,18 +159,36 @@ func recordSession(path string) error {
 	return err
 }
 
-// listPID lists one process, in the same form as List.
+// ErrProcessGone means ps completed and listed no running process for the PID.
+// Lookup failures never wrap this sentinel.
+var ErrProcessGone = errors.New("proc: process not listed")
+
+// listPID lists one process, in the same form as List. Only a confirmed
+// absence (including a zombie or exiting process) returns ErrProcessGone.
 func listPID(pid int) (Proc, error) {
-	cmd := exec.Command("ps", "-ww", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "uid=", "-o", "stat=",
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ps", "-ww", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "uid=", "-o", "stat=",
 		"-o", "lstart=", "-o", "command=", "-p", strconv.Itoa(pid))
 	cmd.Env = append(ScrubEnv(os.Environ()), "LC_ALL=C")
 	out, err := cmd.Output()
 	if err != nil {
+		// Both macOS BSD ps and Linux procps exit 1 when no PID matches.
+		// With headings disabled they write nothing to stdout or stderr.
+		// A start failure, signal, timeout, other status or diagnostic is not absence.
+		var exitErr *exec.ExitError
+		if ctx.Err() == nil && errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && len(out) == 0 && len(exitErr.Stderr) == 0 {
+			return Proc{}, fmt.Errorf("process %d: %w", pid, ErrProcessGone)
+		}
 		return Proc{}, fmt.Errorf("ps -p %d: %w", pid, err)
 	}
-	p, ok := parsePS(string(out))[pid]
+	all, err := parsePS(string(out))
+	if err != nil {
+		return Proc{}, err
+	}
+	p, ok := all[pid]
 	if !ok {
-		return Proc{}, fmt.Errorf("process %d not listed", pid)
+		return Proc{}, fmt.Errorf("process %d: %w", pid, ErrProcessGone)
 	}
 	return p, nil
 }

@@ -20,6 +20,30 @@ import (
 	"refraktal.dev/refraktal/internal/proc"
 )
 
+func TestDoctorTextReportsUncertainCleanup(t *testing.T) {
+	rep := DoctorReport{
+		Harnesses: []HarnessCheck{{Name: "claude", Status: StatusOK, Unknown: 2}},
+		Cleanup:   CleanupCheck{Dead: 1, Alive: 1, Unknown: 2},
+	}
+	var out bytes.Buffer
+	WriteDoctorText(&out, rep)
+	for _, want := range []string{"incomplete", "1 still running", "2 unknown", "2 processes could not be checked after shutdown"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("doctor text missing %q: %s", want, out.String())
+		}
+	}
+}
+
+func TestShutdownCountsIncludeSweepsWithoutDuplicatePIDs(t *testing.T) {
+	alive, unknown := shutdownCounts(proc.ShutdownReport{
+		Kill:  proc.KillReport{Alive: []proc.Proc{{PID: 10}}, Unknown: []proc.Proc{{PID: 11}}},
+		Swept: proc.KillReport{Alive: []proc.Proc{{PID: 10}, {PID: 12}}, Unknown: []proc.Proc{{PID: 11}, {PID: 13}}},
+	})
+	if alive != 2 || unknown != 2 {
+		t.Fatalf("shutdown counts: alive %d, unknown %d; want 2 each", alive, unknown)
+	}
+}
+
 func TestMain(m *testing.M) {
 	// A fake agent is named explicitly (ACPTEST_MODE) and plays the harness,
 	// which carries the helper switch for its shell prefix: check it first.

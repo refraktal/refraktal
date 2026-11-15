@@ -5,12 +5,56 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 
 	"refraktal.dev/refraktal/internal/proc"
 )
+
+func TestErrorFieldLogsOnlyCodeAndCoarseLength(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	l, err := Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	for _, raw := range []string{"auth for alice@example.com", "login for bob@example.org"} {
+		if err := l.Event("error", map[string]any{"error": ErrorField("auth", raw)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := map[string]any{"code": "auth", "bytes_bucket": float64(32)}
+	lines := readLines(t, path)
+	if len(lines) != 2 {
+		t.Fatalf("logged %d events; want 2", len(lines))
+	}
+	for _, event := range lines {
+		if !reflect.DeepEqual(event["error"], want) {
+			t.Fatalf("error fields = %v; want only %v", event["error"], want)
+		}
+	}
+}
+
+func TestErrorFieldLengthBuckets(t *testing.T) {
+	if got := ErrorField("auth", ""); got != nil {
+		t.Fatalf("empty error = %v; want nil", got)
+	}
+	for _, tc := range []struct {
+		raw  string
+		want int
+	}{
+		{"x", 1}, {"xx", 2}, {"xxx", 4}, {"12345678", 8}, {"123456789", 16},
+		{"ééé", 8}, {strings.Repeat("x", 65536), 65536},
+		{strings.Repeat("x", 65537), 65536}, {strings.Repeat("x", 1<<20), 65536},
+	} {
+		want := map[string]any{"code": "auth", "bytes_bucket": tc.want}
+		if got := ErrorField("auth", tc.raw); !reflect.DeepEqual(got, want) {
+			t.Errorf("%d bytes: fields = %v; want %v", len(tc.raw), got, want)
+		}
+	}
+}
 
 func readLines(t *testing.T, path string) []map[string]any {
 	t.Helper()

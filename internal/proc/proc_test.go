@@ -24,6 +24,7 @@ func TestMain(m *testing.M) {
 	switch os.Getenv(helperEnv) {
 	case "":
 		os.Exit(m.Run())
+	case "exit": // exit immediately without starting any descendants
 	case "detach": // start a child in a process group of its own, print its PID, exit when stdin closes
 		kid := exec.Command("sleep", "30")
 		kid.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -284,12 +285,11 @@ func TestChildEnvironmentIsScrubbed(t *testing.T) {
 func TestParsePS(t *testing.T) {
 	out := "  10     1    10   501 Ss   Sun Nov 15 15:45:51 2026 /bin/sh -c sleep  20\n" +
 		"  11    10    10   501 Z    Sun Nov 15 15:45:52 2026 (sleep)\n" +
-		"  12    10    10   501 SE   Sun Nov 15 15:45:53 2026 (claude)\n" +
-		"garbage\n"
-	got := parsePS(out)
+		"  12    10    10   501 SE   Sun Nov 15 15:45:53 2026 (claude)\n"
+	got, err := parsePS(out)
 	want := Proc{PID: 10, PPID: 1, PGID: 10, UID: 501, Start: "Sun Nov 15 15:45:51 2026", Cmd: "/bin/sh -c sleep 20"}
-	if len(got) != 1 || got[10] != want {
-		t.Fatalf("got %+v", got)
+	if err != nil || len(got) != 1 || got[10] != want {
+		t.Fatalf("got %+v, err %v", got, err)
 	}
 }
 

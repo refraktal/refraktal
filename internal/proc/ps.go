@@ -8,11 +8,13 @@
 package proc
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Proc identifies one process by its birth identity: PID and start time. A
@@ -42,32 +44,43 @@ func List() (map[int]Proc, error) {
 	// These flags work with both the BSD ps on macOS and procps on Linux. -ww
 	// stops the command line being cut to the terminal width; LC_ALL=C fixes
 	// the lstart format to five fields, such as "Sun Nov 15 15:45:51 2026".
-	cmd := exec.Command("ps", "-A", "-ww", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "uid=", "-o", "stat=",
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ps", "-A", "-ww", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "uid=", "-o", "stat=",
 		"-o", "lstart=", "-o", "command=")
 	cmd.Env = append(ScrubEnv(os.Environ()), "LC_ALL=C")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("ps: %w", err)
 	}
-	return parsePS(string(out)), nil
+	return parsePS(string(out))
 }
 
-func parsePS(out string) map[int]Proc {
+func parsePS(out string) (map[int]Proc, error) {
 	all := map[int]Proc{}
-	for _, line := range strings.Split(out, "\n") {
+	for i, line := range strings.Split(out, "\n") {
 		f := strings.Fields(line)
-		if len(f) < 11 { // pid ppid pgid uid stat, five lstart fields, at least one command field
+		if len(f) == 0 {
 			continue
+		}
+		if len(f) < 11 { // pid ppid pgid uid stat, five lstart fields, at least one command field
+			return nil, fmt.Errorf("ps: malformed row %d", i+1)
 		}
 		pid, err1 := strconv.Atoi(f[0])
 		ppid, err2 := strconv.Atoi(f[1])
 		pgid, err3 := strconv.Atoi(f[2])
 		uid, err4 := strconv.Atoi(f[3])
-		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || strings.HasPrefix(f[4], "Z") || strings.Contains(f[4], "E") {
+		start := strings.Join(f[5:10], " ")
+		_, validStart := startTime(start)
+		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || pid <= 0 || ppid < 0 || pgid < 0 || uid < 0 ||
+			!strings.ContainsRune("DIPRSTtUWXZ?", rune(f[4][0])) || !validStart {
+			return nil, fmt.Errorf("ps: malformed row %d", i+1)
+		}
+		if strings.HasPrefix(f[4], "Z") || strings.Contains(f[4], "E") {
 			continue
 		}
 		all[pid] = Proc{PID: pid, PPID: ppid, PGID: pgid, UID: uid,
-			Start: strings.Join(f[5:10], " "), Cmd: strings.Join(f[10:], " ")}
+			Start: start, Cmd: strings.Join(f[10:], " ")}
 	}
-	return all
+	return all, nil
 }

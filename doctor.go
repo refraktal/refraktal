@@ -99,6 +99,7 @@ type HarnessCheck struct {
 	MCP              string `json:"mcp"`                             // isolated or inherit
 	HandshakeMs      int64  `json:"handshake_ms,omitempty"`
 	LeftRunning      int    `json:"left_running"` // processes still running after shutdown
+	Unknown          int    `json:"unknown"`      // processes whose cleanup could not be confirmed
 }
 
 // DeciderCheck says which routing decider a run would use.
@@ -114,11 +115,12 @@ type DeciderCheck struct {
 type CleanupCheck struct {
 	Records int      `json:"records"` // live records found
 	Live    int      `json:"live"`    // owned by a running Refraktal: left alone
-	Dead    int      `json:"dead"`    // owned by a dead run: cleaned up
+	Dead    int      `json:"dead"`    // owned by a dead run: cleanup attempted
 	Killed  int      `json:"killed"`  // processes killed
 	Gone    int      `json:"gone"`    // processes that had already exited
 	Changed int      `json:"changed"` // PIDs now used by other processes: left alone
 	Alive   int      `json:"alive"`   // killed but still running
+	Unknown int      `json:"unknown"` // process lookups failed: cleanup unconfirmed
 	Errors  []string `json:"errors"`
 }
 
@@ -147,7 +149,7 @@ func Doctor(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 
 	cr, err := proc.CleanLeftovers(o.LiveDir)
 	rep.Cleanup = CleanupCheck{Records: cr.Records, Live: cr.Live, Dead: cr.Dead, Killed: len(cr.Kill.Killed),
-		Gone: len(cr.Kill.Gone), Changed: len(cr.Kill.Changed), Alive: len(cr.Kill.Alive), Errors: cr.Errors}
+		Gone: len(cr.Kill.Gone), Changed: len(cr.Kill.Changed), Alive: len(cr.Kill.Alive), Unknown: len(cr.Kill.Unknown), Errors: cr.Errors}
 	if err != nil {
 		rep.Cleanup.Errors = append(rep.Cleanup.Errors, err.Error())
 	}
@@ -174,7 +176,7 @@ func Doctor(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 		if c.Status == StatusOK {
 			rep.Usable = append(rep.Usable, c.Name)
 		}
-		// The reason can be a harness's own error text: log its code and digest,
+		// The reason can be a harness's own error text: log its code and length bucket,
 		// and keep the text in the harness's gitignored stderr capture.
 		logged := c
 		logged.Reason = ""
@@ -284,7 +286,7 @@ func checkHarness(ctx context.Context, h harness.Harness, hcfg config.Harness, o
 	}
 	if s.child != nil {
 		c.HandshakeMs = time.Since(start).Milliseconds()
-		c.LeftRunning = len(s.close(log, h.Name(), 5*time.Second).Kill.Alive)
+		c.LeftRunning, c.Unknown = shutdownCounts(s.close(log, h.Name(), 5*time.Second))
 	}
 	return c
 }
@@ -346,6 +348,9 @@ func WriteDoctorText(w io.Writer, r DoctorReport) {
 		if c.LeftRunning > 0 {
 			p("%-20s%d processes still running after shutdown\n", "", c.LeftRunning)
 		}
+		if c.Unknown > 0 {
+			p("%-20s%d processes could not be checked after shutdown\n", "", c.Unknown)
+		}
 	}
 	if r.Decider.Kind == "gemini" {
 		p("%-8s %-11s%s\n", "decider", "gemini", fmt.Sprintf("model %s, key from %s, probe %.0f ms", r.Decider.Model, r.Decider.KeySource, r.Decider.LatencyMS))
@@ -354,6 +359,9 @@ func WriteDoctorText(w io.Writer, r DoctorReport) {
 	}
 	cl := r.Cleanup
 	switch {
+	case cl.Alive > 0 || cl.Unknown > 0 || len(cl.Errors) > 0:
+		p("%-8s %-11s%d dead runs: %d processes killed, %d still running, %d unknown; live records kept for retry\n",
+			"cleanup", "incomplete", cl.Dead, cl.Killed, cl.Alive, cl.Unknown)
 	case cl.Dead == 0:
 		p("%-8s %-11s%s\n", "cleanup", "ok", "no leftovers from dead runs")
 	default:

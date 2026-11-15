@@ -281,7 +281,7 @@ func (c *Child) checkSessions() {
 // seen empty. The sessions file is read twice, the second time after a short
 // delay, so a record a tool command appended late is not missed.
 func (c *Child) sweepSessions() (KillReport, error) {
-	r := KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}}
+	r := KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}, Unknown: []Proc{}}
 	done := map[string]bool{}
 	var firstErr error
 	pass := func() {
@@ -302,6 +302,7 @@ func (c *Child) sweepSessions() (KillReport, error) {
 			r.Gone = append(r.Gone, kr.Gone...)
 			r.Changed = append(r.Changed, kr.Changed...)
 			r.Alive = append(r.Alive, kr.Alive...)
+			r.Unknown = append(r.Unknown, kr.Unknown...)
 		}
 	}
 	if c.sessions != "" {
@@ -406,14 +407,18 @@ func (c *Child) shutdown(grace time.Duration) ShutdownReport {
 	case <-time.After(grace):
 	}
 	c.tracker.Poll() // a process that joined a tracked group during shutdown
+	if c.record != "" {
+		c.writeRecord() // retain the final targets too if cleanup needs a retry
+	}
 
 	tracked := c.tracker.Tracked()
 	targets := slices.Clone(tracked)
 	if rootErr == nil {
 		targets = append(targets, rootRec)
 	}
-	c.killGroup(targets)
+	groupErr := c.killGroup(targets)
 	kr, err := Kill(targets)
+	err = errors.Join(err, groupErr)
 	if err == nil && !errors.Is(rootErr, errNotRunning) {
 		err = rootErr
 	}
@@ -424,6 +429,20 @@ func (c *Child) shutdown(grace time.Duration) ShutdownReport {
 	swept, serr := c.sweepSessions()
 	if err == nil {
 		err = serr
+	}
+	if c.record != "" {
+		// The final sweep can discover processes the pollers never recorded.
+		// Preserve every known identity whose cleanup needs another attempt.
+		c.smu.Lock()
+		for _, pending := range [][]Proc{kr.Alive, kr.Unknown, swept.Alive, swept.Unknown} {
+			for _, p := range pending {
+				if p.Start != "" {
+					c.members[p.PID] = p
+				}
+			}
+		}
+		c.smu.Unlock()
+		c.writeRecord()
 	}
 	select {
 	case <-c.exited:
@@ -437,11 +456,11 @@ func (c *Child) shutdown(grace time.Duration) ShutdownReport {
 	}
 	c.Stdout.Close()
 	r.Swept = swept
-	if c.record != "" && err == nil && len(kr.Alive) == 0 && len(swept.Alive) == 0 {
-		os.Remove(c.record) // clean exit; otherwise the record stays for CleanLeftovers
-	}
 	if err == nil {
 		err = c.recordErr
+	}
+	if c.record != "" && err == nil && len(kr.Alive) == 0 && len(kr.Unknown) == 0 && len(swept.Alive) == 0 && len(swept.Unknown) == 0 {
+		os.Remove(c.record) // clean exit; otherwise the record stays for CleanLeftovers
 	}
 	r.Tracked, r.Kill = tracked, kr
 	if err != nil {
@@ -474,18 +493,23 @@ var errNotRunning = errors.New("not running")
 // still running as recorded, checked again immediately before the signal. A
 // group ID cannot be reused while the group has a member, and the leader (our
 // child) is not reaped until after this, so its zombie also keeps the ID.
-func (c *Child) killGroup(targets []Proc) {
+func (c *Child) killGroup(targets []Proc) error {
 	pgid := c.PID()
 	all, err := List()
 	if err != nil {
-		return
+		return err
 	}
 	for _, p := range targets {
 		if now, ok := all[p.PID]; ok && now.Same(p) && now.PGID == pgid {
-			if again, err := recheckPID(p.PID); err == nil && again.Same(p) && again.PGID == pgid {
+			again, err := recheckPID(p.PID)
+			if err != nil && !errors.Is(err, ErrProcessGone) {
+				return err
+			}
+			if err == nil && again.Same(p) && again.PGID == pgid {
 				signal(-pgid, syscall.SIGKILL)
-				return
+				return nil
 			}
 		}
 	}
+	return nil
 }
