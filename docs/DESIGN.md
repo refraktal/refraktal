@@ -137,14 +137,15 @@ decides by its own rules which actions to ask about at all.
   run folder. Codex takes its writable temp root from it: writes there run
   unasked, and the user's own `TMPDIR` is no longer writable (blocked by
   Codex's sandbox) (M3 open test).
-- **Open (contradicts this design): `/tmp` cannot be excluded per run.**
+- **Decided: Codex children may write to `/tmp` (accepted for v1).**
   codex-acp 2.6.0 sends its own `workspace-write` sandbox policy with
   `excludeSlashTmp: false` on every turn, which overrides
-  `sandbox_workspace_write.exclude_slash_tmp` in `CODEX_CONFIG`. A Codex
-  child can write to `/tmp` without asking. Options, not yet decided: accept
-  it; run Codex in `read-only` (every write is asked, and a denial ends the
-  turn); a Codex permission profile defined per run (untested); or a change
-  upstream in codex-acp.
+  `sandbox_workspace_write.exclude_slash_tmp` in `CODEX_CONFIG`, so `/tmp`
+  cannot be excluded per run (M3 open test). This is accepted because
+  worktrees and run folders never live under `/tmp`: a Codex child cannot
+  reach the repository or a sibling child through it. Asked upstream to
+  honour the setting:
+  [agentclientprotocol/codex-acp#766](https://github.com/agentclientprotocol/codex-acp/issues/766).
 - **Never put worktrees or run folders under `$TMPDIR` or `/tmp`.**
 - No harness uses the client's `fs/*` methods: do not implement a client-side
   file policy.
@@ -212,16 +213,17 @@ process-group kill does not reach them.
 - Tracking also widens through a process group, but only one whose leader
   (PID == PGID) is tracked. This keeps a tool's backgrounded child after its
   shell exits, without pulling in unrelated members of a shared group.
-- **Open (confirmed live, contradicts "no surviving process"): the detach
-  gap.** A process that detaches and is reparented between two samples, with
-  its group leader never seen, escapes tracking. M3's `ps`-free survival test
-  (`(sleep 30; touch late.txt) &`, then shutdown, then wait 40 s) hit it on
-  Claude: `late.txt` appeared after shutdown, the `sleep` was never in the
-  tracked set (11 processes tracked, none of them it), and Claude itself
-  exited cleanly. Codex and Antigravity left nothing (their tool runners end
-  the command's background children). So the tree kill does not guarantee
-  that nothing survives, which the `--mins` design (M4) relies on. Not yet
-  decided how to close it.
+- **The detach gap: decided, to build in M4.** A process that detaches and
+  is reparented between two samples, with its group leader never seen,
+  escapes tracking. M3's `ps`-free survival test (`(sleep 30; touch late.txt)
+  &`, then shutdown, then wait 40 s) hit it on Claude: `late.txt` appeared
+  after shutdown, the `sleep` was never in the tracked set, and Claude itself
+  exited cleanly. Codex and Antigravity left nothing.
+  **Decision:** every child gets a unique `REFRAKTAL_RUN` environment
+  variable. At shutdown Refraktal also kills, with the identity check, every
+  process of the current user whose environment carries this run's value,
+  whatever its parent or process group. Environment variables are inherited
+  by a detached process, so the sweep finds what lineage and groups miss.
 - Scrub the child's environment of the parent's session markers
   (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`).
 

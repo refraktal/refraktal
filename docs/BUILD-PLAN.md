@@ -105,9 +105,21 @@ script, with the run folder redacted.
   on `--mins`; reservation accounting (single child for now).
 - Exit code 2 on exhaustion.
 
+- Close the detach gap (`DESIGN.md`, Processes): give every child a unique
+  `REFRAKTAL_RUN` environment variable, and at shutdown also kill, with the
+  identity check, every process of the current user whose environment
+  carries this run's value, whatever its parent or process group.
+
 **Done when:** fake-agent tests cover each budget and the cancelled-turn
-accounting rule, and a live script shows `--mins` stopping a long tool turn on
-each harness with no surviving process.
+accounting rule (and a detached child found only by the sweep), and a live
+script shows `--mins` stopping a long tool turn on each harness with no
+surviving process.
+
+**Open tests at the end:**
+- macOS and Linux let a user read the environment of their own processes,
+  including ones that were reparented, with the method the sweep uses.
+- The `late.txt` survival test from M3 (`(sleep 30; touch late.txt) &`, then
+  shutdown, wait 40 s) leaves nothing behind on all three harnesses.
 
 ## M5. Routing
 
