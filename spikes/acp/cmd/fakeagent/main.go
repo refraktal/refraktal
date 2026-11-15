@@ -15,6 +15,9 @@
 //	           ignores stdin closing, to test the client's survivor check
 //	nomode     session/set_mode fails with -32602
 //	hang2      the second prompt hangs until session/cancel; others as default
+//	detach     as default, and at the prompt also starts a child in a process
+//	           group of its own, like the harnesses' tools; its PID goes to
+//	           detach.pid in the cwd
 //
 // If session/new carries _meta, it is written to meta.json in the cwd.
 //
@@ -30,6 +33,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -93,6 +97,13 @@ func prompt(id json.RawMessage, mode string) {
 	mu.Unlock()
 	if mode == "hang2" && n == 2 {
 		mode = "hang"
+	}
+	if mode == "detach" {
+		child := exec.Command("sleep", "30")
+		child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		child.Start()
+		os.WriteFile(filepath.Join(cwd, "detach.pid"), []byte(fmt.Sprint(child.Process.Pid)), 0o644)
+		time.Sleep(200 * time.Millisecond) // long enough for the client to see it
 	}
 	chunk("Hello")
 	switch mode {

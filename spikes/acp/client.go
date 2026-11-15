@@ -99,8 +99,15 @@ type Summary struct {
 	ProcsAfterCancel []Proc   `json:"procs_after_cancel"`             // process group 1 s after the cancel response (last cancel)
 	Survivors        []Proc   `json:"survivors"`                      // first survivor sample: still in the group after stdin closed and the leader was reaped
 	SurvivorSamples  []Sample `json:"survivor_samples"`               // every survivor sample, before the group kill
-	LeaderExited     bool     `json:"leader_exited"`                  // the spawned process exited on its own after stdin closed
-	ProcsError       string   `json:"procs_error,omitempty"`
+
+	// With --kill-tree: every descendant of the harness seen while it ran, in any
+	// process group; those still alive at shutdown and killed by PID; and any of
+	// those still alive 300 ms after the kill.
+	TreeTracked    []Proc `json:"tree_tracked"`
+	TreeKilled     []Proc `json:"tree_killed"`
+	TreeAliveAfter []Proc `json:"tree_alive_after_kill"`
+	LeaderExited   bool   `json:"leader_exited"` // the spawned process exited on its own after stdin closed
+	ProcsError     string `json:"procs_error,omitempty"`
 }
 
 type config struct {
@@ -112,6 +119,8 @@ type config struct {
 	steps                     []Step          // if set, replaces prompt/turns/limit; a cancelled step does not end the session
 	sessionMeta               json.RawMessage // if set, sent as _meta on session/new
 	survivorSamples           []time.Duration // when to list survivors after the leader exits (default 200 ms)
+	killTree                  bool            // track descendants by parent PID and kill them all at shutdown
+	pollEvery                 time.Duration   // how often to record descendants with killTree (default 500 ms)
 }
 
 type client struct {
@@ -123,11 +132,12 @@ type client struct {
 	nextID    int
 	dead      chan struct{}
 	spawned   time.Time
-	sentAt    time.Time   // zero until session/prompt is sent
-	pgid      int         // process group of the spawned harness
-	phase     string      // setup | turn | after
-	turn      int         // current turn, 1-based
-	lastOther map[int]int // per turn: seq of the last non-usage update seen during it
+	sentAt    time.Time    // zero until session/prompt is sent
+	pgid      int          // process group of the spawned harness (also its PID)
+	tracked   map[int]Proc // with killTree: descendants seen so far, by PID
+	phase     string       // setup | turn | after
+	turn      int          // current turn, 1-based
+	lastOther map[int]int  // per turn: seq of the last non-usage update seen during it
 	sum       Summary
 }
 
@@ -261,7 +271,9 @@ func run(cfg config, stdout, stderr io.Writer) (Summary, error) {
 	c.sum = Summary{Type: "summary", Harness: cfg.harness, Stage: "none", UpdateKinds: map[string]int{},
 		Refused: map[string]int{}, Usage: []Usage{}, FirstUsage: "none", FirstCost: "none",
 		TurnWallMs: []int64{}, TurnStops: []string{}, ProcsLive: []Proc{}, Survivors: []Proc{},
-		ProcsAtCancel: []Proc{}, ProcsAfterCancel: []Proc{}, SurvivorSamples: []Sample{}}
+		ProcsAtCancel: []Proc{}, ProcsAfterCancel: []Proc{}, SurvivorSamples: []Sample{},
+		TreeTracked: []Proc{}, TreeKilled: []Proc{}, TreeAliveAfter: []Proc{}}
+	c.tracked = map[int]Proc{}
 	err := c.drive(cfg, stderr)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -322,7 +334,27 @@ func (c *client) drive(cfg config, stderr io.Writer) error {
 	c.mu.Lock()
 	c.pgid = pgid
 	c.mu.Unlock()
+	stopPoll := make(chan struct{})
+	if cfg.killTree {
+		every := cmp.Or(cfg.pollEvery, 500*time.Millisecond)
+		go func() {
+			t := time.NewTicker(every)
+			defer t.Stop()
+			for {
+				c.pollTree()
+				select {
+				case <-stopPoll:
+					return
+				case <-t.C:
+				}
+			}
+		}()
+	}
 	defer func() {
+		if cfg.killTree {
+			close(stopPoll)
+			c.pollTree() // last look while the harness is still alive: an orphan's lineage is lost once its parent dies
+		}
 		// Close stdin and give the agent a moment to exit. Before the group kill,
 		// record what is still in the process group, so the run shows whether the
 		// kill was needed at all. A process that called setsid has left the group
@@ -367,6 +399,9 @@ func (c *client) drive(cfg config, stderr io.Writer) error {
 			}
 		}
 		syscall.Kill(-pgid, syscall.SIGKILL)
+		if cfg.killTree {
+			c.killTracked()
+		}
 		select {
 		case <-exited:
 		case <-time.After(5 * time.Second):
@@ -543,4 +578,108 @@ func groupProcs(pgid int) ([]Proc, error) {
 		procs = append(procs, Proc{PID: pid, Cmd: cmdline})
 	}
 	return procs, nil
+}
+
+type psEntry struct {
+	ppid      int
+	stat, cmd string
+}
+
+// psAll lists every process with its parent, state and command line. These ps
+// flags work on both macOS and Linux.
+func psAll() (map[int]psEntry, error) {
+	out, err := exec.Command("ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "stat=", "-o", "command=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("ps: %w", err)
+	}
+	all := map[int]psEntry{}
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 4 {
+			continue
+		}
+		pid, err1 := strconv.Atoi(f[0])
+		ppid, err2 := strconv.Atoi(f[1])
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		all[pid] = psEntry{ppid: ppid, stat: f[2], cmd: clip(strings.Join(f[3:], " "))}
+	}
+	return all, nil
+}
+
+func clip(s string) string {
+	if len(s) > 300 {
+		return s[:300] + "..."
+	}
+	return s
+}
+
+// pollTree records every current descendant of the harness, whatever its
+// process group.
+func (c *client) pollTree() {
+	all, err := psAll()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err != nil {
+		c.sum.ProcsError = err.Error()
+		return
+	}
+	children := map[int][]int{}
+	for pid, e := range all {
+		children[e.ppid] = append(children[e.ppid], pid)
+	}
+	queue := []int{c.pgid}
+	for len(queue) > 0 {
+		pid := queue[0]
+		queue = queue[1:]
+		for _, kid := range children[pid] {
+			if _, seen := c.tracked[kid]; !seen && !strings.HasPrefix(all[kid].stat, "Z") {
+				c.tracked[kid] = Proc{PID: kid, Cmd: all[kid].cmd}
+			}
+			queue = append(queue, kid)
+		}
+	}
+}
+
+// killTracked kills every tracked descendant that is still alive. A process is
+// only killed if its command line still matches what was recorded, so a PID
+// reused by an unrelated process is left alone.
+func (c *client) killTracked() {
+	c.mu.Lock()
+	tracked := make([]Proc, 0, len(c.tracked))
+	for _, p := range c.tracked {
+		tracked = append(tracked, p)
+	}
+	c.mu.Unlock()
+	slices.SortFunc(tracked, func(a, b Proc) int { return cmp.Compare(a.PID, b.PID) })
+	all, err := psAll()
+	var killed []Proc
+	if err == nil {
+		for _, p := range tracked {
+			if e, ok := all[p.PID]; ok && !strings.HasPrefix(e.stat, "Z") && e.cmd == p.Cmd {
+				syscall.Kill(p.PID, syscall.SIGKILL)
+				killed = append(killed, p)
+			}
+		}
+	}
+	time.Sleep(300 * time.Millisecond)
+	alive := []Proc{}
+	if after, err2 := psAll(); err2 == nil {
+		for _, p := range killed {
+			if e, ok := after[p.PID]; ok && !strings.HasPrefix(e.stat, "Z") && e.cmd == p.Cmd {
+				alive = append(alive, p)
+			}
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sum.TreeTracked = tracked
+	if killed != nil {
+		c.sum.TreeKilled = killed
+	}
+	c.sum.TreeAliveAfter = alive
+	if err != nil {
+		c.sum.ProcsError = err.Error()
+	}
 }

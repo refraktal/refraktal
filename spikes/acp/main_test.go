@@ -57,7 +57,8 @@ func driveCfg(t *testing.T, mode string, extra config) (Summary, []line, string,
 	cfg := config{harness: "fake", cmd: fakeBin + " " + mode, cwd: cwd, prompt: "hi",
 		limit: extra.limit, grace: 300 * time.Millisecond, linger: 150 * time.Millisecond,
 		handshake: extra.handshake, mode: extra.mode, turns: extra.turns,
-		steps: extra.steps, sessionMeta: extra.sessionMeta, survivorSamples: extra.survivorSamples}
+		steps: extra.steps, sessionMeta: extra.sessionMeta, survivorSamples: extra.survivorSamples,
+		killTree: extra.killTree, pollEvery: extra.pollEvery}
 	if cfg.limit == 0 {
 		cfg.limit = 5 * time.Second
 	}
@@ -416,5 +417,44 @@ func TestSurvivorSamples(t *testing.T) {
 		if !found {
 			t.Fatalf("child %d missing from sample at %d ms", pid, smp.AtMs)
 		}
+	}
+}
+
+func TestWithoutTreeKillADetachedToolSurvives(t *testing.T) {
+	_, _, cwd, err := driveCfg(t, "detach", config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := strconv.Atoi(readFile(cwd, "detach.pid"))
+	if pid == 0 {
+		t.Fatal("no detach.pid")
+	}
+	defer syscall.Kill(pid, syscall.SIGKILL)
+	if !running(pid) {
+		t.Fatalf("expected the detached child %d to survive a process-group kill", pid)
+	}
+}
+
+func TestTreeKillCatchesADetachedTool(t *testing.T) {
+	sum, _, cwd, err := driveCfg(t, "detach", config{killTree: true, pollEvery: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := strconv.Atoi(readFile(cwd, "detach.pid"))
+	defer syscall.Kill(pid, syscall.SIGKILL)
+	time.Sleep(100 * time.Millisecond)
+	if pid == 0 || running(pid) {
+		t.Fatalf("detached child %d still running (procs_error %q)", pid, sum.ProcsError)
+	}
+	in := func(list []Proc) bool {
+		for _, p := range list {
+			if p.PID == pid {
+				return true
+			}
+		}
+		return false
+	}
+	if !in(sum.TreeTracked) || !in(sum.TreeKilled) || len(sum.TreeAliveAfter) != 0 {
+		t.Fatalf("tracked=%v killed=%v alive=%v", sum.TreeTracked, sum.TreeKilled, sum.TreeAliveAfter)
 	}
 }

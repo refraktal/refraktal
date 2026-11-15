@@ -90,6 +90,8 @@ func main() {
 		}
 		return nil
 	})
+	flag.BoolVar(&cfg.killTree, "kill-tree", false, "track the harness's descendants by parent PID, in any process group, and kill them all at shutdown")
+	flag.DurationVar(&cfg.pollEvery, "poll-every", 500*time.Millisecond, "how often to record descendants with --kill-tree")
 	flag.Parse()
 	cfg.limit = time.Duration(mins * float64(time.Minute))
 	for i := range cfg.steps {
