@@ -239,16 +239,29 @@ process-group kill does not reach them.
     process, the ID may name an unrelated session and nothing is swept.
   - **Known limit:** a process that calls `setsid()` itself, as
     pseudo-terminal launchers do, leaves the session and escapes.
-  - **Open (M4 open test, contradicts "nothing survives"): Claude escapes
-    the session.** Claude's Bash tool starts each command's shell as the
-    leader of a new session (seen live: the tool shell's session ID equals
-    its own PID, while the bundled `claude` and the adapter are in the
-    harness's session). So whatever a Claude tool command backgrounds is
-    outside the harness's session, and the `late.txt` test still left
-    `late.txt` behind on Claude (the `sleep` was not tracked, the tree kill
-    did not see it, the sweep found nothing). Codex and Antigravity left
-    nothing: their tool runners end the command's background children.
-    Not decided how to close it.
+  - **Claude's tool commands: recorded sessions.** Claude's Bash tool starts
+    each command's shell as the leader of a new session (seen live: the tool
+    shell's session ID equals its own PID), so a command's background
+    children are outside the harness's session. Claude calls
+    `CLAUDE_CODE_SHELL_PREFIX`, if set, with the whole command string as one
+    argument, from inside that new session. Refraktal sets it per run, in the
+    environment only (never a settings file), to its own binary in a helper
+    mode selected by `REFRAKTAL_HELPER=shell-prefix` (not a command or a
+    flag). The helper appends the session's leader (PID, start time, command
+    line) to the run's sessions file, removes its own variables from the
+    environment, and execs the command with Claude's shell (or chains to a
+    prefix the user had set). At shutdown, after the harness session, every
+    recorded session is swept with the same identity check and reused-ID
+    guard; dead runs' recorded sessions are swept from the live registry.
+    M4 open test: `late.txt` left nothing on Claude (2 escaped processes
+    swept). Limits: a Claude settings file that sets
+    `CLAUDE_CODE_SHELL_PREFIX` itself would replace Refraktal's, and a library
+    user must call `proc.MaybeShellPrefix()` first in `main`, since the helper
+    is the running binary.
+  - Hooks also run through the prefix, so their sessions are swept too. A
+    side finding: children load the user's Claude settings (the adapter asks
+    for user, project and local setting sources), so the user's own Claude
+    hooks run inside children. `strictMcpConfig` does not stop hooks.
   - Why not the environment: the first plan tagged children with
     `REFRAKTAL_RUN` and swept by environment. On macOS 27 a process can read
     only its own environment (M4 open test: another process of the same user

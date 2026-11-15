@@ -40,6 +40,10 @@ type Spec struct {
 	// and removed after Shutdown kills everything.
 	LiveDir string
 	Labels  map[string]string // stored in the live record, such as the run ID and harness
+
+	// SessionsFile, if set, is where the shell-prefix helper records the
+	// sessions the child's tool commands run in; Shutdown sweeps them too.
+	SessionsFile string
 }
 
 // Child is a running harness process in a process group of its own, with its
@@ -57,7 +61,8 @@ type Child struct {
 	once   sync.Once
 	report ShutdownReport
 
-	leader Proc // the child as listed just after it started: the session leader
+	leader   Proc   // the child as listed just after it started: the session leader
+	sessions string // Spec.SessionsFile
 
 	record     string // live record path, or ""
 	recordBase Record
@@ -105,6 +110,7 @@ func Start(s Spec) (*Child, error) {
 			return true
 		}
 	})
+	c.sessions = s.SessionsFile
 	c.leader = Proc{PID: c.PID()}
 	if all, err := List(); err == nil && all[c.PID()].PID == c.PID() {
 		c.leader = all[c.PID()]
@@ -146,7 +152,7 @@ func (c *Child) startRecord(dir string, labels map[string]string) {
 		return
 	}
 	self := os.Getpid()
-	c.recordBase = Record{Owner: all[self], Child: c.leader, Session: true, Labels: labels}
+	c.recordBase = Record{Owner: all[self], Child: c.leader, Session: true, SessionsFile: c.sessions, Labels: labels}
 	c.record = filepath.Join(dir, fmt.Sprintf("%d-%d.json", self, c.PID()))
 	c.writeRecord()
 }
@@ -173,7 +179,7 @@ type ShutdownReport struct {
 	ExitedOnItsOwn bool       `json:"exited_on_its_own"` // exited within the grace period after stdin closed
 	Tracked        []Proc     `json:"tracked"`           // every descendant seen while it ran
 	Kill           KillReport `json:"kill"`              // the identity-checked kill of the child and its descendants
-	Swept          KillReport `json:"swept"`             // processes still in the child's session afterwards, killed by the session sweep
+	Swept          KillReport `json:"swept"`             // processes still in the child's session, or in a session its tool commands recorded, killed by the session sweep
 	Err            string     `json:"error,omitempty"`   // listing processes failed at some point
 }
 
@@ -218,6 +224,16 @@ func (c *Child) shutdown(grace time.Duration) ShutdownReport {
 	swept, serr := SweepSession(c.leader)
 	if err == nil {
 		err = serr
+	}
+	if c.sessions != "" {
+		more, merr := sweepRecorded(c.sessions)
+		swept.Killed = append(swept.Killed, more.Killed...)
+		swept.Gone = append(swept.Gone, more.Gone...)
+		swept.Changed = append(swept.Changed, more.Changed...)
+		swept.Alive = append(swept.Alive, more.Alive...)
+		if err == nil {
+			err = merr
+		}
 	}
 	select {
 	case <-c.exited:

@@ -17,11 +17,12 @@ import (
 
 // Record is the content of a live record.
 type Record struct {
-	Owner   Proc              `json:"owner"`   // the Refraktal process that started the child
-	Child   Proc              `json:"child"`   // the harness process itself
-	Session bool              `json:"session"` // the child led a session of its own: sweep it
-	Tracked []Proc            `json:"tracked"` // its descendants seen so far
-	Labels  map[string]string `json:"labels,omitempty"`
+	Owner        Proc              `json:"owner"`                   // the Refraktal process that started the child
+	Child        Proc              `json:"child"`                   // the harness process itself
+	Session      bool              `json:"session"`                 // the child led a session of its own: sweep it
+	SessionsFile string            `json:"sessions_file,omitempty"` // sessions its tool commands ran in (shell-prefix helper)
+	Tracked      []Proc            `json:"tracked"`                 // its descendants seen so far
+	Labels       map[string]string `json:"labels,omitempty"`
 }
 
 // DefaultLiveDir is os.UserConfigDir()/refraktal/live.
@@ -102,6 +103,15 @@ func CleanLeftovers(dir string) (CleanupReport, error) {
 		if rec.Session {
 			sr, err := SweepSession(rec.Child)
 			if err != nil && !errors.Is(err, ErrSessionReused) {
+				r.Errors = append(r.Errors, fmt.Sprintf("%s: %v", e.Name(), err))
+			}
+			r.Kill.Killed = append(r.Kill.Killed, sr.Killed...)
+			r.Kill.Alive = append(r.Kill.Alive, sr.Alive...)
+			kr.Alive = append(kr.Alive, sr.Alive...)
+		}
+		if rec.SessionsFile != "" {
+			sr, err := sweepRecorded(rec.SessionsFile)
+			if err != nil {
 				r.Errors = append(r.Errors, fmt.Sprintf("%s: %v", e.Name(), err))
 			}
 			r.Kill.Killed = append(r.Kill.Killed, sr.Killed...)

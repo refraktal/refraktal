@@ -15,6 +15,7 @@ import (
 
 	"refraktal.dev/refraktal"
 	"refraktal.dev/refraktal/internal/budget"
+	"refraktal.dev/refraktal/internal/proc"
 )
 
 const usage = `usage: refraktal <command> [flags]        task comes from the arg, stdin, or both
@@ -30,6 +31,7 @@ const usage = `usage: refraktal <command> [flags]        task comes from the arg
 `
 
 func main() {
+	proc.MaybeShellPrefix() // when started as a harness's shell prefix, never returns
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	os.Exit(run(ctx, os.Args[1:], os.Stdout, os.Stderr))

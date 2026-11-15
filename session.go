@@ -68,8 +68,23 @@ func openSession(ctx context.Context, sp sessionSpec) (*session, error) {
 		return s, &openError{StatusError, err}
 	}
 	defer stderr.Close() // the child holds its own copy of the descriptor
-	s.child, err = proc.Start(proc.Spec{Argv: s.launch.Argv, Env: append(append([]string{}, s.launch.Env...), sp.env...), Dir: sp.cwd, Stderr: stderr,
-		LiveDir: sp.liveDir, Labels: sp.labels})
+	env := append(append([]string{}, s.launch.Env...), sp.env...)
+	var sessions string
+	if v := s.launch.ShellPrefixVar; v != "" {
+		// The harness's tool commands run in sessions of their own. Route each
+		// one through this binary's shell-prefix helper, which records the
+		// session for the shutdown sweep. Environment only: no settings file
+		// is touched. A prefix the user already set is chained.
+		if exe, err := os.Executable(); err == nil {
+			sessions = filepath.Join(sp.scratch, "sessions")
+			env = append(env, v+"="+exe, proc.HelperEnv+"=shell-prefix", proc.SessionsEnv+"="+sessions)
+			if orig := os.Getenv(v); orig != "" {
+				env = append(env, proc.NextEnv+"="+orig)
+			}
+		}
+	}
+	s.child, err = proc.Start(proc.Spec{Argv: s.launch.Argv, Env: env, Dir: sp.cwd, Stderr: stderr,
+		LiveDir: sp.liveDir, Labels: sp.labels, SessionsFile: sessions})
 	if err != nil {
 		return s, &openError{StatusUnavailable, err}
 	}

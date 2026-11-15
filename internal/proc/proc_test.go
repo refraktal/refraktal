@@ -20,6 +20,7 @@ const helperEnv = "PROC_TEST_HELPER"
 // TestMain lets the test binary act as a child process: with PROC_TEST_HELPER
 // set, it runs that helper instead of the tests.
 func TestMain(m *testing.M) {
+	MaybeShellPrefix()
 	switch os.Getenv(helperEnv) {
 	case "":
 		os.Exit(m.Run())
@@ -56,6 +57,15 @@ func TestMain(m *testing.M) {
 			os.Exit(2)
 		}
 		fmt.Println(kid.Process.Pid)
+	case "prefixed": // like Claude: run a tool command in a new session, through the shell prefix in PREFIX
+		sh := exec.Command("sh", "-c", `"$PREFIX" 'sleep 30 >/dev/null 2>&1 & echo $!'`)
+		sh.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		sh.Env = append(os.Environ(), HelperEnv+"=shell-prefix") // as Claude passes its environment to the prefix
+		sh.Stdout = os.Stdout
+		if sh.Run() != nil {
+			os.Exit(2)
+		}
+		io.Copy(io.Discard, os.Stdin)
 	case "deaf": // ignore stdin closing
 		time.Sleep(time.Hour)
 	case "env":

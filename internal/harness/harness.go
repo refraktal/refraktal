@@ -51,6 +51,9 @@ type Launch struct {
 	Env  []string
 	Meta json.RawMessage // sent as _meta on session/new
 	MCP  string          // the isolation state in effect: isolated or inherit
+	// ShellPrefixVar names the variable the harness calls to wrap each shell
+	// command (Claude: CLAUDE_CODE_SHELL_PREFIX), or "" if it has none.
+	ShellPrefixVar string
 
 	Adapter          string // pinned adapter package@version, or "" for a native ACP harness
 	AdapterInstalled bool   // the adapter was installed into the cache just now
@@ -133,6 +136,7 @@ func (a *adapted) Prepare(ctx context.Context, o Options) (Launch, error) {
 // strictMcpConfig option. Project settings (CLAUDE.md, .claude/settings.json)
 // still load: the adapter asks for user, project and local setting sources.
 func isolateClaude(_ context.Context, o Options, _ string, l *Launch) error {
+	l.ShellPrefixVar = "CLAUDE_CODE_SHELL_PREFIX"
 	if !o.inherit() {
 		l.Meta = json.RawMessage(`{"claudeCode":{"options":{"strictMcpConfig":true}}}`)
 	}

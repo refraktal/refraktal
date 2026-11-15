@@ -109,6 +109,9 @@ script, with the run folder redacted.
   leader of a new session, and at shutdown Refraktal also kills, with the
   identity check, every process of the current user still in that session.
   Children keep `REFRAKTAL_RUN` in their environment as a tag for logs only.
+- Claude's tool commands run in sessions of their own: route them through
+  `CLAUDE_CODE_SHELL_PREFIX` set to Refraktal's shell-prefix helper, which
+  records each session for the sweep (decided after the M4 `late.txt` test).
 
 **Done when:** fake-agent tests cover each budget and the cancelled-turn
 accounting rule (and a detached child found only by the sweep), and a live
