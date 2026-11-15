@@ -144,3 +144,13 @@ func TestNewRunRefusesSymlinks(t *testing.T) {
 		}
 	}
 }
+
+// Hardening 3. A folder that does not exist yet under a temp folder is
+// refused too: the nearest existing parent is resolved, then the rest added.
+func TestCheckNotTempRefusesAFolderNotYetCreated(t *testing.T) {
+	for _, p := range []string{filepath.Join(os.TempDir(), "refraktal-not-yet", "worktrees"), "/tmp/refraktal-not-yet/x"} {
+		if err := CheckNotTemp(p); err == nil {
+			t.Errorf("%s was accepted", p)
+		}
+	}
+}

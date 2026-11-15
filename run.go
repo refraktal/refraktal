@@ -271,6 +271,13 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 			return res, err
 		}
 	}
+	// Durable events carry an error's code and digest only; harness error
+	// text can hold account details, so the raw text goes to the gitignored
+	// stderr capture beside the harness's own.
+	errEvent := func(code, raw string) map[string]any {
+		runlog.AppendRaw(filepath.Join(scratch, "stderr"), code, raw)
+		return runlog.ErrorField(code, raw)
+	}
 	pol := policy.Policy{Worktree: wt.Dir}
 	var mu sync.Mutex
 	var reply strings.Builder
@@ -316,7 +323,11 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		st := ledger.Settle(grant, false)
 		res.Settlement, res.Budget = &st, ledger.Summary()
 		wt.Remove(context.Background())
-		log.Event("run_end", map[string]any{"outcome": res.Outcome, "error": res.Error, "budget": res.Budget})
+		code := statusOf(err)
+		if res.Outcome == RunExhausted {
+			code = RunExhausted
+		}
+		log.Event("run_end", map[string]any{"outcome": res.Outcome, "error": errEvent(code, res.Error), "budget": res.Budget})
 		return res, nil
 	}
 
@@ -325,7 +336,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		wt.Remove(context.Background())
 		ledger.Settle(grant, false)
 		res.Outcome, res.Error, res.Budget = RunExhausted, err.Error(), ledger.Summary()
-		log.Event("run_end", map[string]any{"outcome": res.Outcome, "error": res.Error})
+		log.Event("run_end", map[string]any{"outcome": res.Outcome, "error": errEvent(RunExhausted, res.Error)})
 		return res, nil
 	}
 	tctx, cancel := context.WithDeadline(ctx, grant.Deadline)
@@ -354,7 +365,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	mu.Unlock()
 	res.StopReason, res.Usage, res.Cost = turn.StopReason, turn.Usage, turn.Cost
 	log.Event("turn", map[string]any{"stop_reason": turn.StopReason, "cancelled": turn.Cancelled, "wall_ms": turn.Wall.Milliseconds(),
-		"usage": turn.Usage, "cost": turn.Cost, "last_used": turn.LastUsed, "error": errString(perr),
+		"usage": turn.Usage, "cost": turn.Cost, "last_used": turn.LastUsed, "error": errEvent(turnErrorCode(perr), errString(perr)),
 		"left_running": len(sr.Kill.Alive), "exited_on_its_own": sr.ExitedOnItsOwn})
 
 	r, cerr2 := wt.Collect(context.Background(), "refraktal "+run.ID+": "+firstLine(o.Task))
@@ -390,7 +401,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 	if res.Worktree == "" {
 		if err := wt.Remove(context.Background()); err != nil {
-			log.Event("worktree_remove_failed", map[string]any{"error": err.Error()})
+			log.Event("worktree_remove_failed", map[string]any{"error": errEvent("worktree_remove_failed", err.Error())})
 		}
 	} else if len(r.Files) == 0 && !o.NoApply {
 		// Nothing to keep: a failed or timed-out turn that changed nothing.
@@ -398,7 +409,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		res.Branch, res.Worktree = "", ""
 	}
 	log.Event("run_end", map[string]any{"outcome": res.Outcome, "files": res.Files, "branch": res.Branch,
-		"allowed": res.Allowed, "denied": res.Denied, "error": res.Error, "budget": res.Budget, "settlement": res.Settlement,
+		"allowed": res.Allowed, "denied": res.Denied, "error": errEvent(res.Outcome, res.Error), "budget": res.Budget, "settlement": res.Settlement,
 		"swept": len(sr.Swept.Killed)})
 	return res, nil
 }
@@ -465,4 +476,19 @@ func cmpOr(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// turnErrorCode is the structured code for a failed prompt.
+func turnErrorCode(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, acp.ErrCancelIgnored):
+		return "cancel_ignored"
+	case errors.Is(err, acp.ErrFrameTooLarge):
+		return "frame_too_large"
+	case errors.Is(err, acp.ErrAgentExited):
+		return "agent_exited"
+	}
+	return "prompt_failed"
 }

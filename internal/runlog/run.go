@@ -122,9 +122,20 @@ func CheckNotTemp(path string) error {
 	return nil
 }
 
+// resolve follows symlinks in the nearest existing parent of p and appends
+// the rest, so a folder not created yet resolves as it will once created
+// (on macOS $TMPDIR lives under /var, a link to /private/var).
 func resolve(p string) string {
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		return r
+	dir, rest := filepath.Clean(p), ""
+	for {
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(r, rest)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return filepath.Clean(p)
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+		dir = parent
 	}
-	return filepath.Clean(p)
 }

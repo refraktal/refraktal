@@ -35,7 +35,14 @@ const (
 	codeInternal       = -32603
 )
 
+// MaxFrame is the largest message the client reads from an agent. A
+// harness that writes more without a newline gets its connection closed.
+const MaxFrame = 16 << 20
+
 var (
+	// ErrFrameTooLarge means the agent wrote more than MaxFrame bytes without
+	// ending the message; the connection was closed.
+	ErrFrameTooLarge = errors.New("acp: message from the agent exceeds the maximum frame size")
 	// ErrAgentExited means the agent closed its stdout before responding.
 	ErrAgentExited = errors.New("acp: agent exited")
 	// ErrCancelIgnored means the agent did not answer session/prompt within
@@ -83,6 +90,7 @@ type Client struct {
 	nextID  int
 	pending map[string]chan message
 	turns   map[string]*turnState // active turn by session ID
+	readErr error                 // why reading stopped, if not a plain EOF
 	models  map[string]string     // current model by session ID
 	done    chan struct{}
 }
@@ -201,26 +209,67 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 	if err != nil {
 		return nil, err
 	}
+	var m message
 	select {
-	case m := <-ch:
-		res, err := result(m)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", method, err)
-		}
-		return res, nil
+	case m = <-ch:
 	case <-c.done:
-		return nil, fmt.Errorf("%s: %w", method, ErrAgentExited)
+		select { // a response that arrived with the EOF wins
+		case m = <-ch:
+		default:
+			return nil, fmt.Errorf("%s: %w", method, c.exitErr())
+		}
 	case <-ctx.Done():
 		c.forget(id)
 		return nil, fmt.Errorf("%s: %w", method, ctx.Err())
+	}
+	res, err := result(m)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", method, err)
+	}
+	return res, nil
+}
+
+// exitErr is the error for a call that saw the agent go: ErrFrameTooLarge if
+// reading stopped for that, else ErrAgentExited.
+func (c *Client) exitErr() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.readErr != nil {
+		return c.readErr
+	}
+	return ErrAgentExited
+}
+
+// readFrame reads one newline-ended message of at most MaxFrame bytes.
+func readFrame(br *bufio.Reader) ([]byte, error) {
+	var buf []byte
+	for {
+		chunk, err := br.ReadSlice('\n')
+		buf = append(buf, chunk...)
+		if len(buf) > MaxFrame {
+			return nil, ErrFrameTooLarge
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		return buf, err
 	}
 }
 
 func (c *Client) readLoop(r io.Reader) {
 	defer close(c.done)
-	br := bufio.NewReaderSize(r, 1<<20)
+	br := bufio.NewReaderSize(r, 64<<10)
 	for {
-		line, err := br.ReadBytes('\n')
+		line, err := readFrame(br)
+		if errors.Is(err, ErrFrameTooLarge) {
+			c.mu.Lock()
+			c.readErr = err
+			c.mu.Unlock()
+			if cl, ok := r.(io.Closer); ok {
+				cl.Close() // stop reading this agent; shutdown kills it
+			}
+			return
+		}
 		var m message
 		if len(line) > 1 && json.Unmarshal(line, &m) == nil {
 			switch {
@@ -409,7 +458,11 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string) (Turn, erro
 	select {
 	case m = <-ch:
 	case <-c.done:
-		return finish(), fmt.Errorf("session/prompt: %w", ErrAgentExited)
+		select { // a response that arrived with the EOF wins
+		case m = <-ch:
+		default:
+			return finish(), fmt.Errorf("session/prompt: %w", c.exitErr())
+		}
 	case <-ctx.Done():
 		c.mu.Lock()
 		ts.turn.Cancelled = true
@@ -420,7 +473,11 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string) (Turn, erro
 		select {
 		case m = <-ch:
 		case <-c.done:
-			return finish(), fmt.Errorf("session/prompt: %w", ErrAgentExited)
+			select {
+			case m = <-ch:
+			default:
+				return finish(), fmt.Errorf("session/prompt: %w", c.exitErr())
+			}
 		case <-time.After(c.opts.CancelGrace):
 			c.forget(id)
 			return finish(), ErrCancelIgnored

@@ -319,3 +319,16 @@ func TestCancelDoesNotBlockOnAHarnessThatStoppedReading(t *testing.T) {
 		t.Fatal("Prompt blocked on a harness that stopped reading")
 	}
 }
+
+// Hardening 1. A harness that writes past MaxFrame without a newline gets its
+// connection closed with a clear error, instead of growing the heap.
+func TestOversizedFrameClosesTheConnection(t *testing.T) {
+	r := start(t, "bigframe", acp.Options{CancelGrace: 200 * time.Millisecond})
+	s := r.session(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, err := r.client.Prompt(ctx, s.ID, "go")
+	if !errors.Is(err, acp.ErrFrameTooLarge) {
+		t.Fatalf("want ErrFrameTooLarge, got %v", err)
+	}
+}
