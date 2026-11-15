@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 	"time"
 
 	"refraktal.dev/refraktal/internal/acp"
@@ -76,6 +77,9 @@ func openSession(ctx context.Context, sp sessionSpec) (*session, error) {
 	env := append(append([]string{}, s.launch.Env...), sp.env...)
 	var sessions string
 	if v := s.launch.ShellPrefixVar; v != "" && sp.prefixExe != "" {
+		if err := checkShellPrefix(sp.prefixExe); err != nil {
+			return s, &openError{StatusUnavailable, err}
+		}
 		// The harness's tool commands run in sessions of their own. Route each
 		// one through the shell-prefix helper, which records the session for
 		// the shutdown sweep. Environment only: no settings file is touched. A
@@ -146,3 +150,19 @@ func statusOf(err error) string {
 }
 
 func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
+
+// checkShellPrefix makes sure the shell prefix is an executable file and,
+// inside a test binary, the test binary itself: its TestMain must call
+// proc.MaybeShellPrefix first. Any other program would be run by the harness
+// for every tool command.
+func checkShellPrefix(exe string) error {
+	if fi, err := os.Stat(exe); err != nil || fi.IsDir() || fi.Mode()&0o111 == 0 || !filepath.IsAbs(exe) {
+		return fmt.Errorf("shell prefix %q is not an absolute path to an executable", exe)
+	}
+	if testing.Testing() {
+		if self, err := os.Executable(); err != nil || !proc.SameFile(exe, self) {
+			return fmt.Errorf("shell prefix %q refused inside a test: only the test binary, whose TestMain calls proc.MaybeShellPrefix, may be used", exe)
+		}
+	}
+	return nil
+}

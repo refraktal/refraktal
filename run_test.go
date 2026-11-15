@@ -281,11 +281,39 @@ func TestShellPrefixIsOptIn(t *testing.T) {
 	r := newRunRig(t)
 	h := fake{name: "claude", agentMode: "turn", prefixVar: "CLAUDE_CODE_SHELL_PREFIX"}
 	r.run(t, h, nil)
-	if b, _ := os.ReadFile(r.prompts + ".env"); strings.TrimSpace(string(b)) != "prefix= helper=" {
+	if b, _ := os.ReadFile(r.prompts + ".env"); !strings.HasPrefix(strings.TrimSpace(string(b)), "prefix= helper= ") {
 		t.Fatalf("without ShellPrefix the harness got %q", b)
 	}
-	r.run(t, h, func(o *RunOptions) { o.ShellPrefix = "/opt/refraktal" })
-	if b, _ := os.ReadFile(r.prompts + ".env"); strings.TrimSpace(string(b)) != "prefix=/opt/refraktal helper=shell-prefix" {
+	self, _ := os.Executable() // its TestMain calls proc.MaybeShellPrefix first
+	r.run(t, h, func(o *RunOptions) { o.ShellPrefix = self })
+	if b, _ := os.ReadFile(r.prompts + ".env"); !strings.HasPrefix(strings.TrimSpace(string(b)), "prefix="+self+" helper=shell-prefix") {
 		t.Fatalf("with ShellPrefix the harness got %q", b)
+	}
+}
+
+// B. In a test, the shell prefix may only be the test binary itself (whose
+// TestMain calls proc.MaybeShellPrefix first), never another program.
+func TestForeignShellPrefixIsRefusedInATest(t *testing.T) {
+	r := newRunRig(t)
+	res := r.run(t, fake{name: "claude", agentMode: "turn", prefixVar: "CLAUDE_CODE_SHELL_PREFIX"},
+		func(o *RunOptions) { o.ShellPrefix = "/bin/echo" })
+	if res.Outcome != RunUnusable || !strings.Contains(res.Error, "shell prefix") || exists(r.prompts) {
+		t.Fatalf("%+v", res)
+	}
+}
+
+// C. A hard nesting guard, independent of budgets: a run refuses to start
+// past depth + 1 levels of REFRAKTAL_NEST, and its children get one more.
+func TestNestingGuard(t *testing.T) {
+	r := newRunRig(t)
+	t.Setenv("REFRAKTAL_NEST", "4") // depth 2 allows up to 3
+	res := r.run(t, fake{name: "claude", agentMode: "turn"}, nil)
+	if res.Outcome != RunExhausted || res.ExitCode() != ExitBudget || !strings.Contains(res.Error, "REFRAKTAL_NEST") || exists(r.prompts) {
+		t.Fatalf("%+v", res)
+	}
+	t.Setenv("REFRAKTAL_NEST", "1")
+	r.run(t, fake{name: "claude", agentMode: "turn"}, nil)
+	if b, _ := os.ReadFile(r.prompts + ".env"); !strings.Contains(string(b), "nest=2") {
+		t.Fatalf("child env: %q", b)
 	}
 }

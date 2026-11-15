@@ -3,6 +3,7 @@ package proc
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -225,3 +226,33 @@ func TestARecordAppendedLateIsSwept(t *testing.T) {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// A. go test must never start a real harness: inside a test binary, Start
+// refuses any executable but the test binary itself (fakes and helpers
+// re-run it), unless REFRAKTAL_LIVE=1.
+func TestStartRefusesARealExecutableInATest(t *testing.T) {
+	t.Setenv("REFRAKTAL_LIVE", "")
+	if c, err := Start(Spec{Argv: []string{"sleep", "5"}}); err == nil || !strings.Contains(err.Error(), "REFRAKTAL_LIVE") {
+		if c != nil {
+			c.Shutdown(time.Second)
+		}
+		t.Fatalf("a real executable started inside a test: %v", err)
+	}
+	t.Setenv("REFRAKTAL_LIVE", "1")
+	c, err := Start(Spec{Argv: []string{"sleep", "5"}})
+	if err != nil {
+		t.Fatalf("with REFRAKTAL_LIVE=1: %v", err)
+	}
+	c.Shutdown(100 * time.Millisecond)
+}
+
+// C. Every child's REFRAKTAL_NEST is one more than its parent's.
+func TestChildNestIsIncremented(t *testing.T) {
+	t.Setenv("REFRAKTAL_NEST", "2")
+	c := helper(t, "env")
+	out, _ := io.ReadAll(c.Stdout)
+	c.Shutdown(time.Second)
+	if !slices.Contains(strings.Split(string(out), "\n"), "REFRAKTAL_NEST=3") {
+		t.Fatal("child did not get REFRAKTAL_NEST=3")
+	}
+}

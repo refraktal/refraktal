@@ -176,6 +176,11 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		return res, err
 	}
 	hcfg := cfg.For(h.Name())
+	if n := proc.Nest(); n > o.Budget.Depth+1 {
+		res.Outcome = RunExhausted
+		res.Error = fmt.Sprintf("refusing to start: nested %d levels deep (%s), past --depth %d + 1", n, proc.NestEnv, o.Budget.Depth)
+		return res, nil
+	}
 	ledger, err := budget.New(*o.Budget, nil)
 	if err != nil {
 		var ex *budget.Exhausted

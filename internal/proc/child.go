@@ -9,9 +9,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"testing"
 	"time"
 )
 
@@ -96,9 +98,16 @@ func Start(s Spec) (*Child, error) {
 		inW.Close()
 		return nil, err
 	}
+	if err := checkTestLaunch(s.Argv[0]); err != nil {
+		inR.Close()
+		inW.Close()
+		outR.Close()
+		outW.Close()
+		return nil, err
+	}
 	cmd := exec.Command(s.Argv[0], s.Argv[1:]...)
 	cmd.Dir, cmd.Stdin, cmd.Stdout, cmd.Stderr = s.Dir, inR, outW, s.Stderr
-	cmd.Env = append(ScrubEnv(os.Environ()), s.Env...)
+	cmd.Env = append(append(ScrubEnv(os.Environ()), s.Env...), NestEnv+"="+strconv.Itoa(Nest()+1))
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // a session of its own, and so a process group of its own
 	cmd.WaitDelay = 2 * time.Second                      // a descendant holding stderr open must not hang Wait
 	err = cmd.Start()
@@ -298,6 +307,48 @@ func (c *Child) sweepSessions() (KillReport, error) {
 		pass()
 	}
 	return r, firstErr
+}
+
+// NestEnv counts how many Refraktal-started processes a process descends
+// from. Every child gets one more than its parent; Run and Doctor refuse to
+// start past a limit, so no recursion can fan out without bound, whatever
+// the budgets say.
+const NestEnv = "REFRAKTAL_NEST"
+
+// Nest is this process's nesting level (0 if unset or invalid).
+func Nest() int {
+	n, err := strconv.Atoi(os.Getenv(NestEnv))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// LiveEnv, set to 1, lets a test binary start real executables. Only the live
+// scripts set it; without it, go test can never start a real harness.
+const LiveEnv = "REFRAKTAL_LIVE"
+
+// checkTestLaunch refuses, inside a test binary, any executable other than
+// the test binary itself (which is how fakes and helpers run), unless
+// REFRAKTAL_LIVE=1.
+func checkTestLaunch(argv0 string) error {
+	if !testing.Testing() || os.Getenv(LiveEnv) == "1" {
+		return nil
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("proc: inside a test, cannot find the test binary: %w", err)
+	}
+	path := argv0
+	if !filepath.IsAbs(path) {
+		if p, err := exec.LookPath(argv0); err == nil {
+			path = p
+		}
+	}
+	if !SameFile(path, self) {
+		return fmt.Errorf("proc: refusing to start %s inside a test binary: only fakes may run (set %s=1 for live checks)", filepath.Base(argv0), LiveEnv)
+	}
+	return nil
 }
 
 // PID is the child's process ID, which is also its process group ID.

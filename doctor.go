@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"refraktal.dev/refraktal/internal/budget"
 	"refraktal.dev/refraktal/internal/config"
 	"refraktal.dev/refraktal/internal/harness"
 	"refraktal.dev/refraktal/internal/proc"
@@ -120,6 +121,9 @@ type CleanupCheck struct {
 // shutdown. No prompt is ever sent.
 func Doctor(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 	var rep DoctorReport
+	if n := proc.Nest(); n > budget.Defaults.Depth+1 {
+		return rep, fmt.Errorf("refusing to start: nested %d levels deep (%s)", n, proc.NestEnv)
+	}
 	if err := o.defaults(); err != nil {
 		return rep, err
 	}

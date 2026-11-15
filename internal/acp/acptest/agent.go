@@ -184,7 +184,8 @@ func (a *agent) handle(m message, line string) {
 		json.Unmarshal(m.Params, &p)
 		a.cwd = p.Cwd
 		if f := os.Getenv("ACPTEST_PROMPTS"); f != "" { // the shell-prefix variables this agent was given, for tests
-			os.WriteFile(f+".env", []byte("prefix="+os.Getenv("CLAUDE_CODE_SHELL_PREFIX")+" helper="+os.Getenv("REFRAKTAL_HELPER")+"\n"), 0o600)
+			os.WriteFile(f+".env", []byte("prefix="+os.Getenv("CLAUDE_CODE_SHELL_PREFIX")+" helper="+os.Getenv("REFRAKTAL_HELPER")+
+				" nest="+os.Getenv("REFRAKTAL_NEST")+"\n"), 0o600)
 		}
 		if f := os.Getenv("ACPTEST_PROMPTS"); f != "" { // also record each session folder, for tests
 			if fh, err := os.OpenFile(f+".cwd", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err == nil {

@@ -19,7 +19,10 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// A fake agent is named explicitly (ACPTEST_MODE) and plays the harness,
+	// which carries the helper switch for its shell prefix: check it first.
 	acptest.RunIfAgent()
+	proc.MaybeShellPrefix()
 	os.Exit(m.Run())
 }
 
