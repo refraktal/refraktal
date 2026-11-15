@@ -498,7 +498,10 @@ changes. In order:
      tracker and session sweep, with no `GIT_*` variables or API keys, inside
      the run's `--mins` deadline with a per-check limit (`timeout_mins`,
      default 10). Their output goes only to the run folder
-     (`<harness>/check-<name>.log`).
+     (`<harness>/check-<name>.log`). Known limit: this is process control,
+     not a sandbox. A check can write outside its worktree or use the
+     network, exactly as the candidate harness could during its turn (the
+     permission policy is a gate, not a sandbox); containers are not in v1.
    - Candidates that pass rank above candidates with no check (or flagged);
      a candidate that does not apply or fails a check cannot win.
 2. **System 1 pre-score**, only when the router ran with a key (never with

@@ -127,8 +127,8 @@ surviving process.
 
 - `internal/route` from the spike: Gemini decider, fallback, policy, decision
   log, 2 s timeout, request cache.
-- `run` without `--harness` routes to one harness. Fan-out decisions fall back
-  to the top harness until M6; escalations are reported.
+- `run` without `--harness` routes to one harness (fan-out decisions run
+  several since M6); escalations are reported.
 - `--dry` prints the plan and spends nothing on harnesses.
 
 **Done when:** the spike's sample tasks route identically through the product,
@@ -144,6 +144,10 @@ and `--dry` works with and without a key.
 
 **Decide before building:** whether fan-out means different harnesses (the
 spike's default) or several attempts on one; the judging rubric.
+
+**Decided:** different harnesses, one child each; the judging order, check
+detection, pre-score and close-call margin are in `docs/DESIGN.md` (Fan-out
+and judging).
 
 ## M7. `acp` and `show`
 
