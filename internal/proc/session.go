@@ -3,7 +3,6 @@ package proc
 import (
 	"errors"
 	"os"
-	"syscall"
 	"time"
 )
 
@@ -32,7 +31,7 @@ func sessionMembers(sid int) ([]Proc, error) {
 		if p.UID != uid || pid == self || pid <= 1 {
 			continue
 		}
-		if s, err := syscall.Getsid(pid); err == nil && s == sid {
+		if s, err := getsid(pid); err == nil && s == sid {
 			cand = append(cand, pid)
 		}
 	}

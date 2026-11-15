@@ -339,7 +339,7 @@ func TestReparentedBackgroundChildDoesNotSurviveShutdown(t *testing.T) {
 			t.Fatal("background child was not reparented")
 		}
 	}
-	if sid, err := syscall.Getsid(bg); err != nil || sid != c.PID() {
+	if sid, err := getsid(bg); err != nil || sid != c.PID() {
 		t.Fatalf("background child in session %d (%v), want the child's %d", sid, err, c.PID())
 	}
 	r := c.Shutdown(time.Second)
