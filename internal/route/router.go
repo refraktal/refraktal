@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -27,13 +28,19 @@ func ProductName(label string) string { return productNames[label] }
 const KeyEnv = "GEMINI_API_KEY"
 
 // LoadKey returns the Gemini API key and where it came from: the environment,
-// or the .env file in root (gitignored). The key is never logged or printed.
+// or the .env file in root, but only if git does not track it. A .env
+// committed to a repository someone else wrote could carry their key, and
+// task text sent under it would go to their project. The key is never
+// logged or printed.
 func LoadKey(root string, getenv func(string) string) (key, source string) {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
 	if k := strings.TrimSpace(getenv(KeyEnv)); k != "" {
 		return k, "environment"
+	}
+	if exec.Command("git", "-C", root, "ls-files", "--error-unmatch", ".env").Run() == nil {
+		return "", "" // tracked by git: not a key source
 	}
 	f, err := os.Open(filepath.Join(root, ".env"))
 	if err != nil {

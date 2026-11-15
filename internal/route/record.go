@@ -3,6 +3,7 @@ package route
 import (
 	"encoding/json"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -48,7 +49,9 @@ func (r Record) Append(path string) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	// O_NOFOLLOW: a repository could commit the log path as a symlink to a
+	// user file.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0o644)
 	if err != nil {
 		return err
 	}

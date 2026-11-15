@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -257,5 +258,42 @@ func TestDecisionLog(t *testing.T) {
 	if err != nil || rec.Schema != RecordSchema || rec.Thresholds != DefaultThresholds || rec.Outcome.Action == "" ||
 		len(rec.Decision.Harness.Probabilities) != len(Harnesses) || rec.PromptInput == "" {
 		t.Fatalf("record %+v %v", rec, err)
+	}
+}
+
+// A repository could commit .refraktal/decisions.jsonl as a symlink to a
+// user file: the log must not be written through it.
+func TestDecisionLogRefusesASymlink(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim")
+	os.WriteFile(victim, []byte("keep\n"), 0o600)
+	link := filepath.Join(dir, "decisions.jsonl")
+	os.Symlink(victim, link)
+	res, _ := New(Options{CacheDir: "-", LogPath: link}).Route(context.Background(), bugfix)
+	if b, _ := os.ReadFile(victim); string(b) != "keep\n" {
+		t.Fatalf("decision log written through a symlink: %q", b)
+	}
+	if !strings.Contains(strings.Join(res.Notes, " "), "decision log not written") {
+		t.Fatalf("notes %v", res.Notes)
+	}
+}
+
+// A .env committed to the repository (a cloned, untrusted one) is not a key
+// source: only an untracked .env is.
+func TestTrackedDotEnvIsIgnored(t *testing.T) {
+	dir := t.TempDir()
+	git := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v %s", err, out)
+		}
+	}
+	git("init", "-q")
+	os.WriteFile(filepath.Join(dir, ".env"), []byte("GEMINI_API_KEY=attackers-key\n"), 0o600)
+	git("add", "-f", ".env") // as a repository that commits its .env would
+	git("commit", "-q", "-m", "x")
+	if k, src := LoadKey(dir, func(string) string { return "" }); k != "" {
+		t.Fatalf("a tracked .env supplied the key (%s)", src)
 	}
 }

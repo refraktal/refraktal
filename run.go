@@ -254,7 +254,10 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 	var routeCh chan routed
 	if h == nil {
-		key, _ := route.LoadKey(root, o.Getenv)
+		key, source := route.LoadKey(root, o.Getenv)
+		if source == ".env" {
+			notice("routing with GEMINI_API_KEY from this repository's untracked .env")
+		}
 		rt := route.New(route.Options{APIKey: key, Endpoint: o.RouterEndpoint, CacheDir: o.RouteCache,
 			LogPath: filepath.Join(root, ".refraktal", "decisions.jsonl")})
 		routeCh = make(chan routed, 1)

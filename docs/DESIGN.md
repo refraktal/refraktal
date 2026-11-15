@@ -456,8 +456,11 @@ A System 1 decision model chooses; harnesses are System 2.
   refused until M6. `--dry` routes and plans only (exit 0): no worktree, no
   harness.
 - The key comes from `GEMINI_API_KEY` in the environment, else the
-  repository's gitignored `.env`; it goes only in the `x-goog-api-key`
-  header, never in a URL, log or output. The router's call runs alongside
+  repository's `.env` only if git does not track it (a committed `.env` in a
+  repository someone else wrote could carry their key, and task text would go
+  to their project); a notice says when it came from `.env`. It goes only in
+  the `x-goog-api-key` header, never in a URL, log or output. The decision
+  log is opened with `O_NOFOLLOW`, so a committed symlink cannot redirect it. The router's call runs alongside
   the price fetch and worktree setup, under the run's `--mins` deadline.
 - Cache: `os.UserCacheDir()/refraktal/decisions/<sha256 of the exact
   request>.json`, 24 hours; only Gemini answers are cached.
