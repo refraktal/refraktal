@@ -1,0 +1,28 @@
+{
+  "answers": {
+    "task_kind": {
+      "type": "choice", "choice": "bugfix",
+      "probabilities": { "bugfix": 0.91, "feature": 0.03, "refactor": 0.02, "test": 0.02, "docs": 0.01, "investigation": 0.01 },
+      "confidence": 0.91
+    },
+    "harness": {
+      "type": "choice", "choice": "codex",
+      "probabilities": { "codex": 0.78, "claude-code": 0.15, "antigravity": 0.04, "refraktal": 0.03 },
+      "confidence": 0.78
+    },
+    "fan_out": { "type": "noul", "noul": 0.12, "confidence": 0.88 },
+    "fan_out_width": {
+      "type": "score", "score": 0.3,
+      "legend": { "0": "Two attempts", "1": "Three attempts", "2": "Four attempts" },
+      "probabilities": { "0": 0.75, "1": 0.2, "2": 0.05 },
+      "confidence": 0.75
+    },
+    "needs_decomposition": { "type": "noul", "noul": 0.05, "confidence": 0.95 }
+  },
+  "usage": {
+    "total_input_tokens": 412,
+    "input_tokens_by_modality": [{ "modality": "text", "tokens": 412 }],
+    "total_output_tokens": 0,
+    "total_tokens": 412
+  }
+}

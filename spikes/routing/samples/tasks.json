@@ -1,0 +1,22 @@
+[
+  {"id": "one-line-bugfix", "task": "Fix the off-by-one error in pagination: the last page of results is dropped when the total is an exact multiple of the page size.",
+   "repo": {"languages": ["go"], "files": 140, "has_tests": true}, "expect": {"task_kind": "bugfix", "action": "route"}},
+  {"id": "cross-cutting-refactor", "task": "Migrate every package from the old logging wrapper to log/slog across the entire codebase, and remove the wrapper, and update the CI lint config to forbid the old import.",
+   "repo": {"languages": ["go", "typescript"], "files": 3200, "has_tests": true}, "expect": {"task_kind": "refactor", "action": "escalate"}},
+  {"id": "add-tests", "task": "Add unit tests for the retry backoff calculator, covering jitter bounds and the max-delay cap.",
+   "repo": {"languages": ["python"], "files": 85, "has_tests": true}, "expect": {"task_kind": "test", "action": "route"}},
+  {"id": "ambiguous-faster", "task": "Make it faster.",
+   "repo": {"languages": ["rust"], "files": 600, "has_tests": true}, "expect": {"task_kind": "investigation", "action": "escalate"}},
+  {"id": "docs", "task": "Update the README to document the new --mins flag and add an example to the quickstart section.",
+   "repo": {"languages": ["go"], "files": 60, "has_tests": false}, "expect": {"task_kind": "docs", "action": "route"}},
+  {"id": "ui-feature", "task": "Add a dark mode toggle to the settings page and make sure the layout does not shift when it is switched.",
+   "repo": {"languages": ["typescript", "css"], "files": 420, "has_tests": true}, "expect": {"task_kind": "feature", "action": "route"}},
+  {"id": "investigation", "task": "Figure out why the nightly integration job has become flaky since last week; it fails about one run in five with a timeout.",
+   "repo": {"languages": ["go", "bash"], "files": 900, "has_tests": true}, "expect": {"task_kind": "investigation", "action": "route"}},
+  {"id": "multi-part-feature", "task": "Add OAuth login with Google and GitHub, then build an admin page to manage users, and also write a migration for the new tables and document the setup.",
+   "repo": {"languages": ["typescript", "sql"], "files": 1500, "has_tests": true}, "expect": {"task_kind": "feature", "action": "escalate"}},
+  {"id": "open-design", "task": "Improve the error messages the CLI prints when the config file is invalid.",
+   "repo": {"languages": ["go"], "files": 110, "has_tests": true}, "expect": {"task_kind": "feature", "action": "fan_out"}},
+  {"id": "no-tests-bugfix", "task": "The export command crashes with a nil pointer panic when the output directory does not exist.",
+   "repo": {"languages": ["go"], "files": 30, "has_tests": false}, "expect": {"task_kind": "bugfix", "action": "route"}}
+]
