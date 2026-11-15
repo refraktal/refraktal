@@ -111,26 +111,25 @@ type KillReport struct {
 }
 
 // Kill sends SIGKILL to each process that is still running as recorded: same
-// PID, start time and command line. A process whose PID has been reused is not
-// touched. Kill never targets this process or PID 1.
+// PID and start time, checked again immediately before its own signal, so the
+// window for a PID reuse is as small as one ps call. A process whose PID has
+// been reused is not touched. Kill never targets this process or PID 1.
 func Kill(procs []Proc) (KillReport, error) {
 	r := KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}}
-	all, err := List()
-	if err != nil {
-		return r, err
-	}
 	self := syscall.Getpid()
 	for _, p := range procs {
-		now, ok := all[p.PID]
-		switch {
-		case p.PID <= 1 || p.PID == self:
+		if p.PID <= 1 || p.PID == self {
 			r.Changed = append(r.Changed, p)
-		case !ok:
+			continue
+		}
+		now, err := recheckPID(p.PID)
+		switch {
+		case err != nil: // not listed: exited (or a zombie)
 			r.Gone = append(r.Gone, p)
 		case !now.Same(p):
 			r.Changed = append(r.Changed, p)
 		default:
-			syscall.Kill(p.PID, syscall.SIGKILL)
+			signal(p.PID, syscall.SIGKILL)
 			r.Killed = append(r.Killed, p)
 		}
 	}
@@ -153,3 +152,10 @@ func Kill(procs []Proc) (KillReport, error) {
 		}
 	}
 }
+
+// recheckPID and signal are variables so tests can simulate a PID that
+// changes identity between the check and the signal.
+var (
+	recheckPID = listPID
+	signal     = syscall.Kill
+)

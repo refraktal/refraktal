@@ -467,8 +467,9 @@ func (c *Child) rootRecord() (Proc, error) {
 var errNotRunning = errors.New("not running")
 
 // killGroup kills the child's process group, but only while a member of it is
-// still running as recorded. A group ID cannot be reused while the group has a
-// member, so this never reaches an unrelated group.
+// still running as recorded, checked again immediately before the signal. A
+// group ID cannot be reused while the group has a member, and the leader (our
+// child) is not reaped until after this, so its zombie also keeps the ID.
 func (c *Child) killGroup(targets []Proc) {
 	pgid := c.PID()
 	all, err := List()
@@ -477,8 +478,10 @@ func (c *Child) killGroup(targets []Proc) {
 	}
 	for _, p := range targets {
 		if now, ok := all[p.PID]; ok && now.Same(p) && now.PGID == pgid {
-			syscall.Kill(-pgid, syscall.SIGKILL)
-			return
+			if again, err := recheckPID(p.PID); err == nil && again.Same(p) && again.PGID == pgid {
+				signal(-pgid, syscall.SIGKILL)
+				return
+			}
 		}
 	}
 }

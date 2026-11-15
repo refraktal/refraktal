@@ -369,3 +369,23 @@ func TestTrackedProcessThatExecsIsStillKilled(t *testing.T) {
 		t.Fatalf("the identity-checked kill did not take the tracked process that exec'd: %+v", r.Kill)
 	}
 }
+
+// Hardening 5. Identity is checked again immediately before each signal: a
+// PID whose process changed after the bulk listing is not signalled.
+func TestKillRechecksIdentityBeforeEachSignal(t *testing.T) {
+	pid := startSleep(t, &syscall.SysProcAttr{Setpgid: true})
+	rec := listed(t, pid)
+	origRecheck, origSignal := recheckPID, signal
+	var signalled []int
+	recheckPID = func(p int) (Proc, error) { // the PID now belongs to another process
+		q := rec
+		q.Start = "Mon Jan 1 00:00:00 2099"
+		return q, nil
+	}
+	signal = func(p int, s syscall.Signal) error { signalled = append(signalled, p); return nil }
+	defer func() { recheckPID, signal = origRecheck, origSignal }()
+	r, err := Kill([]Proc{rec})
+	if err != nil || len(signalled) != 0 || !slices.Contains(pids(r.Changed), pid) {
+		t.Fatalf("signalled %v, report %+v, err %v", signalled, r, err)
+	}
+}

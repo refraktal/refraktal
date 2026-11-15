@@ -143,6 +143,22 @@ everything it touches. A command built at run time (an interpreter's code,
 `$(...)`, a script file the child wrote) is not seen through, and a harness
 decides by its own rules which actions to ask about at all.
 
+The deny-list is frozen (no new cases; parsing shell text can never close
+every bypass). Two further known limits, found in the M4 audit, are left as
+they are:
+
+- **A symlinked directory inside the worktree.** Command words are checked
+  lexically; a path such as `link/file`, where `link` is a directory symlink
+  the child created pointing outside, looks inside the worktree but lands
+  outside it. (File-edit requests resolve symlinks; shell words are not
+  resolved.)
+- **Redirection without spaces.** `echo x>/abs/path` is one word to the
+  tokeniser, so the path after `>` is not seen as a separate path.
+
+The real boundaries are the worktree (a separate checkout, applied back only
+through a checked `git apply` of the committed result) and the harness's own
+sandbox and permission mode; the policy is an extra gate in front of them.
+
 - **The reject path works on all three harnesses** (M3 open test: deny
   `touch marker.txt` in each gated mode). The file is never created and the
   tool call is reported `failed`. Claude ends the turn normally and tells the
@@ -237,6 +253,18 @@ process-group kill does not reach them.
 - Tracking also widens through a process group, but only one whose leader
   (PID == PGID) is tracked. This keeps a tool's backgrounded child after its
   shell exits, without pulling in unrelated members of a shared group.
+- **Signals and PID reuse.** Every individual kill re-checks the target's
+  birth identity immediately before its signal. The harness, a process-group
+  and session leader, stays unreaped until its group and session have been
+  cleaned up, so neither ID can be reused between the check and the signal.
+  (On a system without `waitid(WNOWAIT)` the child is reaped at once and
+  that guarantee falls back to the identity checks.)
+- **Run events and errors.** Durable run events never carry a harness's raw
+  error text, which can hold account details: they log a structured code and
+  a digest; the raw text goes only to the gitignored stderr capture.
+- **ACP frames** are at most 16 MiB; a harness that writes more without a
+  newline has its connection closed with a clear error. A response that
+  arrives together with the agent's exit is still delivered.
 - **Session sweep (closes the detach gap).** A process that detaches and is
   reparented between two samples, with its group leader never seen, escapes
   parent-PID tracking: M3's survival test hit it on Claude. So each harness

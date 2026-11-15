@@ -21,6 +21,7 @@
 //	slowstart answers initialize only after 3 s
 //	selfcancel ends the turn with stop reason cancelled on its own
 //	noread    stops reading stdin when a prompt arrives
+//	bigframe  writes 17 MiB without a newline when a prompt arrives
 //	tools     asks permission for three tool calls, shaped as Claude sends
 //	          them, and performs each only if allowed: write hello.txt in the
 //	          cwd, write ../outside.txt, and run git push (simulated: it writes
@@ -177,7 +178,7 @@ func (a *agent) handle(m message, line string) {
 			"agentInfo": obj{"name": "acptest", "version": "1.0.0"}, "agentCapabilities": obj{}, "authMethods": []any{}}})
 	case "session/new":
 		if a.mode == "noauth" {
-			a.send(message{ID: m.ID, Error: obj{"code": -32000, "message": "Authentication required"}})
+			a.send(message{ID: m.ID, Error: obj{"code": -32000, "message": "Authentication required for " + AuthEmail}})
 			return
 		}
 		var p struct {
@@ -207,6 +208,19 @@ func (a *agent) handle(m message, line string) {
 		a.send(message{ID: m.ID, Result: obj{}})
 		a.update(obj{"sessionUpdate": "current_mode_update", "currentModeId": "default"})
 	case "session/prompt":
+		if a.mode == "bigframe" { // writes past the frame limit without a newline, then waits
+			chunk := make([]byte, 1<<20)
+			for i := range chunk {
+				chunk[i] = 'x'
+			}
+			a.mu.Lock()
+			for i := 0; i < 17; i++ {
+				a.out.Write(chunk)
+			}
+			a.out.Flush()
+			a.mu.Unlock()
+			time.Sleep(time.Hour)
+		}
 		if a.mode == "noread" { // stops reading stdin for good: the client's writes back up
 			time.Sleep(time.Hour)
 		}

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"refraktal.dev/refraktal/internal/acp/acptest"
 	"refraktal.dev/refraktal/internal/budget"
 	"refraktal.dev/refraktal/internal/harness"
 )
@@ -344,5 +345,32 @@ func TestSlowPriceFetchHonoursTheDeadline(t *testing.T) {
 	res := r.run(t, fake{name: "claude", agentMode: "turn"}, func(o *RunOptions) { o.Budget.Wall = time.Second; o.PriceURL = slow.URL })
 	if res.Outcome != RunExhausted || res.ExitCode() != ExitBudget || time.Since(start) > 3*time.Second {
 		t.Fatalf("after %s: %+v", time.Since(start), res)
+	}
+}
+
+// Hardening 4. Durable run events never carry raw harness error text: a code
+// and a short digest only; the raw text goes to the gitignored stderr capture.
+func TestRunEventsCarryNoRawHarnessErrors(t *testing.T) {
+	r := newRunRig(t)
+	res := r.run(t, fake{name: "claude", agentMode: "noauth"}, nil)
+	events, _ := os.ReadFile(filepath.Join(r.repo, res.Run, "events.jsonl"))
+	if strings.Contains(string(events), acptest.AuthEmail) || strings.Contains(string(events), "Authentication required") {
+		t.Fatalf("raw harness error text in the run events:\n%s", events)
+	}
+	if !strings.Contains(string(events), `"code":"logged_out"`) {
+		t.Fatalf("no error code in the run events:\n%s", events)
+	}
+	stderr, _ := os.ReadFile(filepath.Join(r.repo, res.Run, "claude", "stderr"))
+	if !strings.Contains(string(stderr), "Authentication required") {
+		t.Fatal("the raw text is not in the stderr capture")
+	}
+}
+
+func TestDoctorEventsCarryNoRawHarnessErrors(t *testing.T) {
+	r := newRig(t)
+	rep := r.doctor(t, fake{name: "claude", agentMode: "noauth", prompts: r.prompts})
+	events, _ := os.ReadFile(filepath.Join(r.root, rep.Run, "events.jsonl"))
+	if strings.Contains(string(events), acptest.AuthEmail) || !strings.Contains(string(events), `"code":"logged_out"`) {
+		t.Fatalf("doctor events:\n%s", events)
 	}
 }

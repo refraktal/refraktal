@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -124,4 +125,27 @@ func (l *Log) Procs(event string, procs []proc.Proc) error {
 		out = append(out, loggedProc{PID: p.PID, PPID: p.PPID, PGID: p.PGID, Start: p.Start, Cmd: Of([]byte(p.Cmd))})
 	}
 	return l.Event(event, map[string]any{"procs": out})
+}
+
+// ErrorField is how an error from a harness goes into a durable event: a
+// structured code and a digest of the text, never the text itself, which can
+// carry account details. Keep the raw text in the gitignored stderr capture.
+func ErrorField(code, raw string) map[string]any {
+	if raw == "" {
+		return nil
+	}
+	return map[string]any{"code": code, "digest": Of([]byte(raw))}
+}
+
+// AppendRaw appends an error's raw text to a stderr capture file.
+func AppendRaw(path, what, raw string) {
+	if raw == "" {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "refraktal: %s: %s\n", what, raw)
 }

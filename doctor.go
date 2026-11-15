@@ -170,7 +170,12 @@ func Doctor(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 		if c.Status == StatusOK {
 			rep.Usable = append(rep.Usable, c.Name)
 		}
-		log.Event("harness_check", map[string]any{"check": c})
+		// The reason can be a harness's own error text: log its code and digest,
+		// and keep the text in the harness's gitignored stderr capture.
+		logged := c
+		logged.Reason = ""
+		runlog.AppendRaw(filepath.Join(run.Dir, c.Name, "stderr"), c.Status, c.Reason)
+		log.Event("harness_check", map[string]any{"check": logged, "error": runlog.ErrorField(c.Status, c.Reason)})
 	}
 	log.Event("doctor", map[string]any{"usable": rep.Usable, "decider": rep.Decider, "cleanup": rep.Cleanup})
 	return rep, nil
