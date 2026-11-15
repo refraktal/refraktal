@@ -494,16 +494,16 @@ func TestChoose(t *testing.T) {
 
 func TestParseWinner(t *testing.T) {
 	labels := []string{"A", "B"}
-	for reply, want := range map[string]string{
-		"B is better.\nWINNER: B": "B",
-		"winner: a":               "A",
-		"WINNER: A\nOn reflection:\nWINNER: none": "none",
-		"**WINNER: B**": "B",
-		"WINNER: C":     "",
-		"I pick B":      "",
+	for _, tc := range [][2]string{
+		{"B is better.\nWINNER: B", "B"},
+		{"winner: a", "A"},
+		{"WINNER: A\nOn reflection:\nWINNER: none", "none"},
+		{"**WINNER: B**", "B"},
+		{"WINNER: C", ""},
+		{"I pick B", ""},
 	} {
-		if got := parseWinner(reply, labels); got != want {
-			t.Errorf("%q: got %q, want %q", reply, got, want)
+		if got := parseWinner(tc[0], labels); got != tc[1] {
+			t.Errorf("%q: got %q, want %q", tc[0], got, tc[1])
 		}
 	}
 }
