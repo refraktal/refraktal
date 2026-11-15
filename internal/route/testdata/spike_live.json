@@ -1,0 +1,880 @@
+[
+ {
+  "id": "one-line-bugfix",
+  "task": "Fix the off-by-one error in pagination: the last page of results is dropped when the total is an exact multiple of the page size.",
+  "repo": {
+   "languages": [
+    "go"
+   ],
+   "files": 140,
+   "has_tests": true
+  },
+  "raw_response": {
+   "answers": {
+    "fan_out": {
+     "confidence": 0.9550293762903687,
+     "noul": 0.04497062370963137,
+     "type": "noul"
+    },
+    "fan_out_width": {
+     "confidence": 0.7173132305489677,
+     "score": 0.34253083116551963,
+     "probabilities": {
+      "2": 0.05984406171448732,
+      "1": 0.22284270773654496,
+      "0": 0.7173132305489677
+     },
+     "legend": {
+      "1": "Three attempts: several plausible approaches are worth comparing.",
+      "2": "Four attempts: the task is highly ambiguous or high-stakes and wide exploration is warranted.",
+      "0": "Two attempts: one second opinion is enough."
+     },
+     "type": "score"
+    },
+    "harness": {
+     "confidence": 0.9608457622443111,
+     "choice": "codex",
+     "probabilities": {
+      "refraktal": 0.0066573559119396,
+      "antigravity": 0.005163673778939724,
+      "claude-code": 0.027333208064809763,
+      "codex": 0.9608457622443111
+     },
+     "type": "choice"
+    },
+    "task_kind": {
+     "confidence": 0.9776495263485981,
+     "choice": "bugfix",
+     "probabilities": {
+      "feature": 0.010670546509813054,
+      "refactor": 0.0033708807179848328,
+      "investigation": 0.0020090629214275196,
+      "docs": 0.0006799706671269671,
+      "test": 0.0056200128350496524,
+      "bugfix": 0.9776495263485981
+     },
+     "type": "choice"
+    },
+    "needs_decomposition": {
+     "confidence": 0.99,
+     "noul": 0.01,
+     "type": "noul"
+    }
+   },
+   "usage": {
+    "total_tokens": 771,
+    "total_input_tokens": 771,
+    "input_tokens_by_modality": [
+     {
+      "modality": "text",
+      "tokens": 771
+     }
+    ],
+    "total_output_tokens": 0
+   }
+  },
+  "want": {
+   "task_kind": "bugfix",
+   "harness": "codex",
+   "harness_confidence": 0.9608457622443111,
+   "fan_out_p": 0.04497062370963137,
+   "width": "2",
+   "decompose_p": 0.01,
+   "action": "route",
+   "harnesses": [
+    "codex"
+   ],
+   "policy_width": 1
+  }
+ },
+ {
+  "id": "cross-cutting-refactor",
+  "task": "Migrate every package from the old logging wrapper to log/slog across the entire codebase, and remove the wrapper, and update the CI lint config to forbid the old import.",
+  "repo": {
+   "languages": [
+    "go",
+    "typescript"
+   ],
+   "files": 3200,
+   "has_tests": true
+  },
+  "raw_response": {
+   "answers": {
+    "harness": {
+     "confidence": 0.7711609468721418,
+     "choice": "claude-code",
+     "probabilities": {
+      "codex": 0.03700745900430398,
+      "refraktal": 0.185069089131957,
+      "antigravity": 0.006762504991597389,
+      "claude-code": 0.7711609468721418
+     },
+     "type": "choice"
+    },
+    "fan_out": {
+     "confidence": 0.5422215812181339,
+     "noul": 0.45777841878186615,
+     "type": "noul"
+    },
+    "needs_decomposition": {
+     "confidence": 0.7179394112591636,
+     "noul": 0.7179394112591636,
+     "type": "noul"
+    },
+    "task_kind": {
+     "confidence": 0.9927240500302386,
+     "choice": "refactor",
+     "probabilities": {
+      "docs": 0.0007343201173273039,
+      "investigation": 0.00039687032744474955,
+      "feature": 0.004746187154531942,
+      "refactor": 0.9927240500302386,
+      "bugfix": 0.0008399886196994026,
+      "test": 0.0005585837507580658
+     },
+     "type": "choice"
+    },
+    "fan_out_width": {
+     "confidence": 0.39912862612450384,
+     "score": 0.9567220625618261,
+     "probabilities": {
+      "1": 0.39912862612450384,
+      "2": 0.27879671821866114,
+      "0": 0.322074655656835
+     },
+     "legend": {
+      "0": "Two attempts: one second opinion is enough.",
+      "1": "Three attempts: several plausible approaches are worth comparing.",
+      "2": "Four attempts: the task is highly ambiguous or high-stakes and wide exploration is warranted."
+     },
+     "type": "score"
+    }
+   },
+   "usage": {
+    "total_tokens": 779,
+    "total_input_tokens": 779,
+    "input_tokens_by_modality": [
+     {
+      "modality": "text",
+      "tokens": 779
+     }
+    ],
+    "total_output_tokens": 0
+   }
+  },
+  "want": {
+   "task_kind": "refactor",
+   "harness": "claude-code",
+   "harness_confidence": 0.7711609468721418,
+   "fan_out_p": 0.45777841878186615,
+   "width": "3",
+   "decompose_p": 0.7179394112591636,
+   "action": "escalate",
+   "harnesses": [],
+   "policy_width": 0
+  }
+ },
+ {
+  "id": "add-tests",
+  "task": "Add unit tests for the retry backoff calculator, covering jitter bounds and the max-delay cap.",
+  "repo": {
+   "languages": [
+    "python"
+   ],
+   "files": 85,
+   "has_tests": true
+  },
+  "raw_response": {
+   "answers": {
+    "task_kind": {
+     "confidence": 0.9926062136848162,
+     "choice": "test",
+     "probabilities": {
+      "investigation": 7.71214504654157e-05,
+      "bugfix": 0.0006735029513707335,
+      "docs": 0.0005058689023675946,
+      "feature": 0.005116555159575283,
+      "refactor": 0.0010207378514048755,
+      "test": 0.9926062136848162
+     },
+     "type": "choice"
+    },
+    "needs_decomposition": {
+     "confidence": 0.9767945281415866,
+     "noul": 0.02320547185841338,
+     "type": "noul"
+    },
+    "fan_out": {
+     "confidence": 0.9021132695818198,
+     "noul": 0.09788673041818016,
+     "type": "noul"
+    },
+    "harness": {
+     "confidence": 0.9580737922974226,
+     "choice": "codex",
+     "probabilities": {
+      "antigravity": 0.0043298120242041506,
+      "codex": 0.9580737922974226,
+      "refraktal": 0.006005985104698673,
+      "claude-code": 0.03159041057367453
+     },
+     "type": "choice"
+    },
+    "fan_out_width": {
+     "confidence": 0.6706993811114408,
+     "score": 0.3852130994451366,
+     "probabilities": {
+      "2": 0.055912480556577354,
+      "1": 0.2733881383319819,
+      "0": 0.6706993811114408
+     },
+     "legend": {
+      "0": "Two attempts: one second opinion is enough.",
+      "2": "Four attempts: the task is highly ambiguous or high-stakes and wide exploration is warranted.",
+      "1": "Three attempts: several plausible approaches are worth comparing."
+     },
+     "type": "score"
+    }
+   },
+   "usage": {
+    "total_tokens": 761,
+    "total_input_tokens": 761,
+    "input_tokens_by_modality": [
+     {
+      "modality": "text",
+      "tokens": 761
+     }
+    ],
+    "total_output_tokens": 0
+   }
+  },
+  "want": {
+   "task_kind": "test",
+   "harness": "codex",
+   "harness_confidence": 0.9580737922974226,
+   "fan_out_p": 0.09788673041818016,
+   "width": "2",
+   "decompose_p": 0.02320547185841338,
+   "action": "route",
+   "harnesses": [
+    "codex"
+   ],
+   "policy_width": 1
+  }
+ },
+ {
+  "id": "ambiguous-faster",
+  "task": "Make it faster.",
+  "repo": {
+   "languages": [
+    "rust"
+   ],
+   "files": 600,
+   "has_tests": true
+  },
+  "raw_response": {
+   "answers": {
+    "task_kind": {
+     "confidence": 0.7041097814189322,
+     "choice": "refactor",
+     "probabilities": {
+      "feature": 0.03964595191924059,
+      "investigation": 0.22647316969021963,
+      "refactor": 0.7041097814189322,
+      "test": 0.011205392927654849,
+      "bugfix": 0.015513855648923654,
+      "docs": 0.0030518483950291216
+     },
+     "type": "choice"
+    },
+    "fan_out": {
+     "confidence": 0.8666664214290273,
+     "noul": 0.8666664214290273,
+     "type": "noul"
+    },
+    "fan_out_width": {
+     "confidence": 0.4387734410985074,
+     "score": 0.9861901758560314,
+     "probabilities": {
+      "2": 0.273708367378762,
+      "1": 0.4387734410985074,
+      "0": 0.28751819152273056
+     },
+     "legend": {
+      "0": "Two attempts: one second opinion is enough.",
+      "2": "Four attempts: the task is highly ambiguous or high-stakes and wide exploration is warranted.",
+      "1": "Three attempts: several plausible approaches are worth comparing."
+     },
+     "type": "score"
+    },
+    "needs_decomposition": {
+     "confidence": 0.731420437645898,
+     "noul": 0.731420437645898,
+     "type": "noul"
+    },
+    "harness": {
+     "confidence": 0.6683160820417777,
+     "choice": "claude-code",
+     "probabilities": {
+      "antigravity": 0.016006965199476902,
+      "claude-code": 0.6683160820417777,
+      "codex": 0.21932505404813754,
+      "refraktal": 0.09635189871060772
+     },
+     "type": "choice"
+    }
+   },
+   "usage": {
+    "total_tokens": 745,
+    "total_input_tokens": 745,
+    "input_tokens_by_modality": [
+     {
+      "modality": "text",
+      "tokens": 745
+     }
+    ],
+    "total_output_tokens": 0
+   }
+  },
+  "want": {
+   "task_kind": "refactor",
+   "harness": "claude-code",
+   "harness_confidence": 0.6683160820417777,
+   "fan_out_p": 0.8666664214290273,
+   "width": "3",
+   "decompose_p": 0.731420437645898,
+   "action": "escalate",
+   "harnesses": [],
+   "policy_width": 0
+  }
+ },
+ {
+  "id": "docs",
+  "task": "Update the README to document the new --mins flag and add an example to the quickstart section.",
+  "repo": {
+   "languages": [
+    "go"
+   ],
+   "files": 60,
+   "has_tests": false
+  },
+  "raw_response": {
+   "answers": {
+    "fan_out": {
+     "confidence": 0.9077334766384385,
+     "noul": 0.09226652336156152,
+     "type": "noul"
+    },
+    "needs_decomposition": {
+     "confidence": 0.9760116729492828,
+     "noul": 0.023988327050717233,
+     "type": "noul"
+    },
+    "task_kind": {
+     "confidence": 0.995692101175803,
+     "choice": "docs",
+     "probabilities": {
+      "refactor": 3.616144614509766e-05,
+      "investigation": 3.40343517017004e-05,
+      "feature": 0.004119661539223471,
+      "bugfix": 7.791075642700753e-05,
+      "test": 4.0130730699401095e-05,
+      "docs": 0.995692101175803
+     },
+     "type": "choice"
+    },
+    "harness": {
+     "confidence": 0.9793410692358825,
+     "choice": "codex",
+     "probabilities": {
+      "antigravity": 0.0012204501097702067,
+      "refraktal": 0.0017080685458462405,
+      "claude-code": 0.0177304121085009,
+      "codex": 0.9793410692358825
+     },
+     "type": "choice"
+    },
+    "fan_out_width": {
+     "confidence": 0.693871578820285,
+     "score": 0.37326806039988436,
+     "probabilities": {
+      "2": 0.06713963922016941,
+      "0": 0.693871578820285,
+      "1": 0.23898878195954554
+     },
+     "legend": {
+      "0": "Two attempts: one second opinion is enough.",
+      "2": "Four attempts: the task is highly ambiguous or high-stakes and wide exploration is warranted.",
+      "1": "Three attempts: several plausible approaches are worth comparing."
+     },
+     "type": "score"
+    }
+   },
+   "usage": {
+    "total_tokens": 761,
+    "total_input_tokens": 761,
+    "input_tokens_by_modality": [
+     {
+      "modality": "text",
+      "tokens": 761
+     }
+    ],
+    "total_output_tokens": 0
+   }
+  },
+  "want": {
+   "task_kind": "docs",
+   "harness": "codex",
+   "harness_confidence": 0.9793410692358825,
+   "fan_out_p": 0.09226652336156152,
+   "width": "2",
+   "decompose_p": 0.023988327050717233,
+   "action": "route",
+   "harnesses": [
+    "codex"
+   ],
+   "policy_width": 1
+  }
+ },
+ {
+  "id": "ui-feature",
+  "task": "Add a dark mode toggle to the settings page and make sure the layout does not shift when it is switched.",
+  "repo": {
+   "languages": [
+    "typescript",
+    "css"
+   ],
+   "files": 420,
+   "has_tests": true
+  },
+  "raw_response": {
+   "answers": {
+    "harness": {
+     "confidence": 0.8318053644770487,
+     "choice": "antigravity",
+     "probabilities": {
+      "antigravity": 0.8318053644770487,
+      "codex": 0.09437152815214127,
+      "claude-code": 0.05346569650256342,
+      "refraktal": 0.020357410868246457
+     },
+     "type": "choice"
+    },
+    "task_kind": {
+     "confidence": 0.9857978543675955,
+     "choice": "feature",
+     "probabilities": {
+      "investigation": 0.0006265074508662031,
+      "feature": 0.9857978543675955,
+      "docs": 0.001138892063924513,
+      "test": 0.0014474203981988737,
+      "refactor": 0.0024336040680794117,
+      "bugfix": 0.008555721651335542
+     },
+     "type": "choice"
+    },
+    "needs_decomposition": {
+     "confidence": 0.90430224441059,
+     "noul": 0.09569775558941,
+     "type": "noul"
+    },
+    "fan_out_width": {
+     "confidence": 0.4282700740718521,
+     "score": 0.7400561361534799,
+     "probabilities": {
+      "0": 0.41583689488733394,
+      "1": 0.4282700740718521,
+      "2": 0.15589303104081392
+     },
+     "legend": {
+      "0": "Two attempts: one second opinion is enough.",
+      "1": "Three attempts: several plausible approaches are worth comparing.",
+      "2": "Four attempts: the task is highly ambiguous or high-stakes and wide exploration is warranted."
+     },
+     "type": "score"
+    },
+    "fan_out": {
+     "confidence": 0.6965271935360544,
+     "noul": 0.30347280646394553,
+     "type": "noul"
+    }
+   },
+   "usage": {
+    "total_tokens": 765,
+    "total_input_tokens": 765,
+    "input_tokens_by_modality": [
+     {
+      "modality": "text",
+      "tokens": 765
+     }
+    ],
+    "total_output_tokens": 0
+   }
+  },
+  "want": {
+   "task_kind": "feature",
+   "harness": "antigravity",
+   "harness_confidence": 0.8318053644770487,
+   "fan_out_p": 0.30347280646394553,
+   "width": "3",
+   "decompose_p": 0.09569775558941,
+   "action": "route",
+   "harnesses": [
+    "antigravity"
+   ],
+   "policy_width": 1
+  }
+ },
+ {
+  "id": "investigation",
+  "task": "Figure out why the nightly integration job has become flaky since last week; it fails about one run in five with a timeout.",
+  "repo": {
+   "languages": [
+    "go",
+    "bash"
+   ],
+   "files": 900,
+   "has_tests": true
+  },
+  "raw_response": {
+   "answers": {
+    "fan_out": {
+     "confidence": 0.5899274490966805,
+     "noul": 0.5899274490966805,
+     "type": "noul"
+    },
+    "fan_out_width": {
+     "confidence": 0.39977542964488716,
+     "score": 0.8747258654702823,
+     "probabilities": {
+      "0": 0.3627493524424154,
+      "1": 0.39977542964488716,
+      "2": 0.23747521791269757
+     },
+     "legend": {
+      "0": "Two attempts: one second opinion is enough.",
+      "2": "Four attempts: the task is highly ambiguous or high-stakes and wide exploration is warranted.",
+      "1": "Three attempts: several plausible approaches are worth comparing."
+     },
+     "type": "score"
+    },
+    "needs_decomposition": {
+     "confidence": 0.8597204622198621,
+     "noul": 0.14027953778013788,
+     "type": "noul"
+    },
+    "task_kind": {
+     "confidence": 0.8269127912143033,
+     "choice": "investigation",
+     "probabilities": {
+      "docs": 0.006289531856314439,
+      "feature": 0.0014659841299582658,
+      "test": 0.006190380282737053,
+      "investigation": 0.8269127912143033,
+      "bugfix": 0.15669248515455958,
+      "refactor": 0.0024488273621272884
+     },
+     "type": "choice"
+    },
+    "harness": {
+     "confidence": 0.9150385830279052,
+     "choice": "claude-code",
+     "probabilities": {
+      "codex": 0.057473015268823105,
+      "claude-code": 0.9150385830279052,
+      "antigravity": 0.0050297595152440375,
+      "refraktal": 0.022458642188027598
+     },
+     "type": "choice"
+    }
+   },
+   "usage": {
+    "total_tokens": 768,
+    "total_input_tokens": 768,
+    "input_tokens_by_modality": [
+     {
+      "modality": "text",
+      "tokens": 768
+     }
+    ],
+    "total_output_tokens": 0
+   }
+  },
+  "want": {
+   "task_kind": "investigation",
+   "harness": "claude-code",
+   "harness_confidence": 0.9150385830279052,
+   "fan_out_p": 0.5899274490966805,
+   "width": "3",
+   "decompose_p": 0.14027953778013788,
+   "action": "route",
+   "harnesses": [
+    "claude-code"
+   ],
+   "policy_width": 1
+  }
+ },
+ {
+  "id": "multi-part-feature",
+  "task": "Add OAuth login with Google and GitHub, then build an admin page to manage users, and also write a migration for the new tables and document the setup.",
+  "repo": {
+   "languages": [
+    "typescript",
+    "sql"
+   ],
+   "files": 1500,
+   "has_tests": true
+  },
+  "raw_response": {
+   "answers": {
+    "task_kind": {
+     "confidence": 0.9734632634254553,
+     "choice": "feature",
+     "probabilities": {
+      "test": 0.0023104121006829272,
+      "feature": 0.9734632634254553,
+      "docs": 0.009843304944645904,
+      "investigation": 0.0013564115826514302,
+      "bugfix": 0.001671960348752884,
+      "refactor": 0.011354647597811613
+     },
+     "type": "choice"
+    },
+    "needs_decomposition": {
+     "confidence": 0.9067683316316754,
+     "noul": 0.9067683316316754,
+     "type": "noul"
+    },
+    "harness": {
+     "confidence": 0.6969272510885357,
+     "choice": "refraktal",
+     "probabilities": {
+      "refraktal": 0.6969272510885357,
+      "codex": 0.033617721251973987,
+      "antigravity": 0.04333652599020827,
+      "claude-code": 0.2261185016692821
+     },
+     "type": "choice"
+    },
+    "fan_out_width": {
+     "confidence": 0.43194682716639876,
+     "score": 1.2585707709315987,
+     "probabilities": {
+      "2": 0.4133119718826,
+      "0": 0.15474120095100138,
+      "1": 0.43194682716639876
+     },
+     "legend": {
+      "1": "Three attempts: several plausible approaches are worth comparing.",
+      "0": "Two attempts: one second opinion is enough.",
+      "2": "Four attempts: the task is highly ambiguous or high-stakes and wide exploration is warranted."
+     },
+     "type": "score"
+    },
+    "fan_out": {
+     "confidence": 0.5820566705174226,
+     "noul": 0.5820566705174226,
+     "type": "noul"
+    }
+   },
+   "usage": {
+    "total_tokens": 774,
+    "total_input_tokens": 774,
+    "input_tokens_by_modality": [
+     {
+      "modality": "text",
+      "tokens": 774
+     }
+    ],
+    "total_output_tokens": 0
+   }
+  },
+  "want": {
+   "task_kind": "feature",
+   "harness": "refraktal",
+   "harness_confidence": 0.6969272510885357,
+   "fan_out_p": 0.5820566705174226,
+   "width": "3",
+   "decompose_p": 0.9067683316316754,
+   "action": "escalate",
+   "harnesses": [],
+   "policy_width": 0
+  }
+ },
+ {
+  "id": "open-design",
+  "task": "Improve the error messages the CLI prints when the config file is invalid.",
+  "repo": {
+   "languages": [
+    "go"
+   ],
+   "files": 110,
+   "has_tests": true
+  },
+  "raw_response": {
+   "answers": {
+    "harness": {
+     "confidence": 0.7714493263053565,
+     "choice": "codex",
+     "probabilities": {
+      "refraktal": 0.01882255874121789,
+      "codex": 0.7714493263053565,
+      "antigravity": 0.005152921891149217,
+      "claude-code": 0.20457519306227634
+     },
+     "type": "choice"
+    },
+    "task_kind": {
+     "confidence": 0.4486651851855563,
+     "choice": "feature",
+     "probabilities": {
+      "test": 0.010639769929007852,
+      "feature": 0.4486651851855563,
+      "bugfix": 0.14227219446328168,
+      "docs": 0.03633849820236874,
+      "refactor": 0.35400725333302013,
+      "investigation": 0.008077098886765378
+     },
+     "type": "choice"
+    },
+    "needs_decomposition": {
+     "confidence": 0.9432255249366784,
+     "noul": 0.05677447506332158,
+     "type": "noul"
+    },
+    "fan_out": {
+     "confidence": 0.7809418097881261,
+     "noul": 0.21905819021187387,
+     "type": "noul"
+    },
+    "fan_out_width": {
+     "confidence": 0.5451282903959809,
+     "score": 0.5633286670751952,
+     "probabilities": {
+      "2": 0.10845695747117613,
+      "1": 0.34641475213284295,
+      "0": 0.5451282903959809
+     },
+     "legend": {
+      "2": "Four attempts: the task is highly ambiguous or high-stakes and wide exploration is warranted.",
+      "0": "Two attempts: one second opinion is enough.",
+      "1": "Three attempts: several plausible approaches are worth comparing."
+     },
+     "type": "score"
+    }
+   },
+   "usage": {
+    "total_tokens": 755,
+    "total_input_tokens": 755,
+    "input_tokens_by_modality": [
+     {
+      "modality": "text",
+      "tokens": 755
+     }
+    ],
+    "total_output_tokens": 0
+   }
+  },
+  "want": {
+   "task_kind": "feature",
+   "harness": "codex",
+   "harness_confidence": 0.7714493263053565,
+   "fan_out_p": 0.21905819021187387,
+   "width": "2",
+   "decompose_p": 0.05677447506332158,
+   "action": "route",
+   "harnesses": [
+    "codex"
+   ],
+   "policy_width": 1
+  }
+ },
+ {
+  "id": "no-tests-bugfix",
+  "task": "The export command crashes with a nil pointer panic when the output directory does not exist.",
+  "repo": {
+   "languages": [
+    "go"
+   ],
+   "files": 30,
+   "has_tests": false
+  },
+  "raw_response": {
+   "answers": {
+    "needs_decomposition": {
+     "confidence": 0.9830300997807597,
+     "noul": 0.016969900219240316,
+     "type": "noul"
+    },
+    "fan_out_width": {
+     "confidence": 0.7460674322733276,
+     "score": 0.2994642477499676,
+     "probabilities": {
+      "1": 0.20840088770337697,
+      "0": 0.7460674322733276,
+      "2": 0.04553168002329532
+     },
+     "legend": {
+      "2": "Four attempts: the task is highly ambiguous or high-stakes and wide exploration is warranted.",
+      "0": "Two attempts: one second opinion is enough.",
+      "1": "Three attempts: several plausible approaches are worth comparing."
+     },
+     "type": "score"
+    },
+    "harness": {
+     "confidence": 0.9407794647967173,
+     "choice": "codex",
+     "probabilities": {
+      "claude-code": 0.05072334605935421,
+      "antigravity": 0.0036910905419152307,
+      "codex": 0.9407794647967173,
+      "refraktal": 0.004806098602013406
+     },
+     "type": "choice"
+    },
+    "task_kind": {
+     "confidence": 0.9944596183363638,
+     "choice": "bugfix",
+     "probabilities": {
+      "bugfix": 0.9944596183363638,
+      "test": 0.00048458521288329714,
+      "docs": 0.0001402233879428161,
+      "investigation": 0.0003795074379366997,
+      "feature": 0.004471803587158554,
+      "refactor": 6.426203771487707e-05
+     },
+     "type": "choice"
+    },
+    "fan_out": {
+     "confidence": 0.939033460338748,
+     "noul": 0.06096653966125193,
+     "type": "noul"
+    }
+   },
+   "usage": {
+    "total_tokens": 758,
+    "total_input_tokens": 758,
+    "input_tokens_by_modality": [
+     {
+      "modality": "text",
+      "tokens": 758
+     }
+    ],
+    "total_output_tokens": 0
+   }
+  },
+  "want": {
+   "task_kind": "bugfix",
+   "harness": "codex",
+   "harness_confidence": 0.9407794647967173,
+   "fan_out_p": 0.06096653966125193,
+   "width": "2",
+   "decompose_p": 0.016969900219240316,
+   "action": "route",
+   "harnesses": [
+    "codex"
+   ],
+   "policy_width": 1
+  }
+ }
+]
