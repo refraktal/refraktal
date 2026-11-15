@@ -211,7 +211,9 @@ func TestDoctorDeciderAndJSON(t *testing.T) {
 }
 
 func TestDefaultRootRefusesTemp(t *testing.T) {
-	t.Chdir(t.TempDir())
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("TMPDIR", dir)
 	_, err := Doctor(context.Background(), DoctorOptions{LiveDir: t.TempDir(), Harnesses: []harness.Harness{}})
 	if err == nil || !strings.Contains(err.Error(), "temporary") {
 		t.Fatalf("want a refusal for a run folder under a temp folder, got %v", err)
@@ -245,5 +247,98 @@ func TestDoctorDeciderCheck(t *testing.T) {
 	opts.DeciderEndpoint = deciderEndpoint(t)
 	if d := checkDecider(context.Background(), opts); d.Kind != "gemini" || d.KeySource != ".env" || d.LatencyMS <= 0 {
 		t.Fatalf("reachable: %+v", d)
+	}
+}
+
+func TestDefaultRootIgnoresGitEnvironment(t *testing.T) {
+	r, other := newRunRig(t), newRunRig(t)
+	t.Chdir(r.repo)
+	t.Setenv("GIT_DIR", filepath.Join(other.repo, ".git"))
+	t.Setenv("GIT_WORK_TREE", other.repo)
+	want, err := filepath.EvalSymlinks(r.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := defaultRoot()
+	if err != nil || got != want {
+		t.Fatalf("default root = %q, %v; want %q", got, err, want)
+	}
+}
+
+type inspectingHarness struct {
+	prepare func(harness.Options) (harness.Launch, error)
+}
+
+func (inspectingHarness) Name() string { return "claude" }
+func (inspectingHarness) Mode() string { return "default" }
+func (h inspectingHarness) Prepare(_ context.Context, o harness.Options) (harness.Launch, error) {
+	return h.prepare(o)
+}
+
+func TestDoctorRunFolderSwapDoesNotRedirectWrites(t *testing.T) {
+	r := newRig(t)
+	outside := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(outside, "claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(outside, "claude", "stderr")
+	if err := os.WriteFile(victim, []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(r.root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var held string
+	h := inspectingHarness{prepare: func(o harness.Options) (harness.Launch, error) {
+		if o.ScratchRoot == nil {
+			t.Error("doctor did not pass a pinned scratch root")
+		}
+		// Fail at exec, after opening stderr, without needing process listings.
+		return harness.Launch{Argv: []string{filepath.Join(r.root, "missing-agent")}}, nil
+	}}
+	rep, err := Doctor(context.Background(), DoctorOptions{
+		Root: r.root, LiveDir: r.live, Harnesses: []harness.Harness{h}, Neutral: r.neutral,
+		ConfigPath: filepath.Join(r.root, "no-config.json"),
+		Getenv: func(string) string {
+			paths, err := filepath.Glob(filepath.Join(r.root, ".refraktal", "runs", "*"))
+			if err != nil || len(paths) != 1 {
+				t.Fatalf("run paths = %q, %v", paths, err)
+			}
+			held = paths[0] + "-held"
+			if err := os.Rename(paths[0], held); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, paths[0]); err != nil {
+				t.Fatal(err)
+			}
+			return ""
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Harnesses) != 1 || rep.Harnesses[0].Status != StatusUnavailable {
+		t.Fatalf("unexpected report: %+v", rep)
+	}
+	if b, err := os.ReadFile(victim); err != nil || string(b) != "keep\n" {
+		t.Errorf("outside stderr overwritten: %q, %v", b, err)
+	}
+	if entries, err := os.ReadDir(filepath.Join(outside, "claude")); err != nil || len(entries) != 1 {
+		t.Errorf("scratch writes escaped: %v, %v", entries, err)
+	}
+	for _, name := range []string{"events.jsonl", "claude/tmp", "claude/stderr"} {
+		if _, err := os.Stat(filepath.Join(held, name)); err != nil {
+			t.Errorf("%s missing from pinned run: %v", name, err)
+		}
+	}
+	if entries, err := os.ReadDir(r.neutral); err != nil || len(entries) != 0 {
+		t.Errorf("neutral folder not cleaned: %v, %v", entries, err)
+	}
+}
+
+func TestSessionRequiresScratchRoot(t *testing.T) {
+	_, err := openSession(context.Background(), sessionSpec{h: fake{prepErr: errors.New("should not prepare")}})
+	if err == nil || statusOf(err) != StatusError || !strings.Contains(err.Error(), "scratch root required") {
+		t.Fatalf("missing root accepted: %v", err)
 	}
 }

@@ -72,6 +72,50 @@ func (r runRig) run(t *testing.T, h fake, mut func(*RunOptions)) RunResult {
 
 func exists(path string) bool { _, err := os.Stat(path); return err == nil }
 
+func TestRunFolderSwapDoesNotRedirectWrites(t *testing.T) {
+	r := newRunRig(t)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, outside := t.TempDir(), t.TempDir()
+	if err := os.Mkdir(filepath.Join(outside, "claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(outside, "claude", "stderr")
+	if err := os.WriteFile(victim, []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// NewRun and the event log already exist when worktree add starts.
+	// Swap the run pathname before scratch/tmp and result.diff are created.
+	script := "#!/bin/sh\ncase \" $* \" in *' worktree add '*)\n" +
+		"for d in '" + r.repo + "'/.refraktal/runs/*; do\n" +
+		"mv \"$d\" \"$d-held\" || exit 1\nln -s '" + outside + "' \"$d\" || exit 1\ndone\n;; esac\n" +
+		"exec '" + realGit + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	res := r.run(t, fake{name: "claude", agentMode: "tools"}, nil)
+	if res.Outcome != RunApplied {
+		t.Fatalf("result %+v", res)
+	}
+	if entries, err := os.ReadDir(outside); err != nil || len(entries) != 1 || entries[0].Name() != "claude" {
+		t.Errorf("run writes escaped: %v, %v", entries, err)
+	}
+	if b, err := os.ReadFile(victim); err != nil || string(b) != "keep\n" {
+		t.Errorf("outside stderr was overwritten: %q, %v", b, err)
+	}
+	for _, name := range []string{"events.jsonl", "result.diff", "claude", "tmp"} {
+		if _, err := os.Stat(filepath.Join(r.repo, res.Run+"-held", name)); err != nil {
+			t.Errorf("%s missing in pinned folder: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(r.repo, res.Run+"-held", "claude", "stderr")); err != nil {
+		t.Errorf("stderr missing in pinned folder: %v", err)
+	}
+}
+
 func TestRunAppliesWhatThePolicyAllows(t *testing.T) {
 	r := newRunRig(t)
 	res := r.run(t, fake{name: "claude", agentMode: "tools"}, nil)

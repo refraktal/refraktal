@@ -113,14 +113,16 @@ func (r RunResult) ExitCode() int {
 	}
 }
 
-func (o *RunOptions) defaults() (root string, err error) {
+func (o *RunOptions) defaults(ctx context.Context) (root string, err error) {
+	gitCtx, cancel := context.WithTimeout(ctx, safegit.Timeout)
+	defer cancel()
 	defaultDir := o.Dir == ""
 	if defaultDir {
 		if o.Dir, err = os.Getwd(); err != nil {
 			return "", err
 		}
 	}
-	if root, err = worktree.Root(context.Background(), o.Dir); err != nil {
+	if root, err = worktree.Root(gitCtx, o.Dir); err != nil {
 		return "", err
 	}
 	if defaultDir { // folders a caller chose explicitly are its own business
@@ -173,7 +175,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	if o.Fan > 1 {
 		return res, errors.New("fan-out to several harnesses arrives in M6; use --fan 1 or leave it to the router")
 	}
-	root, err := o.defaults()
+	root, err := o.defaults(ctx)
 	if err != nil {
 		return res, err
 	}
@@ -237,8 +239,9 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	if err != nil {
 		return res, err
 	}
+	defer run.Close()
 	res.Run = run.Rel
-	log, err := runlog.Create(filepath.Join(run.Dir, "events.jsonl"))
+	log, err := run.Create("events.jsonl")
 	if err != nil {
 		return res, err
 	}
@@ -348,8 +351,13 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		return res, err
 	}
 	log.Event("worktree", map[string]any{"branch": wt.Branch, "base": wt.Base})
+	removeWorktree := func() error {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), safegit.OperationTimeout)
+		defer cancel()
+		return wt.Remove(cleanupCtx)
+	}
 	if err := joinRoute(); err != nil || setupExpired() {
-		wt.Remove(context.Background())
+		removeWorktree()
 		if setupExpired() {
 			return exhausted("routing")
 		}
@@ -364,16 +372,21 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 
 	scratch, tmp := filepath.Join(run.Dir, h.Name()), filepath.Join(run.Dir, "tmp")
-	for _, d := range []string{scratch, tmp} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
+	for _, d := range []string{h.Name(), "tmp"} {
+		if err := run.Mkdir(d, 0o700); err != nil {
 			return res, err
 		}
 	}
+	scratchRoot, err := run.OpenRoot(h.Name())
+	if err != nil {
+		return res, err
+	}
+	defer scratchRoot.Close()
 	// Durable events carry an error's code and digest only; harness error
 	// text can hold account details, so the raw text goes to the gitignored
 	// stderr capture beside the harness's own.
 	errEvent := func(code, raw string) map[string]any {
-		runlog.AppendRaw(filepath.Join(scratch, "stderr"), code, raw)
+		runlog.AppendRaw(scratchRoot, "stderr", code, raw)
 		return runlog.ErrorField(code, raw)
 	}
 	pol := policy.Policy{Worktree: wt.Dir}
@@ -381,7 +394,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	var reply strings.Builder
 	childBudget, _ := json.Marshal(map[string]any{"usd": grant.USD, "turns": grant.Turns,
 		"deadline": grant.Deadline.UTC().Format(time.RFC3339), "depth": grant.Depth})
-	s, err := openSession(setupCtx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, cwd: wt.Dir, tmpDir: tmp,
+	s, err := openSession(setupCtx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, scratchRoot: scratchRoot, cwd: wt.Dir, tmpDir: tmp,
 		liveDir: o.LiveDir, labels: map[string]string{"run": run.ID, "harness": h.Name()}, log: log, timeout: 2 * time.Minute,
 		// REFRAKTAL_RUN tags the child's processes for logs only (the session
 		// sweep finds leftovers). REFRAKTAL_BUDGET is what a child Refraktal
@@ -420,7 +433,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		}
 		st := ledger.Settle(grant, false)
 		res.Settlement, res.Budget = &st, ledger.Summary()
-		wt.Remove(context.Background())
+		removeWorktree()
 		code := statusOf(err)
 		if res.Outcome == RunExhausted {
 			code = RunExhausted
@@ -431,7 +444,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 
 	if err := ledger.BeginTurn(grant); err != nil {
 		s.close(log, h.Name(), 5*time.Second)
-		wt.Remove(context.Background())
+		removeWorktree()
 		ledger.Settle(grant, false)
 		res.Outcome, res.Error, res.Budget = RunExhausted, err.Error(), ledger.Summary()
 		log.Event("run_end", map[string]any{"outcome": res.Outcome, "error": errEvent(RunExhausted, res.Error)})
@@ -466,10 +479,13 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		"usage": turn.Usage, "cost": turn.Cost, "last_used": turn.LastUsed, "error": errEvent(turnErrorCode(perr), errString(perr)),
 		"left_running": len(sr.Kill.Alive), "exited_on_its_own": sr.ExitedOnItsOwn})
 
-	r, cerr2 := wt.Collect(context.Background(), "refraktal "+run.ID+": "+firstLine(o.Task))
+	// Retain the result even after cancellation, with a bounded collection.
+	collectCtx, cancelCollect := context.WithTimeout(context.WithoutCancel(ctx), safegit.OperationTimeout)
+	r, cerr2 := wt.Collect(collectCtx, "refraktal "+run.ID+": "+firstLine(o.Task))
+	cancelCollect()
 	res.Files = r.Files
 	if len(r.Diff) > 0 {
-		os.WriteFile(filepath.Join(run.Dir, "result.diff"), r.Diff, 0o600)
+		run.WriteFile("result.diff", r.Diff, 0o600)
 	}
 	keep := func(outcome string) {
 		res.Outcome, res.Branch, res.Worktree = outcome, wt.Branch, wt.Dir
@@ -490,20 +506,26 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	case o.NoApply:
 		keep(RunKept)
 	default:
-		if err := wt.Apply(context.Background(), r); err != nil {
+		applyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), safegit.OperationTimeout) // never stop git apply halfway
+		n, err := wt.Apply(applyCtx, r)
+		cancel()
+		if err != nil {
 			keep(RunApplyFailed)
 			res.Error = err.Error()
 		} else {
 			res.Outcome = RunApplied
+			if n != "" {
+				notice(n)
+			}
 		}
 	}
 	if res.Worktree == "" {
-		if err := wt.Remove(context.Background()); err != nil {
+		if err := removeWorktree(); err != nil {
 			log.Event("worktree_remove_failed", map[string]any{"error": errEvent("worktree_remove_failed", err.Error())})
 		}
 	} else if len(r.Files) == 0 && !o.NoApply {
 		// Nothing to keep: a failed or timed-out turn that changed nothing.
-		wt.Remove(context.Background())
+		removeWorktree()
 		res.Branch, res.Worktree = "", ""
 	}
 	log.Event("run_end", map[string]any{"outcome": res.Outcome, "files": res.Files, "branch": res.Branch,
@@ -599,8 +621,10 @@ var languages = map[string]string{".go": "go", ".py": "python", ".ts": "typescri
 // RepoInput describes the repository for the router: its three most common
 // languages, its tracked file count and whether it has tests.
 func RepoInput(root, task string) route.Input {
+	ctx, cancel := context.WithTimeout(context.Background(), safegit.Timeout)
+	defer cancel()
 	in := route.Input{Task: task, Repo: route.RepoContext{Languages: []string{}}}
-	out, err := safegit.Command(context.Background(), root, "ls-files", "-z").Output()
+	out, err := safegit.Command(ctx, root, "ls-files", "-z").Output()
 	if err != nil {
 		return in
 	}

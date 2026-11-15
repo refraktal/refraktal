@@ -36,11 +36,12 @@ type Harness interface {
 
 // Options say how to prepare a harness for one session.
 type Options struct {
-	Scratch    string // a folder inside the run folder the harness may use
-	Cwd        string // the session folder
-	MCP        string // "isolated" or "inherit" (config.MCPIsolated, config.MCPInherit)
-	Executable string // optional: the binary to run (see config.Harness.Executable)
-	TmpDir     string // optional: a private TMPDIR for the child (used for Codex)
+	Scratch     string   // a folder inside the run folder the harness may use
+	ScratchRoot *os.Root // pinned scratch folder, required when Refraktal writes
+	Cwd         string   // the session folder
+	MCP         string   // "isolated" or "inherit" (config.MCPIsolated, config.MCPInherit)
+	Executable  string   // optional: the binary to run (see config.Harness.Executable)
+	TmpDir      string   // optional: a private TMPDIR for the child (used for Codex)
 }
 
 func (o Options) inherit() bool { return o.MCP == MCPInherit }
@@ -274,7 +275,10 @@ func (agy) Prepare(ctx context.Context, o Options) (Launch, error) {
 	l := Launch{Installed: Version(ctx, bin), Argv: []string{bin, "acp"}, MCP: MCPInherit}
 	if !o.inherit() {
 		dir := filepath.Join(o.Scratch, "gemini-dir")
-		if err := os.MkdirAll(dir, 0o700); err != nil {
+		if o.ScratchRoot == nil {
+			return l, errors.New("agy: scratch root required")
+		}
+		if err := o.ScratchRoot.Mkdir("gemini-dir", 0o700); err != nil {
 			return l, err
 		}
 		l.Argv = append(l.Argv, "--gemini-dir", dir)

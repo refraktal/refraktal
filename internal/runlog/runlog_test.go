@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -91,12 +92,74 @@ func TestCreateRefusesAnExistingFile(t *testing.T) {
 	}
 }
 
+func TestRunWritesStayInPinnedFolder(t *testing.T) {
+	r, err := NewRun(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	held, outside := r.Dir+"-held", t.TempDir()
+	if err := os.Rename(r.Dir, held); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, r.Dir); err != nil {
+		t.Fatal(err)
+	}
+	l, err := r.Create("events.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Event("pinned", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.WriteFile("result.diff", []byte("diff\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"claude", "tmp"} {
+		if err := r.Mkdir(name, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
+		t.Errorf("run writes escaped into outside folder: %v, %v", entries, err)
+	}
+	for _, name := range []string{"events.jsonl", "result.diff", "claude", "tmp"} {
+		if _, err := os.Stat(filepath.Join(held, name)); err != nil {
+			t.Errorf("%s missing from pinned folder: %v", name, err)
+		}
+	}
+}
+
+func TestRunCloseStopsLaterWrites(t *testing.T) {
+	r, err := NewRun(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := r.Create("events.jsonl"); err == nil {
+		l.Close()
+		t.Error("Create used a closed run")
+	}
+	if err := r.WriteFile("result.diff", nil, 0o600); err == nil {
+		t.Error("WriteFile used a closed run")
+	}
+	if err := r.Mkdir("tmp", 0o700); err == nil {
+		t.Error("Mkdir used a closed run")
+	}
+}
+
 func TestNewRunWritesTheIgnoreFile(t *testing.T) {
 	root := t.TempDir()
 	r, err := NewRun(root)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer r.Close()
 	if b, _ := os.ReadFile(filepath.Join(root, ".refraktal", ".gitignore")); string(b) != "*\n" {
 		t.Fatalf(".gitignore = %q", b)
 	}
@@ -104,9 +167,11 @@ func TestNewRunWritesTheIgnoreFile(t *testing.T) {
 		t.Fatalf("run %+v: %v", r, err)
 	}
 	os.WriteFile(filepath.Join(root, ".refraktal", ".gitignore"), []byte("other\n"), 0o644)
-	if _, err := NewRun(root); err != nil {
+	r2, err := NewRun(root)
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer r2.Close()
 	if b, _ := os.ReadFile(filepath.Join(root, ".refraktal", ".gitignore")); string(b) != "*\n" {
 		t.Fatalf(".gitignore not restored: %q", b)
 	}
@@ -133,7 +198,8 @@ func TestNewRunRefusesSymlinks(t *testing.T) {
 	for name, plant := range cases {
 		root := t.TempDir()
 		plant(root)
-		if _, err := NewRun(root); err == nil {
+		if r, err := NewRun(root); err == nil {
+			r.Close()
 			t.Errorf("%s symlink: NewRun did not refuse", name)
 		}
 		if b, _ := os.ReadFile(victim); string(b) != "keep\n" {
@@ -152,5 +218,119 @@ func TestCheckNotTempRefusesAFolderNotYetCreated(t *testing.T) {
 		if err := CheckNotTemp(p); err == nil {
 			t.Errorf("%s was accepted", p)
 		}
+	}
+}
+
+func TestNewRunDirectorySwapCannotWriteOutsideRoot(t *testing.T) {
+	for _, target := range []string{".refraktal", filepath.Join(".refraktal", "runs")} {
+		t.Run(target, func(t *testing.T) {
+			root, outside := t.TempDir(), t.TempDir()
+			r, err := NewRun(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Close()
+			path := filepath.Join(root, target)
+			held := path + "-held"
+			stop, done := make(chan struct{}), make(chan error, 1)
+			go func() {
+				for {
+					select {
+					case <-stop:
+						done <- nil
+						return
+					default:
+					}
+					if err := os.Rename(path, held); err != nil {
+						done <- err
+						return
+					}
+					if err := os.Symlink(outside, path); err != nil {
+						if os.IsExist(err) {
+							// NewRun may create the missing directory in this gap.
+							if err := os.RemoveAll(held); err != nil {
+								done <- err
+								return
+							}
+							continue
+						}
+						done <- err
+						return
+					}
+					runtime.Gosched()
+					if err := os.Remove(path); err != nil {
+						done <- err
+						return
+					}
+					if err := os.Rename(held, path); err != nil {
+						if fi, statErr := os.Lstat(path); statErr != nil || !fi.IsDir() {
+							done <- err
+							return
+						}
+						if err := os.RemoveAll(held); err != nil {
+							done <- err
+							return
+						}
+					}
+				}
+			}()
+			defer func() {
+				close(stop)
+				if err := <-done; err != nil {
+					t.Errorf("directory swap: %v", err)
+				}
+			}()
+			for range 300 {
+				// Races may fail safely; they must never redirect a write.
+				if r, err := NewRun(root); err == nil {
+					r.Close()
+				}
+				entries, err := os.ReadDir(outside)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(entries) != 0 {
+					t.Fatalf("directory swap redirected a write outside root: %s", entries[0].Name())
+				}
+			}
+		})
+	}
+}
+
+func TestNewRunIgnoreCheckHasBoundedMemory(t *testing.T) {
+	root := t.TempDir()
+	r, err := NewRun(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+	path := filepath.Join(root, ".refraktal", ".gitignore")
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("*\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(8 << 20); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	r, err = NewRun(root)
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 1<<20 {
+		t.Fatalf("checking an 8 MiB .gitignore allocated %d bytes; want under 1 MiB", allocated)
+	}
+	if b, err := os.ReadFile(path); err != nil || string(b) != "*\n" {
+		t.Fatalf("oversized .gitignore not replaced: %q, %v", b, err)
 	}
 }

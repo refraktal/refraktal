@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,68 +14,128 @@ import (
 
 // Run is one run's folder: <root>/.refraktal/runs/<id>/.
 type Run struct {
-	ID  string
-	Dir string // absolute
-	Rel string // relative to root, for printing
+	ID   string
+	Dir  string // absolute
+	Rel  string // relative to root, for printing
+	root *os.Root
+}
+
+// AppendRaw appends an error's raw text to the capture file name, relative
+// to the run folder, through the run's pinned handle.
+func (r Run) AppendRaw(name, what, raw string) { AppendRaw(r.root, name, what, raw) }
+
+// Close releases the run's directory handle.
+func (r Run) Close() error { return r.root.Close() }
+
+// OpenRoot pins a subdirectory for Refraktal's later writes.
+func (r Run) OpenRoot(name string) (*os.Root, error) { return r.root.OpenRoot(name) }
+
+// Create creates a log within the run folder.
+func (r Run) Create(name string) (*Log, error) {
+	f, err := r.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	return &Log{f: f, now: time.Now}, nil
+}
+
+// WriteFile creates an artifact within the run folder. It refuses existing
+// entries, including hard links, so they cannot redirect a write elsewhere.
+func (r Run) WriteFile(name string, data []byte, perm os.FileMode) error {
+	f, err := r.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	return errors.Join(err, f.Close())
+}
+
+// Mkdir creates a directory within the run folder.
+func (r Run) Mkdir(name string, perm os.FileMode) error {
+	return r.root.Mkdir(name, perm)
 }
 
 // NewRun creates a run folder under root/.refraktal/runs, and writes
 // root/.refraktal/.gitignore containing "*" so nothing there is committed.
+// The caller must close the returned Run when its writes are complete.
 //
 // The repository may not be trusted: it could commit .refraktal, runs or
 // .gitignore as symlinks pointing elsewhere. NewRun refuses any of them that
-// is a symlink or of the wrong type, and replaces .gitignore by renaming a new
-// file over it, which never writes through a link.
+// is a symlink or of the wrong type. All accesses use pinned directory
+// handles, so a directory swap cannot redirect writes outside root.
 func NewRun(root string) (Run, error) {
-	base := filepath.Join(root, ".refraktal")
-	runs := filepath.Join(base, "runs")
-	for _, d := range []string{base, runs} {
-		if err := ensureDir(d); err != nil {
-			return Run{}, err
-		}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return Run{}, err
 	}
-	if err := ensureIgnore(filepath.Join(base, ".gitignore")); err != nil {
+	repo, err := os.OpenRoot(root)
+	if err != nil {
+		return Run{}, err
+	}
+	defer repo.Close()
+	base, err := ensureDir(repo, ".refraktal")
+	if err != nil {
+		return Run{}, err
+	}
+	defer base.Close()
+	runs, err := ensureDir(base, "runs")
+	if err != nil {
+		return Run{}, err
+	}
+	defer runs.Close()
+	if err := ensureIgnore(base); err != nil {
 		return Run{}, err
 	}
 	for range 5 {
 		var r [3]byte
 		rand.Read(r[:])
 		id := time.Now().Format("20060102-150405") + "-" + hex.EncodeToString(r[:])
-		dir := filepath.Join(base, "runs", id)
-		err := os.Mkdir(dir, 0o755)
+		err := runs.Mkdir(id, 0o755)
 		if errors.Is(err, os.ErrExist) {
 			continue
 		}
 		if err != nil {
 			return Run{}, err
 		}
-		return Run{ID: id, Dir: dir, Rel: filepath.Join(".refraktal", "runs", id)}, nil
+		pinned, err := ensureDir(runs, id)
+		if err != nil {
+			return Run{}, err
+		}
+		rel := filepath.Join(".refraktal", "runs", id)
+		return Run{ID: id, Dir: filepath.Join(root, rel), Rel: rel, root: pinned}, nil
 	}
 	return Run{}, errors.New("runlog: could not pick a unique run ID")
 }
 
 // ensureDir creates dir, or checks that it is a real directory and not a
 // symlink.
-func ensureDir(dir string) error {
-	fi, err := os.Lstat(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		if err := os.Mkdir(dir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
-			return err
-		}
-		fi, err = os.Lstat(dir)
+func ensureDir(parent *os.Root, dir string) (*os.Root, error) {
+	if err := parent.Mkdir(dir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+		return nil, err
 	}
+	fi, err := parent.Lstat(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !fi.IsDir() { // Lstat does not follow links: a symlink is never a directory here
-		return fmt.Errorf("%s is not a plain directory (a symlink or a file): refusing to use it", dir)
+		return nil, fmt.Errorf("%s is not a plain directory (a symlink or a file): refusing to use it", dir)
 	}
-	return nil
+	d, err := parent.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := d.Stat(".")
+	if err != nil || !os.SameFile(fi, opened) {
+		d.Close()
+		return nil, fmt.Errorf("%s changed while opening it: refusing to use it", dir)
+	}
+	return d, nil
 }
 
 // ensureIgnore makes path a regular file containing "*\n".
-func ensureIgnore(path string) error {
-	fi, err := os.Lstat(path)
+func ensureIgnore(base *os.Root) error {
+	const path = ".gitignore"
+	fi, err := base.Lstat(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 	case err != nil:
@@ -82,27 +143,41 @@ func ensureIgnore(path string) error {
 	case !fi.Mode().IsRegular():
 		return fmt.Errorf("%s is not a regular file (a symlink or other): refusing to replace it", path)
 	default:
-		if b, err := os.ReadFile(path); err == nil && string(b) == "*\n" {
+		f, err := base.Open(path)
+		if err != nil {
+			return err
+		}
+		opened, err := f.Stat()
+		if err != nil || !os.SameFile(fi, opened) {
+			f.Close()
+			return fmt.Errorf("%s changed while opening it: refusing to use it", path)
+		}
+		var b [3]byte // Two expected bytes and one byte to detect trailing data.
+		n, readErr := io.ReadFull(f, b[:])
+		if err := f.Close(); err != nil {
+			return err
+		}
+		if readErr != nil && !errors.Is(readErr, io.EOF) && !errors.Is(readErr, io.ErrUnexpectedEOF) {
+			return readErr
+		}
+		if n == 2 && string(b[:n]) == "*\n" {
 			return nil
 		}
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".gitignore-*")
+	// Remove the directory entry, then create exclusively. This also leaves
+	// hard-linked files untouched and refuses a symlink planted in the gap.
+	if err := base.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	f, err := base.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(f.Name())
 	if _, err := f.WriteString("*\n"); err != nil {
 		f.Close()
 		return err
 	}
-	if err := f.Chmod(0o644); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(f.Name(), path)
+	return f.Close()
 }
 
 // CheckNotTemp refuses a path under $TMPDIR or /tmp. Worktrees and run folders

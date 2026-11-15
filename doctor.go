@@ -20,6 +20,7 @@ import (
 	"refraktal.dev/refraktal/internal/route"
 	"refraktal.dev/refraktal/internal/runlog"
 	"refraktal.dev/refraktal/internal/safegit"
+	"refraktal.dev/refraktal/internal/worktree"
 )
 
 // Exit codes, from docs/DESIGN.md.
@@ -136,8 +137,9 @@ func Doctor(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 	if err != nil {
 		return rep, err
 	}
+	defer run.Close()
 	rep.Run = run.Rel
-	log, err := runlog.Create(filepath.Join(run.Dir, "events.jsonl"))
+	log, err := run.Create("events.jsonl")
 	if err != nil {
 		return rep, err
 	}
@@ -176,7 +178,7 @@ func Doctor(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 		// and keep the text in the harness's gitignored stderr capture.
 		logged := c
 		logged.Reason = ""
-		runlog.AppendRaw(filepath.Join(run.Dir, c.Name, "stderr"), c.Status, c.Reason)
+		run.AppendRaw(filepath.Join(c.Name, "stderr"), c.Status, c.Reason)
 		log.Event("harness_check", map[string]any{"check": logged, "error": runlog.ErrorField(c.Status, c.Reason)})
 	}
 	log.Event("doctor", map[string]any{"usable": rep.Usable, "decider": rep.Decider, "cleanup": rep.Cleanup})
@@ -227,12 +229,16 @@ func (o *DoctorOptions) defaults() error {
 // defaultRoot is the top of the git repository containing the current
 // directory, or the current directory itself.
 func defaultRoot() (string, error) {
-	if out, err := safegit.Command(context.Background(), ".", "rev-parse", "--show-toplevel").Output(); err == nil {
-		if top := strings.TrimSpace(string(out)); top != "" {
-			return top, nil
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), safegit.Timeout)
+	defer cancel()
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
 	}
-	return os.Getwd()
+	if top, err := worktree.Root(ctx, cwd); err == nil && top != "" {
+		return top, nil
+	}
+	return cwd, nil
 }
 
 func checkHarness(ctx context.Context, h harness.Harness, hcfg config.Harness, o DoctorOptions, run runlog.Run, log *runlog.Log) HarnessCheck {
@@ -242,16 +248,28 @@ func checkHarness(ctx context.Context, h harness.Harness, hcfg config.Harness, o
 	// (and Claude runs project hooks) from the session folder, and doctor must
 	// not run a repository's code.
 	cwd := filepath.Join(o.Neutral, run.ID+"-"+h.Name())
-	for _, d := range []string{scratch, cwd, filepath.Join(scratch, "tmp")} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			c.Status, c.Reason = StatusError, err.Error()
-			return c
-		}
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		c.Status, c.Reason = StatusError, err.Error()
+		return c
 	}
 	defer os.RemoveAll(cwd)
+	if err := run.Mkdir(h.Name(), 0o700); err != nil {
+		c.Status, c.Reason = StatusError, err.Error()
+		return c
+	}
+	scratchRoot, err := run.OpenRoot(h.Name())
+	if err != nil {
+		c.Status, c.Reason = StatusError, err.Error()
+		return c
+	}
+	defer scratchRoot.Close()
+	if err := scratchRoot.Mkdir("tmp", 0o700); err != nil {
+		c.Status, c.Reason = StatusError, err.Error()
+		return c
+	}
 
 	start := time.Now()
-	s, err := openSession(ctx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, cwd: cwd, tmpDir: filepath.Join(scratch, "tmp"),
+	s, err := openSession(ctx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, scratchRoot: scratchRoot, cwd: cwd, tmpDir: filepath.Join(scratch, "tmp"),
 		liveDir: o.LiveDir, labels: map[string]string{"run": run.ID, "harness": h.Name()}, log: log, timeout: o.Timeout,
 		env: []string{"REFRAKTAL_RUN=" + run.ID + "-" + h.Name()}, prefixExe: o.ShellPrefix})
 	l := s.launch
