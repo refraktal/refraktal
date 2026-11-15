@@ -1,6 +1,6 @@
 // Package refraktal is a meta-harness: one prompt in, a spectrum of agents out.
 //
-// This is a name-reservation placeholder. The real implementation is coming.
+// The CLI in cmd/refraktal is a thin front door over this package.
 package refraktal
 
 // Version is the current release.
