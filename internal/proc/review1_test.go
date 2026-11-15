@@ -389,3 +389,16 @@ func TestKillRechecksIdentityBeforeEachSignal(t *testing.T) {
 		t.Fatalf("signalled %v, report %+v, err %v", signalled, r, err)
 	}
 }
+
+// 1b. A harness child never gets an API key: a harness or tool must not
+// silently bill a key instead of the subscription.
+func TestChildGetsNoAPIKeys(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "g-key")
+	t.Setenv("GOOGLE_API_KEY", "go-key")
+	c := helper(t, "env")
+	out, _ := io.ReadAll(c.Stdout)
+	c.Shutdown(time.Second)
+	if strings.Contains(string(out), "GEMINI_API_KEY=") || strings.Contains(string(out), "GOOGLE_API_KEY=") {
+		t.Fatal("an API key reached the child")
+	}
+}

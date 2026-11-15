@@ -16,8 +16,9 @@ const RecordSchema = 1
 // led to) are joined on later by ID; they are not known at decision time.
 type Record struct {
 	Schema      int                 `json:"schema"`
-	ID          string              `json:"id"` // caller-supplied, or the timestamp
-	Time        time.Time           `json:"ts"` // UTC, RFC 3339 with nanoseconds
+	ID          string              `json:"id"`               // caller-supplied, or the timestamp
+	RunID       string              `json:"run_id,omitempty"` // the run this decision chose a harness for
+	Time        time.Time           `json:"ts"`               // UTC, RFC 3339 with nanoseconds
 	Task        string              `json:"task"`
 	Repo        RepoContext         `json:"repo"`
 	PromptInput string              `json:"prompt_input"` // the shared input exactly as sent

@@ -466,3 +466,23 @@ func TestRunFanAndHarnessOverride(t *testing.T) {
 		t.Fatalf("--harness must override the router: %+v (hits %d)", res, hits.Load())
 	}
 }
+
+// 7. A dry run whose --mins runs out during routing is a spent budget.
+func TestDryRunDeadlineDuringRouting(t *testing.T) {
+	r := newRunRig(t)
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		select {
+		case <-time.After(5 * time.Second):
+		case <-req.Context().Done():
+		}
+	}))
+	defer slow.Close()
+	res := r.run(t, fake{}, func(o *RunOptions) {
+		o.Harness, o.Harnesses, o.Dry, o.RouteCache, o.RouterEndpoint = "", allFakes(), true, "-", slow.URL
+		o.Budget.Wall = 700 * time.Millisecond
+		o.Getenv = func(k string) string { return map[string]string{"GEMINI_API_KEY": "test-key"}[k] }
+	})
+	if res.Outcome != RunExhausted || res.ExitCode() != ExitBudget {
+		t.Fatalf("%+v", res)
+	}
+}

@@ -44,7 +44,7 @@ func List() (map[int]Proc, error) {
 	// the lstart format to five fields, such as "Sun Nov 15 15:45:51 2026".
 	cmd := exec.Command("ps", "-A", "-ww", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "uid=", "-o", "stat=",
 		"-o", "lstart=", "-o", "command=")
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	cmd.Env = append(ScrubEnv(os.Environ()), "LC_ALL=C")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("ps: %w", err)

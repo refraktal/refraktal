@@ -15,6 +15,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"refraktal.dev/refraktal/internal/proc"
 )
 
 // Worktree is one child's checkout.
@@ -39,7 +41,7 @@ var safe = []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=fals
 func git(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	full := append(append([]string{"-C", dir}, safe...), args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0",
+	cmd.Env = append(gitEnv(), "GIT_TERMINAL_PROMPT=0",
 		"GIT_AUTHOR_NAME=Refraktal", "GIT_AUTHOR_EMAIL=refraktal@localhost",
 		"GIT_COMMITTER_NAME=Refraktal", "GIT_COMMITTER_EMAIL=refraktal@localhost")
 	var stderr bytes.Buffer
@@ -117,6 +119,7 @@ func (w Worktree) Apply(ctx context.Context, r Result) error {
 	}
 	for _, args := range [][]string{{"apply", "--check", "--binary"}, {"apply", "--binary"}} {
 		cmd := exec.CommandContext(ctx, "git", append(append([]string{"-C", w.Repo}, safe...), args...)...)
+		cmd.Env = gitEnv()
 		cmd.Stdin = bytes.NewReader(r.Diff)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -132,4 +135,16 @@ func (w Worktree) Remove(ctx context.Context) error {
 	}
 	_, err := git(ctx, w.Repo, "branch", "-D", w.Branch)
 	return err
+}
+
+// gitEnv is the environment for Refraktal's git commands: no session
+// markers, no API keys (proc.ScrubEnv), no GIT_* variables.
+func gitEnv() []string {
+	var out []string
+	for _, kv := range proc.ScrubEnv(os.Environ()) {
+		if !strings.HasPrefix(kv, "GIT_") {
+			out = append(out, kv)
+		}
+	}
+	return out
 }

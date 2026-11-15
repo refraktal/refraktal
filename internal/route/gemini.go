@@ -9,9 +9,12 @@ package route
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -94,6 +97,10 @@ func (g Gemini) ask(ctx context.Context, req geminiRequest) (geminiResponse, []b
 	if client == nil {
 		client = &http.Client{Timeout: GeminiTimeout}
 	}
+	// No redirects: a redirect is a Decider error, and the router falls back.
+	noRedirect := *client
+	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client = &noRedirect
 	if err := checkTestEndpoint(endpoint); err != nil {
 		return out, nil, err
 	}
@@ -112,13 +119,13 @@ func (g Gemini) ask(ctx context.Context, req geminiRequest) (geminiResponse, []b
 	if err != nil {
 		return out, nil, fmt.Errorf("gemini: read body: %w", err)
 	}
-	jsonErr := json.Unmarshal(raw, &out)
 	if resp.StatusCode != http.StatusOK {
-		if jsonErr == nil && out.Error != nil {
-			return out, raw, fmt.Errorf("gemini: HTTP %d: %s: %s", resp.StatusCode, out.Error.Code, out.Error.Message)
-		}
-		return out, raw, fmt.Errorf("gemini: HTTP %d", resp.StatusCode)
+		// The status and a digest only: a provider's error body never reaches
+		// notices, output, records or doctor.
+		h := sha256.Sum256(raw)
+		return out, nil, fmt.Errorf("gemini: HTTP %d (response %d bytes, sha256 %s)", resp.StatusCode, len(raw), hex.EncodeToString(h[:6]))
 	}
+	jsonErr := json.Unmarshal(raw, &out)
 	if jsonErr != nil {
 		return out, raw, fmt.Errorf("gemini: malformed body: %w", jsonErr)
 	}
@@ -161,17 +168,25 @@ func (g Gemini) Decide(ctx context.Context, in Input) (Decision, error) {
 	return d, nil
 }
 
+// unit reports whether p is a finite probability.
+func unit(p float64) bool { return !math.IsNaN(p) && p >= 0 && p <= 1 }
+
 func choiceAnswer(r geminiResponse, key string, allowed []string) (Answer, error) {
 	a, ok := r.Answers[key]
-	if !ok || a.Type != "choice" || a.Confidence == nil || !contains(allowed, a.Choice) {
+	if !ok || a.Type != "choice" || a.Confidence == nil || !unit(*a.Confidence) || !contains(allowed, a.Choice) || len(a.Probabilities) == 0 {
 		return Answer{}, fmt.Errorf("gemini: malformed body: bad or missing choice answer %q", key)
+	}
+	for k, p := range a.Probabilities {
+		if !contains(allowed, k) || !unit(p) {
+			return Answer{}, fmt.Errorf("gemini: malformed body: answer %q has an unknown option or a probability outside [0,1]", key)
+		}
 	}
 	return Answer{Value: a.Choice, Probability: a.Probabilities[a.Choice], Confidence: *a.Confidence, Probabilities: a.Probabilities}, nil
 }
 
 func noulAnswer(r geminiResponse, key, yes, no string) (Answer, error) {
 	a, ok := r.Answers[key]
-	if !ok || a.Type != "noul" || a.Noul == nil {
+	if !ok || a.Type != "noul" || a.Noul == nil || !unit(*a.Noul) {
 		return Answer{}, fmt.Errorf("gemini: malformed body: bad or missing yes/no answer %q", key)
 	}
 	return yesNo(*a.Noul, yes, no), nil
@@ -181,14 +196,14 @@ func noulAnswer(r geminiResponse, key, yes, no string) (Answer, error) {
 // level (as the docs advise for a discrete level), offset by MinFanOut.
 func widthAnswer(r geminiResponse) (Answer, error) {
 	a, ok := r.Answers["fan_out_width"]
-	if !ok || a.Type != "score" || a.Score == nil || a.Confidence == nil {
+	if !ok || a.Type != "score" || a.Score == nil || a.Confidence == nil || !unit(*a.Confidence) || math.IsNaN(*a.Score) || math.IsInf(*a.Score, 0) {
 		return Answer{}, fmt.Errorf("gemini: malformed body: bad or missing score answer %q", "fan_out_width")
 	}
 	out := Answer{Confidence: *a.Confidence, Score: a.Score, Probabilities: map[string]float64{}}
 	best := -1.0
 	for i := 0; i <= MaxFanOut-MinFanOut; i++ {
 		p, ok := a.Probabilities[strconv.Itoa(i)]
-		if !ok {
+		if !ok || !unit(p) {
 			return Answer{}, fmt.Errorf("gemini: malformed body: width level %d missing", i)
 		}
 		w := strconv.Itoa(MinFanOut + i)

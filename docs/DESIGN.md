@@ -464,11 +464,25 @@ A System 1 decision model chooses; harnesses are System 2.
   log is opened with `O_NOFOLLOW`, so a committed symlink cannot redirect it. The router's call runs alongside
   the price fetch and worktree setup, under the run's `--mins` deadline.
 - Cache: `os.UserCacheDir()/refraktal/decisions/<sha256 of the exact
-  request>.json`, 24 hours; only Gemini answers are cached.
+  request>.json`, 24 hours; only valid Gemini answers are cached, with the
+  provider's raw response so a cache hit's record keeps it; written through a
+  unique temp file and an atomic rename.
+- The Decider follows no redirects, and validates every answer (a
+  probability map over known options, finite values in [0, 1], confidence in
+  range); a redirect or an invalid answer falls back and is not cached. A
+  provider's error body never reaches notices, output, records or doctor:
+  only the HTTP status and a short digest.
+- **No API key reaches a subprocess.** Every harness child and every tool
+  runs without `GEMINI_API_KEY` or `GOOGLE_API_KEY` (so nothing silently
+  bills a key instead of the subscription), and Refraktal's git commands run
+  without them and without `GIT_*` variables, with fsmonitor and hooks off.
+  A nested Refraktal that should route with Gemini gets the key only when the
+  user sets `REFRAKTAL_PASS_GEMINI_KEY=1`.
 - Decision log: `.refraktal/decisions.jsonl` in the repository (gitignored),
-  one record per decision with the request input, every probability, the
-  thresholds, the outcome and the provider's response; the run log gets a
-  summarised `route` event.
+  one record per decision with the run ID, the request input, every
+  probability, the thresholds, the outcome and the provider's response; the
+  run log gets a summarised `route` event. It is never appended to if git
+  tracks it (or git cannot confirm otherwise): a notice says so.
 - `doctor` reports the decider: no key means fallback; with a key, one probe
   decision on a trivial task shows whether the API answers in time (else
   fallback, with the reason).

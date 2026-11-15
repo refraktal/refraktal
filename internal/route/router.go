@@ -9,11 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"refraktal.dev/refraktal/internal/safegit"
 )
 
 // productNames maps the router's harness labels (the spike's, kept so its
@@ -71,16 +72,23 @@ func LoadKey(root string, getenv func(string) string) (key, source string) {
 // (.ENV opens as .env on a case-insensitive filesystem). Any git error means
 // no: the check fails closed.
 func untrackedDotEnv(root string) bool {
-	out, err := exec.Command("git", "-C", root, "rev-parse", "--is-inside-work-tree").Output()
+	return untracked(root, ".env")
+}
+
+// untracked reports whether rel (relative to dir) is untracked in a git work
+// tree, comparing case-insensitively; any git error means no (fail closed).
+func untracked(dir, rel string) bool {
+	ctx := context.Background()
+	out, err := safegit.Command(ctx, dir, "rev-parse", "--is-inside-work-tree").Output()
 	if err != nil || strings.TrimSpace(string(out)) != "true" {
 		return false
 	}
-	tracked, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
+	tracked, err := safegit.Command(ctx, dir, "ls-files", "-z").Output()
 	if err != nil {
 		return false
 	}
 	for _, p := range strings.Split(string(tracked), "\x00") {
-		if strings.EqualFold(p, ".env") {
+		if strings.EqualFold(p, rel) {
 			return false
 		}
 	}
@@ -95,6 +103,7 @@ type Options struct {
 	CacheDir   string        // default os.UserCacheDir()/refraktal/decisions; "-" disables the cache
 	CacheTTL   time.Duration // default 24 h
 	LogPath    string        // decision log (JSONL); "" means none
+	RunID      string        // joins decision records to the run's results
 	Now        func() time.Time
 }
 
@@ -138,6 +147,13 @@ func requestHash(in Input) string {
 	return hex.EncodeToString(h[:])
 }
 
+// cacheEntry is a cached decision with the provider's raw response, so a
+// cache hit's record keeps its provenance.
+type cacheEntry struct {
+	Decision Decision        `json:"decision"`
+	Raw      json.RawMessage `json:"raw,omitempty"`
+}
+
 func (r Router) cached(hash string) (Decision, bool) {
 	if r.o.CacheDir == "-" || r.o.CacheDir == "" {
 		return Decision{}, false
@@ -148,11 +164,12 @@ func (r Router) cached(hash string) (Decision, bool) {
 		return Decision{}, false
 	}
 	b, err := os.ReadFile(p)
-	var d Decision
-	if err != nil || json.Unmarshal(b, &d) != nil || d.Decider != "gemini" {
+	var e cacheEntry
+	if err != nil || json.Unmarshal(b, &e) != nil || e.Decision.Decider != "gemini" {
 		return Decision{}, false
 	}
-	return d, true
+	e.Decision.Raw = e.Raw
+	return e.Decision, true
 }
 
 func (r Router) store(hash string, d Decision) {
@@ -162,14 +179,25 @@ func (r Router) store(hash string, d Decision) {
 	if os.MkdirAll(r.o.CacheDir, 0o700) != nil {
 		return
 	}
-	b, err := json.Marshal(d)
+	raw := d.Raw
+	if !json.Valid(raw) {
+		raw = nil
+	}
+	b, err := json.Marshal(cacheEntry{Decision: d, Raw: raw})
 	if err != nil {
 		return
 	}
-	tmp := filepath.Join(r.o.CacheDir, hash+".tmp")
-	if os.WriteFile(tmp, b, 0o600) == nil {
-		os.Rename(tmp, filepath.Join(r.o.CacheDir, hash+".json"))
+	f, err := os.CreateTemp(r.o.CacheDir, hash+"-*.tmp") // unique: concurrent writers never share a temp file
+	if err != nil {
+		return
 	}
+	_, werr := f.Write(b)
+	if cerr := f.Close(); werr == nil && cerr == nil {
+		if os.Rename(f.Name(), filepath.Join(r.o.CacheDir, hash+".json")) == nil {
+			return
+		}
+	}
+	os.Remove(f.Name())
 }
 
 // Route answers the routing questions (from the cache, Gemini, or the
@@ -197,7 +225,10 @@ func (r Router) Route(ctx context.Context, in Input) (Result, error) {
 	res.Harness, res.Notes = pick(res.Decision, res.Outcome)
 	if r.o.LogPath != "" {
 		rec := NewRecord("", r.o.Now(), in, res.Decision, *r.o.Thresholds, res.Outcome)
-		if err := rec.Append(r.o.LogPath); err != nil {
+		rec.RunID = r.o.RunID
+		if !untracked(filepath.Dir(r.o.LogPath), filepath.Base(r.o.LogPath)) {
+			res.Notes = append(res.Notes, "decision log not written: it is tracked by git, or not in a git work tree")
+		} else if err := rec.Append(r.o.LogPath); err != nil {
 			res.Notes = append(res.Notes, "decision log not written: "+err.Error())
 		}
 	}

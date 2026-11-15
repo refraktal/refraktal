@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -22,6 +21,7 @@ import (
 	"refraktal.dev/refraktal/internal/proc"
 	"refraktal.dev/refraktal/internal/route"
 	"refraktal.dev/refraktal/internal/runlog"
+	"refraktal.dev/refraktal/internal/safegit"
 	"refraktal.dev/refraktal/internal/worktree"
 )
 
@@ -259,7 +259,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 			notice("routing with GEMINI_API_KEY from this repository's untracked .env")
 		}
 		rt := route.New(route.Options{APIKey: key, Endpoint: o.RouterEndpoint, CacheDir: o.RouteCache,
-			LogPath: filepath.Join(root, ".refraktal", "decisions.jsonl")})
+			LogPath: filepath.Join(root, ".refraktal", "decisions.jsonl"), RunID: run.ID})
 		routeCh = make(chan routed, 1)
 		go func() {
 			r, err := rt.Route(setupCtx, RepoInput(root, o.Task))
@@ -301,6 +301,9 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 	if o.Dry {
 		err := joinRoute()
+		if setupExpired() { // the router fell back because --mins ran out: not a plan
+			return exhausted("routing")
+		}
 		st := ledger.Settle(grant, false)
 		res.Settlement, res.Budget = &st, ledger.Summary()
 		if err != nil {
@@ -345,7 +348,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		return res, err
 	}
 	log.Event("worktree", map[string]any{"branch": wt.Branch, "base": wt.Base})
-	if err := joinRoute(); err != nil {
+	if err := joinRoute(); err != nil || setupExpired() {
 		wt.Remove(context.Background())
 		if setupExpired() {
 			return exhausted("routing")
@@ -383,7 +386,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		// REFRAKTAL_RUN tags the child's processes for logs only (the session
 		// sweep finds leftovers). REFRAKTAL_BUDGET is what a child Refraktal
 		// may use.
-		env:       []string{"REFRAKTAL_RUN=" + run.ID + "-" + h.Name(), "REFRAKTAL_BUDGET=" + string(childBudget)},
+		env:       childEnv(root, o, run.ID+"-"+h.Name(), string(childBudget)),
 		prefixExe: o.ShellPrefix,
 		onPermission: func(_ context.Context, req acp.PermissionRequest) string {
 			d := pol.Decide(req)
@@ -597,7 +600,7 @@ var languages = map[string]string{".go": "go", ".py": "python", ".ts": "typescri
 // languages, its tracked file count and whether it has tests.
 func RepoInput(root, task string) route.Input {
 	in := route.Input{Task: task, Repo: route.RepoContext{Languages: []string{}}}
-	out, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
+	out, err := safegit.Command(context.Background(), root, "ls-files", "-z").Output()
 	if err != nil {
 		return in
 	}
@@ -631,4 +634,23 @@ func RepoInput(root, task string) route.Input {
 		in.Repo.Languages = in.Repo.Languages[:3]
 	}
 	return in
+}
+
+// PassKeyEnv, set to 1 by the user, opts in to giving harness children the
+// routing key, for a nested Refraktal that should route with Gemini. Without
+// it no child gets an API key (proc.ScrubEnv).
+const PassKeyEnv = "REFRAKTAL_PASS_GEMINI_KEY"
+
+func childEnv(root string, o RunOptions, tag, budgetJSON string) []string {
+	env := []string{"REFRAKTAL_RUN=" + tag, "REFRAKTAL_BUDGET=" + budgetJSON}
+	getenv := o.Getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if getenv(PassKeyEnv) == "1" {
+		if key, _ := route.LoadKey(root, o.Getenv); key != "" {
+			env = append(env, route.KeyEnv+"="+key)
+		}
+	}
+	return env
 }

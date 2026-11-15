@@ -19,9 +19,13 @@ import (
 
 // sessionMarkers are set by a parent Claude Code session. A harness that
 // inherits them behaves as if it were nested inside that session.
-var sessionMarkers = []string{"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"}
+var sessionMarkers = []string{"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT",
+	// API keys: a harness or tool must not silently bill a key instead of the
+	// subscription. A nested Refraktal gets the routing key only by explicit
+	// opt-in (REFRAKTAL_PASS_GEMINI_KEY=1; docs/DESIGN.md).
+	"GEMINI_API_KEY", "GOOGLE_API_KEY"}
 
-// ScrubEnv returns env without the parent's session markers.
+// ScrubEnv returns env without the parent's session markers and API keys.
 func ScrubEnv(env []string) []string {
 	return slices.DeleteFunc(slices.Clone(env), func(kv string) bool {
 		name, _, _ := strings.Cut(kv, "=")

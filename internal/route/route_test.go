@@ -168,7 +168,9 @@ func TestLoadKey(t *testing.T) {
 
 func router(t *testing.T, key, endpoint string) Router {
 	t.Helper()
-	return New(Options{APIKey: key, Endpoint: endpoint, CacheDir: t.TempDir(), LogPath: filepath.Join(t.TempDir(), "decisions.jsonl")})
+	repo := t.TempDir()
+	exec.Command("git", "-C", repo, "init", "-q").Run() // the log is written only in a git work tree, untracked
+	return New(Options{APIKey: key, Endpoint: endpoint, CacheDir: t.TempDir(), LogPath: filepath.Join(repo, "decisions.jsonl")})
 }
 
 var bugfix = Input{Task: "Fix the off-by-one error in pagination: the last page of results is dropped.", Repo: RepoContext{Languages: []string{"go"}, Files: 140, HasTests: true}}

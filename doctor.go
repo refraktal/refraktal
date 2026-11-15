@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -20,6 +19,7 @@ import (
 	"refraktal.dev/refraktal/internal/proc"
 	"refraktal.dev/refraktal/internal/route"
 	"refraktal.dev/refraktal/internal/runlog"
+	"refraktal.dev/refraktal/internal/safegit"
 )
 
 // Exit codes, from docs/DESIGN.md.
@@ -227,7 +227,7 @@ func (o *DoctorOptions) defaults() error {
 // defaultRoot is the top of the git repository containing the current
 // directory, or the current directory itself.
 func defaultRoot() (string, error) {
-	if out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
+	if out, err := safegit.Command(context.Background(), ".", "rev-parse", "--show-toplevel").Output(); err == nil {
 		if top := strings.TrimSpace(string(out)); top != "" {
 			return top, nil
 		}
