@@ -91,12 +91,37 @@ func Root(ctx context.Context, dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// Head is the commit the repository's HEAD points at.
+func Head(ctx context.Context, repo string) (string, error) {
+	out, err := git(ctx, repo, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("the repository needs at least one commit: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// Show returns a file's content at a commit, or nil if it is not there. It
+// reads the object database only: no checkout, no filters (--no-textconv).
+func Show(ctx context.Context, repo, commit, path string) []byte {
+	out, err := git(ctx, repo, "show", "--no-textconv", "--no-color", commit+":"+path)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
 // Create adds a worktree at dir on a new branch, from the repository's HEAD.
 // Uncommitted changes in the user's tree are not part of it.
 func Create(ctx context.Context, repo, dir, branch string) (Worktree, error) {
+	return CreateAt(ctx, repo, dir, branch, "HEAD")
+}
+
+// CreateAt adds a worktree at dir on a new branch, from the commit base, so
+// every candidate of a run starts from the same commit.
+func CreateAt(ctx context.Context, repo, dir, branch, base string) (Worktree, error) {
 	g := gitOperation(repo, "", false)
 	// Read both in one command: --verify still requires exactly one commit.
-	out, err := g.Run(ctx, nil, "rev-parse", "--verify", "--path-format=absolute", "--git-common-dir", "HEAD^{commit}")
+	out, err := g.Run(ctx, nil, "rev-parse", "--verify", "--path-format=absolute", "--git-common-dir", base+"^{commit}")
 	if err != nil {
 		return Worktree{}, fmt.Errorf("the repository needs at least one commit: %w", err)
 	}
@@ -214,6 +239,16 @@ func (w Worktree) Apply(ctx context.Context, r Result) (string, error) {
 			"git lfs smudge -- FILE < FILE > FILE.tmp && mv FILE.tmp FILE", slices.Sorted(maps.Keys(lfs))), nil
 	}
 	return "", nil
+}
+
+// CheckApply reports whether a result's diff applies cleanly to the user's
+// working tree (git apply --check), changing nothing.
+func (w Worktree) CheckApply(ctx context.Context, r Result) error {
+	if len(r.Diff) == 0 {
+		return nil
+	}
+	_, err := gitOperation(w.Repo, "", true).Run(ctx, r.Diff, "apply", "--check", "--binary")
+	return err
 }
 
 // Remove deletes the worktree and its branch.

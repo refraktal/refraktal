@@ -230,24 +230,28 @@ func TestCache(t *testing.T) {
 	}
 }
 
-// The policy's harness is mapped to a Refraktal harness; a fan-out runs its
-// top harness for now; refraktal, which cannot run yet, is skipped.
+// The policy's harnesses are mapped to Refraktal harnesses; refraktal,
+// which cannot run yet, is replaced by the next most probable harness.
 func TestPick(t *testing.T) {
 	probs := map[string]float64{"refraktal": 0.5, "claude-code": 0.3, "codex": 0.15, "antigravity": 0.05}
 	d := Decision{Harness: Answer{Value: "refraktal", Confidence: 0.5, Probabilities: probs}}
-	h, notes := pick(d, Outcome{Action: ActionRoute, Harnesses: []string{"refraktal"}})
-	if h != "claude" || len(notes) != 1 || !strings.Contains(notes[0], "cannot run yet") {
-		t.Fatalf("refraktal: %q %v", h, notes)
+	hs, notes := pick(d, Outcome{Action: ActionRoute, Harnesses: []string{"refraktal"}})
+	if strings.Join(hs, ",") != "claude" || len(notes) != 1 || !strings.Contains(notes[0], "cannot run yet") {
+		t.Fatalf("refraktal: %v %v", hs, notes)
 	}
 	d.Harness.Value = "codex"
-	h, notes = pick(d, Outcome{Action: ActionFanOut, Width: 2, Harnesses: []string{"codex", "refraktal"}})
-	if h != "codex" || !strings.Contains(strings.Join(notes, " "), "fanning out to 2") {
-		t.Fatalf("fan-out: %q %v", h, notes)
+	hs, _ = pick(d, Outcome{Action: ActionFanOut, Width: 2, Harnesses: []string{"codex", "refraktal"}})
+	if strings.Join(hs, ",") != "codex,claude" {
+		t.Fatalf("fan-out: %v", hs)
+	}
+	hs, _ = pick(d, Outcome{Action: ActionFanOut, Width: 3, Harnesses: []string{"codex", "claude-code", "antigravity"}})
+	if strings.Join(hs, ",") != "codex,claude,agy" {
+		t.Fatalf("fan-out of 3: %v", hs)
 	}
 	d.Harness.Value = "antigravity"
-	h, notes = pick(d, Outcome{Action: ActionEscalate, Harnesses: []string{}})
-	if h != "agy" || !strings.Contains(strings.Join(notes, " "), "escalated") {
-		t.Fatalf("escalate: %q %v", h, notes)
+	hs, notes = pick(d, Outcome{Action: ActionEscalate, Harnesses: []string{}})
+	if strings.Join(hs, ",") != "agy" || !strings.Contains(strings.Join(notes, " "), "escalated") {
+		t.Fatalf("escalate: %v %v", hs, notes)
 	}
 }
 

@@ -49,6 +49,9 @@ func TestMain(m *testing.M) {
 	// which carries the helper switch for its shell prefix: check it first.
 	acptest.RunIfAgent()
 	proc.MaybeShellPrefix()
+	if len(os.Args) > 1 && os.Args[1] == fakeCheckArg {
+		os.Exit(fakeCheck(os.Args[2:]))
+	}
 	os.Exit(m.Run())
 }
 

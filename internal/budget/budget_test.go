@@ -145,3 +145,32 @@ func TestNonFiniteAndHugeBudgetsAreRejected(t *testing.T) {
 		}
 	}
 }
+
+// M6: parallel children split what is left; each share is taken from what
+// is left when that child starts, divided by the children still to start.
+func TestReserveShareSplitsAcrossChildren(t *testing.T) {
+	l, _ := New(Limits{USD: 9, Turns: 10, Wall: time.Minute}, nil)
+	var gs []Grant
+	for n := 3; n >= 1; n-- {
+		g, err := l.ReserveShare(n)
+		if err != nil || !near(g.USD, 3) {
+			t.Fatalf("share with %d to start: %v %v", n, g.USD, err)
+		}
+		gs = append(gs, g)
+	}
+	if err := l.Check(); !exhausted(err, "usd") {
+		t.Fatalf("all reserved: %v", err)
+	}
+	// One child spends $1 and settles: the $2 it did not use is free again,
+	// and a judge started afterwards gets all of it.
+	l.BeginTurn(gs[0])
+	l.Charge(gs[0], Charge{USD: 1, Source: Computed})
+	l.Settle(gs[0], false)
+	if j, err := l.ReserveShare(1); err != nil || !near(j.USD, 2) {
+		t.Fatalf("judge grant %v %v", j.USD, err)
+	}
+	// --turns belong to the whole run, not to a share.
+	if gs[1].Turns != 10 {
+		t.Fatalf("turns were split: %d", gs[1].Turns)
+	}
+}

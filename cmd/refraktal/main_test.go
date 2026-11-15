@@ -30,8 +30,9 @@ func TestCommands(t *testing.T) {
 	}{
 		{nil, 3, "usage: refraktal"},
 		{[]string{"--help"}, 0, "doctor          check harnesses"},
-		{[]string{"run", "fix it", "--harness", "claude,codex"}, 3, "one harness at a time"},
-		{[]string{"run", "--fan", "2", "x"}, 3, "arrives in M6"},
+		{[]string{"run", "fix it", "--harness", "claude,codex"}, 3, "not in a git repository"},
+		{[]string{"run", "--fan", "2", "x"}, 3, "not in a git repository"},
+		{[]string{"run", "--fan", "-1", "x"}, 3, "--fan must not be negative"},
 		{[]string{"run", "--dry", "x"}, 3, "not in a git repository"},
 		{[]string{"run", "--mins", "0", "--harness", "claude", "x"}, 3, "--mins must be more than 0"},
 		{[]string{"run", "--usd", "-1", "--harness", "claude", "x"}, 3, "must not be negative"},

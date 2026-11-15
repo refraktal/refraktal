@@ -35,9 +35,13 @@ func ScrubEnv(env []string) []string {
 
 // Spec says how to start a child.
 type Spec struct {
-	Argv      []string
-	Dir       string
-	Env       []string      // KEY=VALUE pairs added to the scrubbed parent environment
+	Argv []string
+	Dir  string
+	Env  []string // KEY=VALUE pairs added to the scrubbed parent environment
+	// BaseEnv, if set, replaces the scrubbed parent environment, such as
+	// safegit.Env() for check commands. Session markers and API keys are
+	// scrubbed from it too.
+	BaseEnv   []string
 	Stderr    io.Writer     // nil discards it
 	PollEvery time.Duration // how often to look for new descendants; default 200 ms
 
@@ -111,7 +115,11 @@ func Start(s Spec) (*Child, error) {
 	}
 	cmd := exec.Command(s.Argv[0], s.Argv[1:]...)
 	cmd.Dir, cmd.Stdin, cmd.Stdout, cmd.Stderr = s.Dir, inR, outW, s.Stderr
-	cmd.Env = append(append(ScrubEnv(os.Environ()), s.Env...), NestEnv+"="+strconv.Itoa(Nest()+1))
+	base := ScrubEnv(os.Environ())
+	if s.BaseEnv != nil {
+		base = ScrubEnv(s.BaseEnv)
+	}
+	cmd.Env = append(append(base, s.Env...), NestEnv+"="+strconv.Itoa(Nest()+1))
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // a session of its own, and so a process group of its own
 	cmd.WaitDelay = 2 * time.Second                      // a descendant holding stderr open must not hang Wait
 	err = cmd.Start()
@@ -369,6 +377,17 @@ func (c *Child) PID() int { return c.cmd.Process.Pid }
 // Exited is closed once the child has exited. Its PID stays reserved until
 // Shutdown reaps it, so always call Shutdown.
 func (c *Child) Exited() <-chan struct{} { return c.exited }
+
+// ExitCode is the child's exit status once Shutdown has reaped it: -1 if it
+// was killed by a signal or is not reaped yet.
+func (c *Child) ExitCode() int {
+	select {
+	case <-c.reaped:
+		return c.cmd.ProcessState.ExitCode()
+	default:
+		return -1
+	}
+}
 
 // Tracked returns every descendant seen so far.
 func (c *Child) Tracked() []Proc { return c.tracker.Tracked() }

@@ -2,21 +2,19 @@ package refraktal
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"refraktal.dev/refraktal/internal/acp"
 	"refraktal.dev/refraktal/internal/budget"
 	"refraktal.dev/refraktal/internal/config"
 	"refraktal.dev/refraktal/internal/harness"
-	"refraktal.dev/refraktal/internal/policy"
 	"refraktal.dev/refraktal/internal/price"
 	"refraktal.dev/refraktal/internal/proc"
 	"refraktal.dev/refraktal/internal/route"
@@ -36,15 +34,16 @@ const (
 	RunExhausted   = "budget_exhausted" // a budget was spent before the turn could start
 	RunPlanned     = "planned"          // --dry: routed and planned, nothing run
 	RunUnusable    = "unusable"         // the harness could not be started or logged in
+	RunNoWinner    = "no_winner"        // fan-out: no candidate passed the judge
 )
 
 // RunOptions configure Run.
 type RunOptions struct {
 	Task    string
-	Harness string // claude, codex or agy; "" lets the router choose
-	NoApply bool   // leave the result on the worktree's branch
+	Harness string // claude, codex or agy, or a comma-separated set to fan out to; "" lets the router choose
+	NoApply bool   // leave every candidate on its worktree's branch
 	Dry     bool   // plan and route only: no worktree, no harness
-	Fan     int    // 0: the router decides; 1: one harness; wider fan-out arrives in M6
+	Fan     int    // caps the router's width; 0: no cap
 
 	// Dir is a folder inside the repository. Default: the current folder.
 	// Default folders (this one and WorktreeDir) are refused when under
@@ -78,27 +77,33 @@ type RunOptions struct {
 
 // RunResult is what Run did.
 type RunResult struct {
-	Run         string             `json:"run"` // run folder, relative to the repository
-	Harness     string             `json:"harness"`
-	Outcome     string             `json:"outcome"`
-	StopReason  string             `json:"stop_reason,omitempty"`
-	Reply       string             `json:"reply,omitempty"`
-	Files       []string           `json:"files,omitempty"`    // changed paths
-	Branch      string             `json:"branch,omitempty"`   // when the worktree is kept
-	Worktree    string             `json:"worktree,omitempty"` // when the worktree is kept
-	MCP         string             `json:"mcp,omitempty"`
-	Allowed     int                `json:"permissions_allowed"`
-	Denied      int                `json:"permissions_denied"`
-	Usage       *acp.Usage         `json:"usage,omitempty"`
-	Cost        *acp.Cost          `json:"cost,omitempty"` // as the harness reported it (Claude: cumulative for the session)
-	Model       string             `json:"model,omitempty"`
-	Budget      budget.Summary     `json:"budget"`
-	Settlement  *budget.Settlement `json:"settlement,omitempty"`
-	Route       *route.Result      `json:"route,omitempty"` // how the harness was chosen, when the router chose it
-	Notices     []string           `json:"notices,omitempty"`
-	Error       string             `json:"error,omitempty"`
-	LeftRunning int                `json:"left_running"` // processes still running after shutdown
-	Unknown     int                `json:"unknown"`      // processes whose cleanup could not be confirmed
+	Run        string             `json:"run"` // run folder, relative to the repository
+	Harness    string             `json:"harness"`
+	Outcome    string             `json:"outcome"`
+	StopReason string             `json:"stop_reason,omitempty"`
+	Reply      string             `json:"reply,omitempty"`
+	Files      []string           `json:"files,omitempty"`    // changed paths
+	Branch     string             `json:"branch,omitempty"`   // when the worktree is kept
+	Worktree   string             `json:"worktree,omitempty"` // when the worktree is kept
+	MCP        string             `json:"mcp,omitempty"`
+	Allowed    int                `json:"permissions_allowed"`
+	Denied     int                `json:"permissions_denied"`
+	Usage      *acp.Usage         `json:"usage,omitempty"`
+	Cost       *acp.Cost          `json:"cost,omitempty"` // as the harness reported it (Claude: cumulative for the session)
+	Model      string             `json:"model,omitempty"`
+	Budget     budget.Summary     `json:"budget"`
+	Settlement *budget.Settlement `json:"settlement,omitempty"`
+	Route      *route.Result      `json:"route,omitempty"` // how the harness was chosen, when the router chose it
+	Plan       []string           `json:"plan,omitempty"`  // --dry: the harnesses a run would start
+	Candidates []Candidate        `json:"candidates,omitempty"`
+	Verdict    *Verdict           `json:"verdict,omitempty"`
+	Judge      *Candidate         `json:"judge,omitempty"`
+	Notices    []string           `json:"notices,omitempty"`
+	Error      string             `json:"error,omitempty"`
+	// LeftRunning and Unknown count processes still running after shutdown,
+	// and processes whose cleanup could not be confirmed, over every child.
+	LeftRunning int `json:"left_running"`
+	Unknown     int `json:"unknown"`
 }
 
 // ExitCode maps the outcome to the exit codes in docs/DESIGN.md.
@@ -174,8 +179,8 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	if strings.TrimSpace(o.Task) == "" {
 		return res, errors.New("no task: give it as an argument or on stdin")
 	}
-	if o.Fan > 1 {
-		return res, errors.New("fan-out to several harnesses arrives in M6; use --fan 1 or leave it to the router")
+	if o.Fan < 0 {
+		return res, errors.New("--fan must not be negative")
 	}
 	root, err := o.defaults(ctx)
 	if err != nil {
@@ -189,10 +194,25 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		}
 		return nil
 	}
-	var h harness.Harness
+	// --harness a,b pins the set; without it the router chooses.
+	var hs []harness.Harness
 	if o.Harness != "" {
-		if h = find(o.Harness); h == nil {
-			return res, fmt.Errorf("unknown harness %q", o.Harness)
+		for _, n := range strings.Split(o.Harness, ",") {
+			n = strings.TrimSpace(n)
+			h := find(n)
+			if h == nil {
+				return res, fmt.Errorf("unknown harness %q", n)
+			}
+			if slices.ContainsFunc(hs, func(x harness.Harness) bool { return x.Name() == n }) {
+				return res, fmt.Errorf("harness %q named twice", n)
+			}
+			hs = append(hs, h)
+		}
+		if o.Fan > 0 && o.Fan < len(hs) {
+			return res, fmt.Errorf("--fan %d is fewer than the %d harnesses --harness names", o.Fan, len(hs))
+		}
+		if len(hs) == 1 {
+			res.Harness = hs[0].Name()
 		}
 	}
 	cfg, err := config.Load(o.ConfigPath)
@@ -213,25 +233,26 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		}
 		return res, err
 	}
-	grant, err := ledger.Reserve()
-	if err != nil {
+	if err := ledger.Check(); err != nil {
 		res.Outcome, res.Error, res.Budget = RunExhausted, err.Error(), ledger.Summary()
 		return res, nil
 	}
+	var nmu sync.Mutex
 	notice := func(s string) {
+		nmu.Lock()
+		defer nmu.Unlock()
 		res.Notices = append(res.Notices, s)
 		if o.OnNotice != nil {
 			o.OnNotice(s)
 		}
 	}
 	// --mins covers every setup step too: the price fetch, the worktree and
-	// starting the harness all run under the grant's deadline.
-	setupCtx, setupCancel := context.WithDeadline(ctx, grant.Deadline)
+	// starting the harness all run under the run's deadline.
+	setupCtx, setupCancel := context.WithDeadline(ctx, ledger.Deadline())
 	defer setupCancel()
 	setupExpired := func() bool { return errors.Is(setupCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil }
 	exhausted := func(step string) (RunResult, error) {
-		st := ledger.Settle(grant, false)
-		res.Outcome, res.Settlement, res.Budget = RunExhausted, &st, ledger.Summary()
+		res.Outcome, res.Budget = RunExhausted, ledger.Summary()
 		res.Error = "budget exhausted: --mins ran out during " + step
 		return res, nil
 	}
@@ -249,7 +270,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 	defer log.Close()
 	log.Event("run_start", map[string]any{"harness": o.Harness, "task": o.Task, "no_apply": o.NoApply, "dry": o.Dry,
-		"budget": o.Budget, "mins": o.Budget.Wall.Minutes(), "grant": grant})
+		"budget": o.Budget, "mins": o.Budget.Wall.Minutes(), "fan": o.Fan})
 
 	// Without --harness the router chooses; its call runs alongside the rest
 	// of the setup.
@@ -258,11 +279,13 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		err error
 	}
 	var routeCh chan routed
-	if h == nil {
+	scoreKey := "" // the pre-score runs only when the router ran with a key
+	if hs == nil {
 		key, source := route.LoadKey(root, o.Getenv)
 		if source == ".env" {
 			notice("routing with GEMINI_API_KEY from this repository's untracked .env")
 		}
+		scoreKey = key
 		rt := route.New(route.Options{APIKey: key, Endpoint: o.RouterEndpoint, CacheDir: o.RouteCache,
 			LogPath: filepath.Join(root, ".refraktal", "decisions.jsonl"), RunID: run.ID})
 		routeCh = make(chan routed, 1)
@@ -284,9 +307,13 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		res.Route = &r
 		d := r.Decision
 		log.Event("route", map[string]any{"decider": d.Decider, "model": d.Model, "label": d.Harness.Value, "harness": r.Harness,
-			"confidence": d.Harness.Confidence, "probabilities": d.Harness.Probabilities, "action": r.Outcome.Action,
+			"harnesses": r.Run, "confidence": d.Harness.Confidence, "probabilities": d.Harness.Probabilities, "action": r.Outcome.Action,
 			"width": r.Outcome.Width, "reason": r.Outcome.Reason, "cached": r.Cached, "latency_ms": d.LatencyMS,
 			"fallback": runlog.ErrorField("fallback", d.FallbackReason)})
+		names := r.Run
+		if o.Fan > 0 && len(names) > o.Fan {
+			names = names[:o.Fan]
+		}
 		how := fmt.Sprintf("%s (confidence %.2f, %.0f ms)", d.Decider, d.Harness.Confidence, d.LatencyMS)
 		if r.Cached {
 			how = fmt.Sprintf("%s, cached (confidence %.2f)", d.Decider, d.Harness.Confidence)
@@ -294,14 +321,24 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		if d.Decider == "fallback" {
 			how += "; " + d.FallbackReason
 		}
-		notice(fmt.Sprintf("routed to %s by %s", r.Harness, how))
+		notice(fmt.Sprintf("routed to %s by %s", strings.Join(names, ", "), how))
 		for _, n := range r.Notes {
 			notice(n)
 		}
-		if h = find(r.Harness); h == nil {
-			return fmt.Errorf("the router chose %q, which is not available", r.Harness)
+		if len(names) < len(r.Run) {
+			notice(fmt.Sprintf("the router advised %d harnesses; --fan %d caps it", len(r.Run), o.Fan))
 		}
-		res.Harness = h.Name()
+		for _, n := range names {
+			h := find(n)
+			if h == nil {
+				return fmt.Errorf("the router chose %q, which is not available", n)
+			}
+			hs = append(hs, h)
+		}
+		if len(hs) == 0 {
+			return route.ErrNoHarness
+		}
+		res.Harness = hs[0].Name()
 		return nil
 	}
 	if o.Dry {
@@ -309,14 +346,16 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		if setupExpired() { // the router fell back because --mins ran out: not a plan
 			return exhausted("routing")
 		}
-		st := ledger.Settle(grant, false)
-		res.Settlement, res.Budget = &st, ledger.Summary()
+		res.Budget = ledger.Summary()
 		if err != nil {
 			res.Error = err.Error()
 			return res, nil
 		}
 		res.Outcome = RunPlanned
-		log.Event("run_end", map[string]any{"outcome": res.Outcome, "harness": res.Harness})
+		for _, h := range hs {
+			res.Plan = append(res.Plan, h.Name())
+		}
+		log.Event("run_end", map[string]any{"outcome": res.Outcome, "harness": res.Harness, "plan": res.Plan})
 		return res, nil
 	}
 	prices, perr0 := price.Load(setupCtx, price.LoadOptions{CachePath: o.PriceCache, URL: o.PriceURL})
@@ -346,206 +385,77 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 				len(cleanup.Kill.Alive), len(cleanup.Kill.Unknown)))
 		}
 	}
-
 	if err := os.MkdirAll(o.WorktreeDir, 0o755); err != nil {
 		return res, err
 	}
-	wt, err := worktree.Create(setupCtx, root, filepath.Join(o.WorktreeDir, run.ID), "refraktal/"+run.ID)
+	headCtx, headCancel := context.WithTimeout(setupCtx, safegit.Timeout)
+	base, err := worktree.Head(headCtx, root)
+	headCancel()
 	if err != nil {
 		if setupExpired() {
 			return exhausted("worktree creation")
 		}
 		return res, err
 	}
-	log.Event("worktree", map[string]any{"branch": wt.Branch, "base": wt.Base})
-	removeWorktree := func() error {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), safegit.OperationTimeout)
-		defer cancel()
-		return wt.Remove(cleanupCtx)
-	}
 	if err := joinRoute(); err != nil || setupExpired() {
-		removeWorktree()
 		if setupExpired() {
 			return exhausted("routing")
 		}
 		res.Error = err.Error()
 		return res, nil
 	}
-	hcfg := cfg.For(h.Name())
-	log.Event("harness", map[string]any{"harness": h.Name(), "mcp": hcfg.MCP})
-	if hooks := harness.ProjectHooks(wt.Dir, h.Name()); len(hooks) > 0 {
-		notice(fmt.Sprintf("this repository configures %s hooks (%s); they run inside the child, outside Refraktal's permission policy",
-			h.Name(), strings.Join(hooks, ", ")))
-	}
-
-	scratch, tmp := filepath.Join(run.Dir, h.Name()), filepath.Join(run.Dir, "tmp")
-	for _, d := range []string{h.Name(), "tmp"} {
-		if err := run.Mkdir(d, 0o700); err != nil {
-			return res, err
-		}
-	}
-	scratchRoot, err := run.OpenRoot(h.Name())
-	if err != nil {
-		return res, err
-	}
-	defer scratchRoot.Close()
-	// Durable events carry an error's code and length bucket only; harness error
-	// text can hold account details, so the raw text goes to the gitignored
-	// stderr capture beside the harness's own.
-	errEvent := func(code, raw string) map[string]any {
-		runlog.AppendRaw(scratchRoot, "stderr", code, raw)
-		return runlog.ErrorField(code, raw)
-	}
-	pol := policy.Policy{Worktree: wt.Dir}
-	var mu sync.Mutex
-	var reply strings.Builder
-	childBudget, _ := json.Marshal(map[string]any{"usd": grant.USD, "turns": grant.Turns,
-		"deadline": grant.Deadline.UTC().Format(time.RFC3339), "depth": grant.Depth})
-	s, err := openSession(setupCtx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, scratchRoot: scratchRoot, cwd: wt.Dir, tmpDir: tmp,
-		liveDir: o.LiveDir, labels: map[string]string{"run": run.ID, "harness": h.Name()}, log: log, timeout: 2 * time.Minute,
-		// REFRAKTAL_RUN tags the child's processes for logs only (the session
-		// sweep finds leftovers). REFRAKTAL_BUDGET is what a child Refraktal
-		// may use.
-		env:       childEnv(root, o, run.ID+"-"+h.Name(), string(childBudget)),
-		prefixExe: o.ShellPrefix,
-		onPermission: func(_ context.Context, req acp.PermissionRequest) string {
-			d := pol.Decide(req)
-			mu.Lock()
-			if d.Allow {
-				res.Allowed++
-			} else {
-				res.Denied++
-			}
-			mu.Unlock()
-			log.Event("permission", map[string]any{"harness": h.Name(), "decision": d})
-			return d.OptionID
-		},
-		onUpdate: func(u acp.Update) {
-			if u.Kind == "agent_message_chunk" {
-				mu.Lock()
-				reply.WriteString(chunkText(u))
-				mu.Unlock()
-			}
-		}})
-	res.MCP = s.launch.MCP
-	closeSession := func(grace time.Duration) proc.ShutdownReport {
-		sr := s.close(log, h.Name(), grace)
-		res.LeftRunning, res.Unknown = shutdownCounts(sr)
-		if res.LeftRunning > 0 || res.Unknown > 0 {
-			notice(fmt.Sprintf("shutdown incomplete: %d still running, %d unknown; live record kept for retry", res.LeftRunning, res.Unknown))
-		}
-		return sr
-	}
-	if res.MCP == harness.MCPInherit {
-		notice(h.Name() + " uses your own MCP servers and plugins (mcp: inherit in the config)")
-	}
-	if err != nil {
-		closeSession(5 * time.Second)
-		res.Error = fmt.Sprintf("%s: %v", statusOf(err), err)
-		if setupExpired() {
-			// --mins ran out while the harness was starting: a spent budget.
-			res.Outcome, res.Error = RunExhausted, "budget exhausted: --mins ran out while starting the harness ("+res.Error+")"
-		}
-		st := ledger.Settle(grant, false)
-		res.Settlement, res.Budget = &st, ledger.Summary()
-		removeWorktree()
-		code := statusOf(err)
-		if res.Outcome == RunExhausted {
-			code = RunExhausted
-		}
-		log.Event("run_end", map[string]any{"outcome": res.Outcome, "error": errEvent(code, res.Error), "budget": res.Budget})
+	env := &runEnv{ctx: ctx, o: o, root: root, cfg: cfg, ledger: ledger, prices: prices, run: run, log: log, base: base, notice: notice}
+	if len(hs) > 1 {
+		env.fanOut(hs, scoreKey, &res)
+		res.Budget = ledger.Summary()
+		log.Event("run_end", map[string]any{"outcome": res.Outcome, "winner": res.Harness, "files": res.Files, "branch": res.Branch,
+			"verdict": res.Verdict, "error": runlog.ErrorField(res.Outcome, res.Error), "budget": res.Budget})
 		return res, nil
 	}
 
-	if err := ledger.BeginTurn(grant); err != nil {
-		closeSession(5 * time.Second)
-		removeWorktree()
-		ledger.Settle(grant, false)
-		res.Outcome, res.Error, res.Budget = RunExhausted, err.Error(), ledger.Summary()
-		log.Event("run_end", map[string]any{"outcome": res.Outcome, "error": errEvent(RunExhausted, res.Error)})
-		return res, nil
-	}
-	tctx, cancel := context.WithDeadline(ctx, grant.Deadline)
-	turn, perr := s.client.Prompt(tctx, s.id, o.Task)
-	timedOut := errors.Is(tctx.Err(), context.DeadlineExceeded)
-	cancel()
-	sr := closeSession(10 * time.Second)
-	res.Model = cmpOr(turn.Model, s.model)
-	// A turn is cancelled if we sent session/cancel or the harness ended it
-	// as cancelled on its own (Codex does after a denial).
-	turn.Cancelled = turn.Cancelled || turn.StopReason == "cancelled"
-	for _, c := range charges(h.Name(), res.Model, turn, prices) {
-		ledger.Charge(grant, c)
-		log.Event("charge", map[string]any{"harness": h.Name(), "charge": c})
-		if c.Source == budget.Unpriced {
-			notice(fmt.Sprintf("warning: no price for model %q; its tokens count as $0 against --usd", c.Model))
-		}
-	}
-	st := ledger.Settle(grant, turn.Cancelled)
-	res.Settlement, res.Budget = &st, ledger.Summary()
-	if st.Overrun > 0 {
-		notice(fmt.Sprintf("the turn cost $%.4f, $%.4f beyond the --usd grant: --usd is checked before a turn, never inside one", st.Spent, st.Overrun))
-	}
-	mu.Lock()
-	res.Reply = strings.TrimSpace(reply.String())
-	mu.Unlock()
-	res.StopReason, res.Usage, res.Cost = turn.StopReason, turn.Usage, turn.Cost
-	log.Event("turn", map[string]any{"stop_reason": turn.StopReason, "cancelled": turn.Cancelled, "wall_ms": turn.Wall.Milliseconds(),
-		"usage": turn.Usage, "cost": turn.Cost, "last_used": turn.LastUsed, "error": errEvent(turnErrorCode(perr), errString(perr)),
-		"left_running": res.LeftRunning, "unknown": res.Unknown, "exited_on_its_own": sr.ExitedOnItsOwn})
-
-	// Retain the result even after cancellation, with a bounded collection.
-	collectCtx, cancelCollect := context.WithTimeout(context.WithoutCancel(ctx), safegit.OperationTimeout)
-	r, cerr2 := wt.Collect(collectCtx, "refraktal "+run.ID+": "+firstLine(o.Task))
-	cancelCollect()
-	res.Files = r.Files
-	if len(r.Diff) > 0 {
-		run.WriteFile("result.diff", r.Diff, 0o600)
-	}
-	keep := func(outcome string) {
-		res.Outcome, res.Branch, res.Worktree = outcome, wt.Branch, wt.Dir
-	}
-	switch {
-	case cerr2 != nil:
-		keep(RunFailed)
-		res.Error = cerr2.Error()
-	case timedOut:
-		keep(RunTimedOut)
-	case perr != nil || turn.StopReason != "end_turn":
-		keep(RunFailed)
-		res.Error = errString(perr)
-	case len(r.Files) == 0 && o.NoApply:
-		keep(RunNoChanges) // --no-apply always leaves the worktree
-	case len(r.Files) == 0:
+	// One candidate: nothing to choose, so it is applied as in M3.
+	c := env.child(hs[0], childSpec{prompt: o.Task})
+	res.Harness, res.MCP, res.Allowed, res.Denied = c.Harness, c.MCP, c.Allowed, c.Denied
+	res.Model, res.Reply, res.StopReason, res.Usage, res.Cost = c.Model, c.Reply, c.StopReason, c.Usage, c.Cost
+	res.Settlement, res.Files, res.Error = c.Settlement, c.Files, c.Error
+	res.LeftRunning, res.Unknown = c.LeftRunning, c.Unknown
+	switch c.Outcome {
+	case candUnusable:
+		res.Outcome = RunUnusable
+	case candExhausted:
+		res.Outcome = RunExhausted
+	case candTimedOut:
+		res.Outcome = RunTimedOut
+	case candFailed:
+		res.Outcome = RunFailed
+	case candNoChanges:
 		res.Outcome = RunNoChanges
-	case o.NoApply:
-		keep(RunKept)
-	default:
-		applyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), safegit.OperationTimeout) // never stop git apply halfway
-		n, err := wt.Apply(applyCtx, r)
-		cancel()
-		if err != nil {
-			keep(RunApplyFailed)
-			res.Error = err.Error()
-		} else {
-			res.Outcome = RunApplied
-			if n != "" {
-				notice(n)
+	case candChanges:
+		switch {
+		case o.NoApply:
+			res.Outcome = RunKept
+		default:
+			if n, err := env.apply(c); err != nil {
+				res.Outcome, res.Error = RunApplyFailed, err.Error()
+			} else {
+				res.Outcome = RunApplied
+				if n != "" {
+					notice(n)
+				}
 			}
 		}
 	}
-	if res.Worktree == "" {
-		if err := removeWorktree(); err != nil {
-			log.Event("worktree_remove_failed", map[string]any{"error": errEvent("worktree_remove_failed", err.Error())})
-		}
-	} else if len(r.Files) == 0 && !o.NoApply {
-		// Nothing to keep: a failed or timed-out turn that changed nothing.
-		removeWorktree()
-		res.Branch, res.Worktree = "", ""
+	// --no-apply always leaves the worktree; so do a failed apply and a
+	// failed or timed-out turn that changed something.
+	if c.wt != nil && (o.NoApply || (len(c.Files) > 0 && res.Outcome != RunApplied)) {
+		c.keep()
+		res.Branch, res.Worktree = c.Branch, c.Worktree
 	}
+	env.drop(c)
+	res.Budget = ledger.Summary()
 	log.Event("run_end", map[string]any{"outcome": res.Outcome, "files": res.Files, "branch": res.Branch,
-		"allowed": res.Allowed, "denied": res.Denied, "error": errEvent(res.Outcome, res.Error), "budget": res.Budget, "settlement": res.Settlement,
-		"swept": len(sr.Swept.Killed), "left_running": res.LeftRunning, "unknown": res.Unknown})
+		"allowed": res.Allowed, "denied": res.Denied, "error": runlog.ErrorField(res.Outcome, res.Error), "budget": res.Budget,
+		"settlement": res.Settlement, "swept": c.swept, "left_running": res.LeftRunning, "unknown": res.Unknown})
 	return res, nil
 }
 

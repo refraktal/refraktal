@@ -27,6 +27,11 @@
 //	          cwd, write ../outside.txt, and run git push (simulated: it writes
 //	          pushed.txt in the cwd); then end_turn
 //
+// In turn mode, ACPTEST_WRITE ("path=content|...") writes files in the cwd,
+// each after an edit permission request it must be allowed. A prompt that
+// starts "You are judging" is answered with ACPTEST_JUDGE when set: the reply
+// text, or "hang" to wait for session/cancel.
+//
 // session/new reports the model in ACPTEST_MODEL (default fake-model). With
 // ACPTEST_NOCOST set, the turn reports tokens but no cost, as Codex and
 // Antigravity do. In hang mode the cancelled response carries usage for a
@@ -230,6 +235,17 @@ func (a *agent) handle(m message, line string) {
 				fh.Close()
 			}
 		}
+		var pp struct {
+			Prompt []struct {
+				Text string `json:"text"`
+			} `json:"prompt"`
+		}
+		json.Unmarshal(m.Params, &pp)
+		judging := len(pp.Prompt) > 0 && strings.HasPrefix(pp.Prompt[0].Text, "You are judging")
+		if j := os.Getenv("ACPTEST_JUDGE"); judging && j != "" {
+			go a.judge(m.ID, j)
+			return
+		}
 		go a.prompt(m.ID)
 	case "session/cancel":
 		if a.mode != "deaf" {
@@ -307,6 +323,7 @@ func (a *agent) prompt(id json.RawMessage) {
 		return
 	}
 	a.chunk("Hello")
+	a.writes()
 	a.update(obj{"sessionUpdate": "usage_update", "used": 1200, "size": 200000})
 	a.update(obj{"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Write note.txt", "kind": "edit", "status": "pending"})
 	a.chunk(" permission=" + a.permission())
@@ -319,6 +336,44 @@ func (a *agent) prompt(id json.RawMessage) {
 	}
 	a.send(message{ID: id, Result: obj{"stopReason": "end_turn",
 		"usage": obj{"totalTokens": 1500, "inputTokens": 1400, "outputTokens": 100, "cachedReadTokens": 1000}}})
+}
+
+// writes performs ACPTEST_WRITE ("path=content|path=content"), each only if
+// an edit permission for it is allowed.
+func (a *agent) writes() {
+	w := os.Getenv("ACPTEST_WRITE")
+	if w == "" {
+		return
+	}
+	for i, kv := range strings.Split(w, "|") {
+		path, content, _ := strings.Cut(kv, "=")
+		full := filepath.Join(a.cwd, path)
+		tool := obj{"toolCallId": fmt.Sprintf("e%d", i), "kind": "edit", "title": "Write " + path,
+			"rawInput": obj{"file_path": full, "content": content}, "locations": []obj{{"path": full}}}
+		answer := a.ask("session/request_permission", obj{"toolCall": tool, "options": []obj{
+			{"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+			{"optionId": "reject", "name": "Reject", "kind": "reject_once"}}})
+		if strings.Contains(answer, `"optionId":"allow"`) {
+			os.MkdirAll(filepath.Dir(full), 0o755)
+			os.WriteFile(full, []byte(content+"\n"), 0o644)
+		}
+	}
+}
+
+// judge answers a judging prompt: "hang" waits for session/cancel; anything
+// else is the reply. It tries ACPTEST_WRITE first, which a read-only judge
+// must be denied.
+func (a *agent) judge(id json.RawMessage, reply string) {
+	a.writes()
+	if reply == "hang" {
+		a.chunk("thinking")
+		<-a.cancel
+		a.send(message{ID: id, Result: obj{"stopReason": "cancelled"}})
+		return
+	}
+	a.chunk(reply)
+	a.update(obj{"sessionUpdate": "usage_update", "used": 700, "size": 200000, "cost": obj{"amount": 0.002, "currency": "USD"}})
+	a.send(message{ID: id, Result: obj{"stopReason": "end_turn", "usage": obj{"totalTokens": 700, "inputTokens": 600, "outputTokens": 100}}})
 }
 
 func (a *agent) permission() string {

@@ -17,8 +17,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // MCP settings for a harness.
@@ -33,6 +35,66 @@ type Config struct {
 	// Prices overrides the price table for a model, in US dollars per million
 	// tokens: {"gpt-6.1-sol": {"input": 2, "output": 10, "cache_read": 0.1}}.
 	Prices map[string]Price `json:"prices,omitempty"`
+	// Checks are the commands judging runs in each candidate, per repository
+	// path ("~/" allowed): {"~/src/app": {"test": ["make", "test"]}}.
+	Checks map[string]Check `json:"checks,omitempty"`
+	Judge  Judge            `json:"judge"`
+}
+
+// Check is one repository's check commands, as argv lists (no shell).
+type Check struct {
+	Build       []string `json:"build,omitempty"`
+	Test        []string `json:"test,omitempty"`
+	TimeoutMins float64  `json:"timeout_mins,omitempty"` // per command; default DefaultCheckMins
+}
+
+// DefaultCheckMins is the per-check time limit when none is set.
+const DefaultCheckMins = 10
+
+// Judge configures judging.
+type Judge struct {
+	// Margin: the top two pre-scores within this are a close call, for the
+	// harness judge. nil means DefaultMargin.
+	Margin *float64 `json:"margin,omitempty"`
+}
+
+// DefaultMargin is the close-call margin when none is set.
+const DefaultMargin = 0.10
+
+// MarginOr returns the configured margin, or DefaultMargin.
+func (c Config) MarginOr() float64 {
+	if c.Judge.Margin != nil {
+		return *c.Judge.Margin
+	}
+	return DefaultMargin
+}
+
+// CheckFor returns the check configured for the repository at root, if any.
+// Keys are compared after expanding "~/" and resolving symlinks.
+func (c Config) CheckFor(root string) (Check, bool) {
+	want := canon(root)
+	for k, v := range c.Checks {
+		if canon(expandHome(k)) == want {
+			return v, true
+		}
+	}
+	return Check{}, false
+}
+
+func expandHome(p string) string {
+	if strings.HasPrefix(p, "~/") {
+		if h, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(h, p[2:])
+		}
+	}
+	return p
+}
+
+func canon(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return filepath.Clean(p)
 }
 
 // Price is a per-model price override, in US dollars per million tokens.
@@ -104,6 +166,20 @@ func Load(path string) (Config, error) {
 		if p.Input < 0 || p.Output < 0 || (p.CacheRead != nil && *p.CacheRead < 0) || (p.CacheWrite != nil && *p.CacheWrite < 0) || (p.Input == 0 && p.Output == 0) {
 			return c, fmt.Errorf("%s: prices.%s needs non-negative input and output prices (US dollars per million tokens)", path, model)
 		}
+	}
+	for repo, ch := range c.Checks {
+		if len(ch.Build) == 0 && len(ch.Test) == 0 {
+			return c, fmt.Errorf("%s: checks.%s needs a build or test command (an argv list)", path, repo)
+		}
+		if !filepath.IsAbs(expandHome(repo)) {
+			return c, fmt.Errorf("%s: checks.%s: the key must be an absolute path or start with ~/", path, repo)
+		}
+		if math.IsNaN(ch.TimeoutMins) || math.IsInf(ch.TimeoutMins, 0) || ch.TimeoutMins < 0 || ch.TimeoutMins > 1440 {
+			return c, fmt.Errorf("%s: checks.%s.timeout_mins must be between 0 and 1440", path, repo)
+		}
+	}
+	if m := c.Judge.Margin; m != nil && (math.IsNaN(*m) || *m < 0 || *m > 1) {
+		return c, fmt.Errorf("%s: judge.margin must be between 0 and 1", path)
 	}
 	return c, nil
 }

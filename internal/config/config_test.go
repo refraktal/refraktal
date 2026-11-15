@@ -39,3 +39,35 @@ func TestLoad(t *testing.T) {
 		}
 	}
 }
+
+func TestChecksAndJudge(t *testing.T) {
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "repo")
+	os.MkdirAll(repo, 0o755)
+	p := filepath.Join(dir, "config.json")
+	os.WriteFile(p, []byte(`{"checks": {"`+repo+`": {"test": ["make", "test"], "timeout_mins": 2}}, "judge": {"margin": 0.2}}`), 0o600)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch, ok := c.CheckFor(repo); !ok || ch.Test[1] != "test" || ch.TimeoutMins != 2 {
+		t.Fatalf("check %+v %v", ch, ok)
+	}
+	if _, ok := c.CheckFor(dir); ok {
+		t.Fatal("a check for another folder matched")
+	}
+	if c.MarginOr() != 0.2 || (Config{}).MarginOr() != DefaultMargin {
+		t.Fatalf("margin %v", c.MarginOr())
+	}
+	for _, bad := range []string{
+		`{"checks": {"` + repo + `": {}}}`,
+		`{"checks": {"relative/path": {"test": ["x"]}}}`,
+		`{"checks": {"` + repo + `": {"test": ["x"], "timeout_mins": -1}}}`,
+		`{"judge": {"margin": 1.5}}`,
+	} {
+		os.WriteFile(p, []byte(bad), 0o600)
+		if _, err := Load(p); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+}
