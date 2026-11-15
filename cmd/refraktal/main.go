@@ -4,11 +4,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 
 	"refraktal.dev/refraktal"
 )
@@ -39,7 +41,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "doctor":
 		return doctor(ctx, args[1:], stdout, stderr)
-	case "run", "acp", "show":
+	case "run":
+		return runCmd(ctx, args[1:], os.Stdin, stdout, stderr)
+	case "acp", "show":
 		fmt.Fprintf(stderr, "refraktal %s: not implemented yet in %s\n", args[0], refraktal.Version)
 		return refraktal.ExitNothingUsable
 	case "-h", "-help", "--help", "help":
@@ -74,4 +78,108 @@ func doctor(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		refraktal.WriteDoctorText(stdout, rep)
 	}
 	return rep.ExitCode()
+}
+
+// runCmd is `refraktal run [task] [flags]`. Flags may come before or after
+// the task. The task comes from the argument, stdin, or both.
+func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	harnessName := fs.String("harness", "", "run on this harness: claude, codex or agy")
+	noApply := fs.Bool("no-apply", false, "leave the result on the worktree's branch")
+	asJSON := fs.Bool("json", false, "JSONL on stdout")
+	fan := fs.Int("fan", 0, "fan-out width (not yet: M6)")
+	dry := fs.Bool("dry", false, "plan and route only (not yet: M5)")
+	var usd, turns, mins, depth string
+	fs.StringVar(&usd, "usd", "", "budget (not yet: M4)")
+	fs.StringVar(&turns, "turns", "", "budget (not yet: M4)")
+	fs.StringVar(&mins, "mins", "", "budget (not yet: M4)")
+	fs.StringVar(&depth, "depth", "", "budget (not yet: M4)")
+	var words []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return refraktal.ExitNothingUsable
+		}
+		if fs.NArg() == 0 {
+			break
+		}
+		words = append(words, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+	switch {
+	case *fan != 0, *dry, usd != "", turns != "", mins != "", depth != "":
+		fmt.Fprintln(stderr, "refraktal run: --fan, --dry and the budget flags are not implemented yet")
+		return refraktal.ExitNothingUsable
+	case *harnessName == "":
+		fmt.Fprintln(stderr, "refraktal run: --harness is required until routing lands")
+		return refraktal.ExitNothingUsable
+	case strings.Contains(*harnessName, ","):
+		fmt.Fprintln(stderr, "refraktal run: one harness at a time until fan-out lands")
+		return refraktal.ExitNothingUsable
+	}
+	task, err := readTask(words, stdin)
+	if err != nil {
+		fmt.Fprintf(stderr, "refraktal run: reading stdin: %v\n", err)
+		return refraktal.ExitNothingUsable
+	}
+	enc := json.NewEncoder(stdout)
+	res, err := refraktal.Run(ctx, refraktal.RunOptions{Task: task, Harness: *harnessName, NoApply: *noApply,
+		OnNotice: func(n string) {
+			if *asJSON {
+				enc.Encode(map[string]string{"type": "notice", "text": n})
+			} else {
+				fmt.Fprintln(stderr, "notice: "+n)
+			}
+		}})
+	if err != nil {
+		fmt.Fprintf(stderr, "refraktal run: %v\n", err)
+		return refraktal.ExitNothingUsable
+	}
+	if *asJSON {
+		enc.Encode(struct {
+			Type string `json:"type"`
+			refraktal.RunResult
+			Exit int `json:"exit"`
+		}{"result", res, res.ExitCode()})
+		return res.ExitCode()
+	}
+	if res.Reply != "" {
+		fmt.Fprintln(stdout, res.Reply)
+		fmt.Fprintln(stdout)
+	}
+	fmt.Fprintf(stdout, "%s: %s", res.Harness, res.Outcome)
+	if len(res.Files) > 0 {
+		fmt.Fprintf(stdout, ", %d files: %s", len(res.Files), strings.Join(res.Files, " "))
+	}
+	fmt.Fprintf(stdout, " (permissions: %d allowed, %d denied)\n", res.Allowed, res.Denied)
+	if res.Branch != "" {
+		fmt.Fprintf(stdout, "branch %s, worktree %s\n", res.Branch, res.Worktree)
+	}
+	if res.Error != "" {
+		fmt.Fprintf(stdout, "error: %s\n", res.Error)
+	}
+	fmt.Fprintf(stdout, "run folder: %s\n", res.Run)
+	return res.ExitCode()
+}
+
+// readTask joins the task words and, when stdin is a pipe or a file, what it
+// holds. A terminal or a socket is never read: an IDE or agent tool may hand
+// over a socket that never closes, and reading it would hang.
+func readTask(words []string, stdin *os.File) (string, error) {
+	task := strings.Join(words, " ")
+	if stdin == nil {
+		return task, nil
+	}
+	fi, err := stdin.Stat()
+	if err != nil || (fi.Mode()&os.ModeNamedPipe == 0 && !fi.Mode().IsRegular()) {
+		return task, nil
+	}
+	b, err := io.ReadAll(stdin)
+	if err != nil {
+		return "", err
+	}
+	if in := strings.TrimSpace(string(b)); in != "" {
+		task = strings.TrimSpace(task + "\n\n" + in)
+	}
+	return task, nil
 }

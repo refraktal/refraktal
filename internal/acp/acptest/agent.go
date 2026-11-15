@@ -18,6 +18,10 @@
 //	noauth    session/new fails with -32000 Authentication required
 //	oldproto  initialize answers with protocol version 2
 //	auth      as turn, and first sends an auth/status_update carrying an email
+//	tools     asks permission for three tool calls, shaped as Claude sends
+//	          them, and performs each only if allowed: write hello.txt in the
+//	          cwd, write ../outside.txt, and run git push (simulated: it writes
+//	          pushed.txt in the cwd); then end_turn
 //
 // If ACPTEST_PROMPTS names a file, every session/prompt appends a line to it,
 // so a test can prove that no prompt was sent, and every session/new appends
@@ -36,6 +40,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -225,6 +230,33 @@ func (a *agent) prompt(id json.RawMessage) {
 	case "auth":
 		p, _ := json.Marshal(obj{"status": "authenticated", "account": obj{"email": AuthEmail, "plan": "max"}})
 		a.send(message{Method: "auth/status_update", Params: p})
+	case "tools":
+		inside := filepath.Join(a.cwd, "hello.txt")
+		outside := filepath.Join(a.cwd, "..", "outside.txt")
+		steps := []struct {
+			tool obj
+			do   func()
+		}{
+			{obj{"toolCallId": "w1", "kind": "edit", "title": "Write hello.txt", "rawInput": obj{"file_path": inside, "content": "hello"},
+				"locations": []obj{{"path": inside}}}, func() { os.WriteFile(inside, []byte("hello\n"), 0o644) }},
+			{obj{"toolCallId": "w2", "kind": "edit", "title": "Write ../outside.txt", "rawInput": obj{"file_path": outside, "content": "x"},
+				"locations": []obj{{"path": outside}}}, func() { os.WriteFile(outside, []byte("x\n"), 0o644) }},
+			{obj{"toolCallId": "x1", "kind": "execute", "title": "git push origin HEAD", "rawInput": obj{"command": "git push origin HEAD"}},
+				func() { os.WriteFile(filepath.Join(a.cwd, "pushed.txt"), []byte("pushed\n"), 0o644) }},
+		}
+		for _, st := range steps {
+			a.update(obj{"sessionUpdate": "tool_call", "toolCallId": st.tool["toolCallId"], "title": st.tool["title"], "kind": st.tool["kind"], "status": "pending"})
+			answer := a.ask("session/request_permission", obj{"toolCall": st.tool, "options": []obj{
+				{"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+				{"optionId": "reject", "name": "Reject", "kind": "reject_once"}}})
+			if strings.Contains(answer, `"optionId":"allow"`) {
+				st.do()
+			}
+			a.chunk(fmt.Sprintf(" %v=%s", st.tool["toolCallId"], answer))
+		}
+		a.update(obj{"sessionUpdate": "usage_update", "used": 900, "size": 200000, "cost": obj{"amount": 0.01, "currency": "USD"}})
+		a.send(message{ID: id, Result: obj{"stopReason": "end_turn", "usage": obj{"totalTokens": 900, "inputTokens": 800, "outputTokens": 100}}})
+		return
 	}
 	a.chunk("Hello")
 	a.update(obj{"sessionUpdate": "usage_update", "used": 1200, "size": 200000})

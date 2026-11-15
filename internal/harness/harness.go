@@ -22,26 +22,35 @@ import (
 
 // MCP isolation states, as doctor and the run log report them.
 const (
-	MCPIsolated    = "isolated"    // the user's MCP servers and plugins are hidden per run
-	MCPInherit     = "inherit"     // the user's setup is used, by choice
-	MCPUnavailable = "unavailable" // no per-run mechanism: the user's setup is used
+	MCPIsolated = "isolated" // the user's MCP servers and plugins are hidden per run
+	MCPInherit  = "inherit"  // the user's setup is used, by choice (config)
 )
 
 // Harness is one harness Refraktal can drive.
 type Harness interface {
 	Name() string
 	Mode() string // the permission mode set on every session (docs/DESIGN.md)
-	MCP() string  // the MCP isolation state with default settings
-	// Prepare finds or installs what is needed to launch the harness. scratch
-	// is a folder inside the run folder that the harness may use.
-	Prepare(ctx context.Context, scratch string) (Launch, error)
+	// Prepare finds or installs what is needed to launch the harness.
+	Prepare(ctx context.Context, o Options) (Launch, error)
 }
+
+// Options say how to prepare a harness for one session.
+type Options struct {
+	Scratch    string // a folder inside the run folder the harness may use
+	Cwd        string // the session folder
+	MCP        string // "isolated" or "inherit" (config.MCPIsolated, config.MCPInherit)
+	Executable string // optional: the binary to run (see config.Harness.Executable)
+	TmpDir     string // optional: a private TMPDIR for the child (used for Codex)
+}
+
+func (o Options) inherit() bool { return o.MCP == MCPInherit }
 
 // Launch is how to start a prepared harness, and what was found on the way.
 type Launch struct {
 	Argv []string
 	Env  []string
 	Meta json.RawMessage // sent as _meta on session/new
+	MCP  string          // the isolation state in effect: isolated or inherit
 
 	Adapter          string // pinned adapter package@version, or "" for a native ACP harness
 	AdapterInstalled bool   // the adapter was installed into the cache just now
@@ -53,13 +62,12 @@ type Launch struct {
 // Adapters are installed under cacheDir.
 func Defaults(cacheDir string) []Harness {
 	return []Harness{
-		&adapted{name: "claude", mode: "default", mcp: MCPIsolated, cli: "claude",
+		&adapted{name: "claude", mode: "default", cli: "claude", exeEnv: "CLAUDE_CODE_EXECUTABLE",
 			pkg: "@agentclientprotocol/claude-agent-acp", version: "0.107.0", bin: "claude-agent-acp",
-			bundled: "@anthropic-ai/claude-agent-sdk-*/claude", cache: cacheDir,
-			meta: json.RawMessage(`{"claudeCode":{"options":{"strictMcpConfig":true}}}`)},
-		&adapted{name: "codex", mode: "workspace-write", mcp: MCPUnavailable, cli: "codex",
+			bundled: "@anthropic-ai/claude-agent-sdk-*/claude", cache: cacheDir, isolate: isolateClaude},
+		&adapted{name: "codex", mode: "workspace-write", cli: "codex", exeEnv: "CODEX_PATH",
 			pkg: "@agentclientprotocol/codex-acp", version: "2.6.0", bin: "codex-acp",
-			bundled: "@openai/codex-*/vendor/*/bin/codex", cache: cacheDir},
+			bundled: "@openai/codex-*/vendor/*/bin/codex", cache: cacheDir, isolate: configureCodex},
 		agy{},
 	}
 }
@@ -76,21 +84,27 @@ func DefaultCacheDir() (string, error) {
 // adapted is a harness driven through a pinned npm ACP adapter that bundles
 // its own harness binary.
 type adapted struct {
-	name, mode, mcp string
-	cli             string // the harness's own CLI, for the installed version
-	pkg, version    string
-	bin             string // the adapter's executable in node_modules/.bin
-	bundled         string // glob, under node_modules, for the bundled harness binary
-	cache           string
-	meta            json.RawMessage
+	name, mode   string
+	cli          string // the harness's own CLI, for the installed version
+	exeEnv       string // the adapter's variable for running another harness binary
+	pkg, version string
+	bin          string // the adapter's executable in node_modules/.bin
+	bundled      string // glob, under node_modules, for the bundled harness binary
+	cache        string
+	// isolate adds the per-run settings to l: MCP isolation (unless o says
+	// inherit) and anything else the harness needs. harnessBin is the harness
+	// binary the adapter will run.
+	isolate func(ctx context.Context, o Options, harnessBin string, l *Launch) error
 }
 
 func (a *adapted) Name() string { return a.name }
 func (a *adapted) Mode() string { return a.mode }
-func (a *adapted) MCP() string  { return a.mcp }
 
-func (a *adapted) Prepare(ctx context.Context, _ string) (Launch, error) {
-	l := Launch{Adapter: a.pkg + "@" + a.version, Meta: a.meta, Installed: installedVersion(ctx, a.cli)}
+func (a *adapted) Prepare(ctx context.Context, o Options) (Launch, error) {
+	l := Launch{Adapter: a.pkg + "@" + a.version, Installed: installedVersion(ctx, a.cli), MCP: MCPIsolated}
+	if o.inherit() {
+		l.MCP = MCPInherit
+	}
 	dir := filepath.Join(a.cache, strings.NewReplacer("@", "", "/", "-").Replace(a.pkg)+"-"+a.version)
 	bin := filepath.Join(dir, "node_modules", ".bin", a.bin)
 	if _, err := os.Stat(bin); err != nil {
@@ -100,10 +114,105 @@ func (a *adapted) Prepare(ctx context.Context, _ string) (Launch, error) {
 		l.AdapterInstalled = true
 	}
 	l.Argv = []string{bin}
+	harnessBin := ""
 	if m, _ := filepath.Glob(filepath.Join(dir, "node_modules", a.bundled)); len(m) > 0 {
-		l.Bundled = Version(ctx, m[0])
+		harnessBin = m[0]
+		l.Bundled = Version(ctx, harnessBin)
+	}
+	if o.Executable != "" {
+		harnessBin = o.Executable
+		l.Env = append(l.Env, a.exeEnv+"="+o.Executable)
+	}
+	if err := a.isolate(ctx, o, harnessBin, &l); err != nil {
+		return l, err
 	}
 	return l, nil
+}
+
+// isolateClaude hides the user's MCP servers and plugins with the Agent SDK's
+// strictMcpConfig option. Project settings (CLAUDE.md, .claude/settings.json)
+// still load: the adapter asks for user, project and local setting sources.
+func isolateClaude(_ context.Context, o Options, _ string, l *Launch) error {
+	if !o.inherit() {
+		l.Meta = json.RawMessage(`{"claudeCode":{"options":{"strictMcpConfig":true}}}`)
+	}
+	return nil
+}
+
+// configureCodex sets the child's private TMPDIR, which Codex uses as its
+// writable temp root instead of the user's, and builds CODEX_CONFIG, which
+// codex-acp merges into each session's config.
+//
+// /tmp stays writable: codex-acp 2.6.0 sends its own workspace-write sandbox
+// policy with excludeSlashTmp false on every turn, which overrides
+// sandbox_workspace_write.exclude_slash_tmp in the config (M3 open test).
+//
+// For MCP isolation it turns plugins off and disables, by name, every enabled
+// MCP server Codex lists from its own config for this folder. The list comes
+// from Codex itself (`codex mcp list --json`), so Refraktal never reads or
+// copies the user's config files. A partial entry ({"enabled": false})
+// merges with the server's own definition; an empty mcp_servers table does
+// not remove anything.
+func configureCodex(ctx context.Context, o Options, codex string, l *Launch) error {
+	if o.TmpDir != "" {
+		l.Env = append(l.Env, "TMPDIR="+o.TmpDir)
+	}
+	if o.inherit() {
+		return nil
+	}
+	cfg := map[string]any{}
+	{
+		names, err := codexMCPServers(ctx, codex, o.Cwd)
+		if err != nil {
+			return fmt.Errorf("cannot isolate Codex from your MCP servers (set harnesses.codex.mcp to %q to run without isolation): %w", MCPInherit, err)
+		}
+		servers := map[string]any{}
+		for _, n := range names {
+			servers[n] = map[string]any{"enabled": false}
+		}
+		cfg["features"] = map[string]any{"plugins": false}
+		if len(servers) > 0 {
+			cfg["mcp_servers"] = servers
+		}
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	l.Env = append(l.Env, "CODEX_CONFIG="+string(b))
+	return nil
+}
+
+// codexMCPServers lists the enabled MCP servers Codex would start in cwd, as
+// configured (plugins off, so plugin-provided servers are not listed: those
+// go with the plugins).
+func codexMCPServers(ctx context.Context, codex, cwd string) ([]string, error) {
+	if codex == "" {
+		return nil, errors.New("no Codex binary found in the adapter")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, codex, "-c", "features.plugins=false", "mcp", "list", "--json")
+	cmd.Dir = cwd
+	cmd.Env = proc.ScrubEnv(os.Environ())
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("codex mcp list: %w", err)
+	}
+	var list []struct {
+		Name    string `json:"name"`
+		Enabled bool   `json:"enabled"`
+	}
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil, fmt.Errorf("codex mcp list: %w", err)
+	}
+	var names []string
+	for _, s := range list {
+		if s.Enabled && s.Name != "" {
+			names = append(names, s.Name)
+		}
+	}
+	return names, nil
 }
 
 // install installs pkg into dir with npm, without running install scripts.
@@ -146,21 +255,27 @@ type agy struct{}
 
 func (agy) Name() string { return "agy" }
 func (agy) Mode() string { return "default" }
-func (agy) MCP() string  { return MCPIsolated }
 
-// Prepare isolates Antigravity with a fresh --gemini-dir inside scratch. That
-// hides all of ~/.gemini (MCP servers, settings, history) for this run only.
-func (agy) Prepare(ctx context.Context, scratch string) (Launch, error) {
-	l := Launch{Installed: installedVersion(ctx, "agy")}
-	bin, err := exec.LookPath("agy")
-	if err != nil {
-		return l, errors.New("agy not installed")
+// Prepare isolates Antigravity with a fresh --gemini-dir inside the scratch
+// folder. That hides all of ~/.gemini (MCP servers, settings, history) for
+// this run only.
+func (agy) Prepare(ctx context.Context, o Options) (Launch, error) {
+	bin := o.Executable
+	if bin == "" {
+		var err error
+		if bin, err = exec.LookPath("agy"); err != nil {
+			return Launch{}, errors.New("agy not installed")
+		}
 	}
-	dir := filepath.Join(scratch, "gemini-dir")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return l, err
+	l := Launch{Installed: Version(ctx, bin), Argv: []string{bin, "acp"}, MCP: MCPInherit}
+	if !o.inherit() {
+		dir := filepath.Join(o.Scratch, "gemini-dir")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return l, err
+		}
+		l.Argv = append(l.Argv, "--gemini-dir", dir)
+		l.MCP = MCPIsolated
 	}
-	l.Argv = []string{bin, "acp", "--gemini-dir", dir}
 	return l, nil
 }
 

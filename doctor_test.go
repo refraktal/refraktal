@@ -2,6 +2,7 @@ package refraktal
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -31,13 +32,13 @@ type fake struct {
 
 func (f fake) Name() string { return f.name }
 func (f fake) Mode() string { return "default" }
-func (f fake) MCP() string  { return f.mcp }
-func (f fake) Prepare(context.Context, string) (harness.Launch, error) {
+func (f fake) Prepare(_ context.Context, o harness.Options) (harness.Launch, error) {
 	if f.prepErr != nil {
 		return harness.Launch{Installed: ""}, f.prepErr
 	}
 	argv, env := acptest.Command(f.agentMode)
-	return harness.Launch{Argv: argv, Env: append(env, "ACPTEST_PROMPTS="+f.prompts),
+	mcp := cmp.Or(f.mcp, o.MCP)
+	return harness.Launch{Argv: argv, Env: append(env, "ACPTEST_PROMPTS="+f.prompts), MCP: mcp,
 		Adapter: "fake-acp@1.0.0", Bundled: "1.0.0", Installed: "1.0.1"}, nil
 }
 
@@ -56,7 +57,8 @@ func (r rig) doctor(t *testing.T, hs ...harness.Harness) DoctorReport {
 	t.Helper()
 	os.MkdirAll(r.root, 0o755)
 	rep, err := Doctor(context.Background(), DoctorOptions{Root: r.root, LiveDir: r.live, Harnesses: hs,
-		Getenv: func(string) string { return "" }, Timeout: 10 * time.Second, Neutral: r.neutral})
+		Getenv: func(string) string { return "" }, Timeout: 10 * time.Second, Neutral: r.neutral,
+		ConfigPath: filepath.Join(r.root, "no-config.json")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +69,7 @@ func TestDoctorAllUsable(t *testing.T) {
 	r := newRig(t)
 	rep := r.doctor(t,
 		fake{name: "claude", agentMode: "turn", mcp: harness.MCPIsolated, prompts: r.prompts},
-		fake{name: "codex", agentMode: "turn", mcp: harness.MCPUnavailable, prompts: r.prompts},
+		fake{name: "codex", agentMode: "turn", mcp: harness.MCPInherit, prompts: r.prompts},
 		fake{name: "agy", agentMode: "auth", mcp: harness.MCPIsolated, prompts: r.prompts})
 	if rep.ExitCode() != ExitOK || strings.Join(rep.Usable, ",") != "claude,codex,agy" {
 		t.Fatalf("report %+v", rep)
@@ -164,8 +166,9 @@ func TestDoctorDeciderAndJSON(t *testing.T) {
 	r := newRig(t)
 	os.MkdirAll(r.root, 0o755)
 	rep, err := Doctor(context.Background(), DoctorOptions{Root: r.root, LiveDir: r.live, Neutral: r.neutral,
-		Harnesses: []harness.Harness{fake{name: "claude", agentMode: "auth", mcp: harness.MCPIsolated, prompts: r.prompts}},
-		Getenv:    func(k string) string { return map[string]string{"GEMINI_API_KEY": "secret-value"}[k] }})
+		ConfigPath: filepath.Join(r.root, "no-config.json"),
+		Harnesses:  []harness.Harness{fake{name: "claude", agentMode: "auth", mcp: harness.MCPIsolated, prompts: r.prompts}},
+		Getenv:     func(k string) string { return map[string]string{"GEMINI_API_KEY": "secret-value"}[k] }})
 	if err != nil {
 		t.Fatal(err)
 	}

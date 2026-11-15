@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -35,11 +36,15 @@ import (
 
 const (
 	killPrompt   = "Run this shell command exactly as written: sleep 120 &   Then reply DONE."
+	rejectPrompt = "Run the shell command: touch marker.txt   Then reply DONE."
 	orphanPrompt = "First run the shell command: sleep 20   After it finishes, create a file named hello.txt in the current directory containing the single word hello, then reply DONE."
 )
 
 // modes are the per-harness permission modes from docs/DESIGN.md.
 var modes = map[string]string{"claude": "default", "codex": "workspace-write", "agy": "default"}
+
+// gated are the modes in which each harness asks before `touch` (round 4).
+var gated = map[string]string{"claude": "default", "codex": "read-only", "agy": "default"}
 
 type result struct {
 	Test             string `json:"test"`
@@ -74,6 +79,12 @@ func main() {
 	root := flag.String("root", ".live", "folder for work dirs and results (never under $TMPDIR)")
 	every := flag.Duration("watch", 200*time.Millisecond, "how often the watcher looks for the tool on the machine")
 	flag.Parse()
+	if *test == "reject" && modes[*harness] != "" && *cmdline != "" {
+		r := reject(*harness, strings.Fields(*cmdline), *root)
+		fmt.Printf("reject %s: mode=%s stop=%s perms=%d marker_created=%v tool_statuses=%v err=%q\n   reply: %q\n",
+			r.Harness, r.Mode, r.StopReason, r.Perms, r.Marker, r.ToolStatuses, r.Error, r.Reply)
+		return
+	}
 	if (*test != "kill" && *test != "orphan") || modes[*harness] == "" || *cmdline == "" {
 		flag.Usage()
 		os.Exit(2)
@@ -280,4 +291,111 @@ func matchingTracked(c *proc.Child, cmd string) bool {
 		}
 	}
 	return false
+}
+
+type rejectResult struct {
+	Harness      string   `json:"harness"`
+	Mode         string   `json:"mode"`
+	StopReason   string   `json:"stop_reason"`
+	Perms        int      `json:"permission_requests"`
+	Marker       bool     `json:"marker_created"`
+	ToolStatuses []string `json:"tool_statuses"` // statuses of tool_call and tool_call_update, in order
+	Reply        string   `json:"reply"`
+	Error        string   `json:"error,omitempty"`
+}
+
+// reject runs the touch prompt in the harness's gated mode and rejects every
+// permission request, to see how the harness reports a rejection.
+func reject(harness string, argv []string, root string) (r rejectResult) {
+	r = rejectResult{Harness: harness, Mode: gated[harness], ToolStatuses: []string{}}
+	label := fmt.Sprintf("reject-%s-%s", harness, time.Now().Format("150405"))
+	results := filepath.Join(root, "results")
+	work, err := filepath.Abs(filepath.Join(root, "work", label))
+	if err == nil {
+		err = os.MkdirAll(work, 0o755)
+	}
+	os.MkdirAll(results, 0o755)
+	if err != nil {
+		r.Error = err.Error()
+		return r
+	}
+	defer os.RemoveAll(work)
+	defer func() {
+		b, _ := json.MarshalIndent(r, "", "  ")
+		os.WriteFile(filepath.Join(results, label+".json"), b, 0o600)
+	}()
+	log, err := runlog.Create(filepath.Join(results, label+".events.jsonl"))
+	if err != nil {
+		r.Error = err.Error()
+		return r
+	}
+	defer log.Close()
+	stderr, _ := os.Create(filepath.Join(results, label+".stderr"))
+	defer stderr.Close()
+	child, err := proc.Start(proc.Spec{Argv: argv, Dir: work, Stderr: stderr})
+	if err != nil {
+		r.Error = err.Error()
+		return r
+	}
+	defer child.Shutdown(10 * time.Second)
+	var mu sync.Mutex
+	var reply strings.Builder
+	c := acp.New(child.Stdout, child.Stdin, acp.Options{ClientName: "refraktal-livecheck", ClientVersion: "m3",
+		OnUpdate: func(u acp.Update) {
+			log.Update(harness, u.SessionID, u.Kind, u.Raw)
+			var v struct {
+				Status  string `json:"status"`
+				Content struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			}
+			json.Unmarshal(u.Raw, &v)
+			mu.Lock()
+			defer mu.Unlock()
+			switch u.Kind {
+			case "agent_message_chunk":
+				reply.WriteString(v.Content.Text)
+			case "tool_call", "tool_call_update":
+				if v.Status != "" {
+					r.ToolStatuses = append(r.ToolStatuses, u.Kind+":"+v.Status)
+				}
+			}
+		},
+		OnNotification: func(m string, p json.RawMessage) { log.Notification(harness, m, p) },
+		OnPermission: func(_ context.Context, req acp.PermissionRequest) string {
+			log.Event("permission", map[string]any{"tool_kind": req.ToolCall.Kind, "decision": "reject"})
+			if id := req.Option("reject_once"); id != "" {
+				return id
+			}
+			return req.Option("reject_always")
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if _, err := c.Initialize(ctx); err != nil {
+		r.Error = err.Error()
+		return r
+	}
+	s, err := c.NewSession(ctx, work, nil)
+	if err != nil {
+		r.Error = err.Error()
+		return r
+	}
+	if err := c.SetMode(ctx, s.ID, r.Mode); err != nil {
+		r.Error = err.Error()
+		return r
+	}
+	turn, err := c.Prompt(ctx, s.ID, rejectPrompt)
+	r.StopReason, r.Perms = turn.StopReason, turn.Permissions
+	if err != nil {
+		r.Error = err.Error()
+	}
+	time.Sleep(2 * time.Second)
+	_, statErr := os.Stat(filepath.Join(work, "marker.txt"))
+	r.Marker = statErr == nil
+	mu.Lock()
+	r.Reply = strings.TrimSpace(reply.String())
+	mu.Unlock()
+	return r
 }

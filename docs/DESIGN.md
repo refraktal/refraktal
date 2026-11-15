@@ -97,41 +97,92 @@ requests that reach it by policy. Never use `auto`, `acceptEdits`, `agent`,
 
 | Harness | Mode | Behaviour observed |
 |---|---|---|
-| Claude | `default` | A partial gate: asked before `touch`, but ran `echo` and `sleep` unasked |
-| Codex | `workspace-write` | Writes freely in the session folder, `$TMPDIR` and `/tmp`; asks outside them |
+| Claude | `default` | A partial gate: asked before `touch` and `git push`, but ran `echo` and `sleep` unasked |
+| Codex | `workspace-write` | Writes freely in the session folder, its `TMPDIR` and `/tmp`; asks outside them |
 | Antigravity | `default` | Asks before writes and shell commands; reads run unasked |
 
-Policy: allow file edits inside the child's worktree; allow shell commands
-except a short deny-list (for example `git push`, publishing commands, paths
-outside the worktree); log every request with its decision. This is a gate,
-not a sandbox: Refraktal sees a command's text, not everything it touches.
+Policy (`internal/policy`); every request is logged with its decision:
 
-- **Codex temp folders.** Give each Codex child a private `TMPDIR` inside its
-  run folder and exclude `/tmp` (`exclude_slash_tmp`). **Open:** whether Codex
-  takes its writable roots from the child's `TMPDIR`, and how to set the
-  exclusion per run without touching global config.
+- Reads, searches, fetches and thinking: allowed.
+- File edits, deletes and moves: allowed only when every path, cleaned and
+  with symlinks resolved, is inside the child's worktree.
+- Shell commands: allowed unless the deny-list matches anywhere in the
+  command after quotes are removed (pushing, publishing, releasing,
+  `git config`, `git -c`, `--config-env`, `GIT_*`, `HOME` or
+  `XDG_CONFIG_HOME` assignments, an unknown git global option), or a word is
+  a path outside the worktree (absolute, `~` or `..`, existing or not; only
+  root-owned system folders and `/dev/null`-like devices are exempt), or a
+  variable is expanded inside a path or a `cd`, `pushd` or `ln` target, or a
+  bare `cd` leaves the worktree.
+- Any other tool kind: allowed only when its input is absent, or holds
+  nothing but known file-path fields (string values) that are all inside the
+  worktree. Any other field, a nested value or a non-object input is denied.
+
+This is a gate, not a sandbox: Refraktal sees a command's text, not
+everything it touches. A command built at run time (an interpreter's code,
+`$(...)`, a script file the child wrote) is not seen through, and a harness
+decides by its own rules which actions to ask about at all.
+
+- **The reject path works on all three harnesses** (M3 open test: deny
+  `touch marker.txt` in each gated mode). The file is never created and the
+  tool call is reported `failed`. Claude ends the turn normally and tells the
+  user the command was denied; Antigravity ends it normally with no reply;
+  **Codex ends the whole turn with stop reason `cancelled`**. So in `run`, a
+  denial ends a Codex child's turn: the run is `failed` (exit 1) and its
+  worktree is kept.
+- **Claude in `default` asked before `git push`** (M3 open test), so the
+  deny-list reached it: denied, nothing sent, and Claude told the user.
+  Whether it asks before every deny-list command is not known.
+- **Codex temp folders.** Each Codex child gets a private `TMPDIR` inside its
+  run folder. Codex takes its writable temp root from it: writes there run
+  unasked, and the user's own `TMPDIR` is no longer writable (blocked by
+  Codex's sandbox) (M3 open test).
+- **Decided: Codex children may write to `/tmp` (accepted for v1).**
+  codex-acp 2.6.0 sends its own `workspace-write` sandbox policy with
+  `excludeSlashTmp: false` on every turn, which overrides
+  `sandbox_workspace_write.exclude_slash_tmp` in `CODEX_CONFIG`, so `/tmp`
+  cannot be excluded per run (M3 open test). This is accepted because
+  worktrees and run folders never live under `/tmp`: a Codex child cannot
+  reach the repository or a sibling child through it. Asked upstream to
+  honour the setting:
+  [agentclientprotocol/codex-acp#766](https://github.com/agentclientprotocol/codex-acp/issues/766).
 - **Never put worktrees or run folders under `$TMPDIR` or `/tmp`.**
-- **Open:** the reject path (`reject_once`) has not been exercised on any
-  harness. The deny-list depends on it.
-- **Open:** whether Claude in `default` asks before deny-list commands such
-  as `git push`. It decides by its own rules which commands need approval, so
-  a command it runs unasked never reaches the policy.
 - No harness uses the client's `fs/*` methods: do not implement a client-side
   file policy.
 
 ## MCP and user configuration
 
 Isolate children from the user's own MCP servers and plugins by default, with
-an explicit per-harness `inherit` option.
+an explicit per-harness `inherit` option in the config. With `inherit`,
+`doctor` and `run` print a notice.
 
 | Harness | Per-run isolation |
 |---|---|
 | Claude | `session/new` `_meta`: `{"claudeCode":{"options":{"strictMcpConfig":true}}}` (keeps the login; also stops context growth between turns) |
 | Antigravity | `agy acp --gemini-dir <folder Refraktal manages>` (hides all of `~/.gemini`) |
-| Codex | **Open:** no per-run mechanism yet; it loads the most. Until one exists, Codex children inherit the user's setup and `doctor` and the run log say so |
+| Codex | `CODEX_CONFIG` (codex-acp merges it into each session's config): `features.plugins = false`, and `mcp_servers.<name>.enabled = false` for every enabled server that Codex itself lists for the session folder (`codex -c features.plugins=false mcp list --json`, run with the adapter's bundled Codex). Keeps the login (M3 open test: a real turn completed, with no MCP or plugin process in the tree). An empty `mcp_servers` table does not work: the override is merged |
 
 Never edit, move or copy the user's global harness configuration or
 credentials. An empty `mcpServers` list in `session/new` does not isolate.
+Refraktal never reads the harnesses' config files either: Codex's server list
+comes from Codex.
+
+**Project settings are inherited.** Children run in a worktree of the
+repository and load its harness project settings, so `CLAUDE.md` and
+`AGENTS.md` apply (M3 end-to-end runs: all three harnesses followed a project
+instruction). Consequences:
+
+- A repository's harness hooks run inside the child, with its permissions
+  and outside Refraktal's policy. `run` prints a one-line notice when the
+  worktree configures hooks for the harness: `.claude/settings.json` or
+  `.claude/settings.local.json` (a `hooks` key), `.codex/hooks.json` or a
+  `hooks` table in `.codex/config.toml`, and for Antigravity, whose project
+  hook location is not documented, `.gemini/settings.json`,
+  `.gemini/config/hooks.json` and `.agents/hooks.json`.
+- Project settings can pre-approve commands (for example Claude permission
+  allow rules); a pre-approved command never reaches the policy.
+- `doctor` is the exception: it runs in an empty folder outside the
+  repository, so it never runs a repository's code.
 
 ## Processes
 
@@ -162,8 +213,17 @@ process-group kill does not reach them.
 - Tracking also widens through a process group, but only one whose leader
   (PID == PGID) is tracked. This keeps a tool's backgrounded child after its
   shell exits, without pulling in unrelated members of a shared group.
-- **Open:** the detach gap. A process that detaches and is reparented
-  between two samples, with its group leader never seen, escapes tracking.
+- **The detach gap: decided, to build in M4.** A process that detaches and
+  is reparented between two samples, with its group leader never seen,
+  escapes tracking. M3's `ps`-free survival test (`(sleep 30; touch late.txt)
+  &`, then shutdown, then wait 40 s) hit it on Claude: `late.txt` appeared
+  after shutdown, the `sleep` was never in the tracked set, and Claude itself
+  exited cleanly. Codex and Antigravity left nothing.
+  **Decision:** every child gets a unique `REFRAKTAL_RUN` environment
+  variable. At shutdown Refraktal also kills, with the identity check, every
+  process of the current user whose environment carries this run's value,
+  whatever its parent or process group. Environment variables are inherited
+  by a detached process, so the sweep finds what lineage and groups miss.
 - Scrub the child's environment of the parent's session markers
   (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`).
 
@@ -188,8 +248,42 @@ process-group kill does not reach them.
 
 ## Configuration
 
-- The config file is JSON, read with the standard library. `doctor` (M2) uses
-  the defaults; the file itself arrives in M3.
+- The config file is JSON, read with the standard library, at
+  `os.UserConfigDir()` joined with `refraktal/config.json`. A missing file
+  means defaults; unknown fields and bad values are errors. Only the user's
+  own config is read: a repository cannot change how its children are
+  isolated.
+- Per harness (`claude`, `codex`, `agy`): `mcp` (`isolated`, the default, or
+  `inherit`) and `executable` (the CLI an adapter runs instead of its bundled
+  one, through `CLAUDE_CODE_EXECUTABLE` or `CODEX_PATH`, or the `agy`
+  binary).
+
+## Run (one harness, M3)
+
+- `refraktal run --harness <name> [--no-apply] [--json] [task]`. Flags may
+  come before or after the task. The task comes from the argument, stdin, or
+  both; stdin is read only when it is a pipe or a regular file, never a
+  terminal or a socket (an open socket that never closes would hang).
+- **Worktree** at `os.UserCacheDir()` joined with
+  `refraktal/worktrees/<run id>`, on branch `refraktal/<run id>`, from the
+  repository's `HEAD`: uncommitted changes in the user's tree are not part of
+  it. Outside the repository so harnesses walking up from the session folder
+  do not find the user's checkout. Never under a temp folder.
+- The child shares the repository's `.git` (a linked worktree). Refraktal's
+  own git commands therefore run with hooks, fsmonitor, external diff,
+  textconv, pager and ssh command turned off, and the policy denies
+  `git config`.
+- **Result.** After the turn, everything the child changed is committed on
+  the branch and applied to the working tree with `git apply`, checked first
+  so a diff that does not apply cleanly changes nothing. The diff is kept in
+  the run folder as `result.diff`. With `--no-apply` (or when the apply
+  fails, or the turn did not end normally) the worktree and branch stay and
+  are printed; otherwise they are removed.
+- **Time limit** 30 minutes until `--mins` arrives (M4): `session/cancel`,
+  then shutdown and the tree kill.
+- **Exit codes:** 0 applied, kept or no changes; 1 the turn failed or the
+  result did not apply; 2 the time limit ran out; 3 the harness could not be
+  started or logged in.
 
 ## Doctor
 
