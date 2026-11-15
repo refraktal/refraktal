@@ -117,18 +117,10 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 		fmt.Fprintln(stderr, "refraktal run: one harness at a time until fan-out lands")
 		return refraktal.ExitNothingUsable
 	}
-	task := strings.Join(words, " ")
-	if stdin != nil {
-		if fi, err := stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
-			b, err := io.ReadAll(stdin)
-			if err != nil {
-				fmt.Fprintf(stderr, "refraktal run: reading stdin: %v\n", err)
-				return refraktal.ExitNothingUsable
-			}
-			if in := strings.TrimSpace(string(b)); in != "" {
-				task = strings.TrimSpace(task + "\n\n" + in)
-			}
-		}
+	task, err := readTask(words, stdin)
+	if err != nil {
+		fmt.Fprintf(stderr, "refraktal run: reading stdin: %v\n", err)
+		return refraktal.ExitNothingUsable
 	}
 	enc := json.NewEncoder(stdout)
 	res, err := refraktal.Run(ctx, refraktal.RunOptions{Task: task, Harness: *harnessName, NoApply: *noApply,
@@ -168,4 +160,26 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 	}
 	fmt.Fprintf(stdout, "run folder: %s\n", res.Run)
 	return res.ExitCode()
+}
+
+// readTask joins the task words and, when stdin is a pipe or a file, what it
+// holds. A terminal or a socket is never read: an IDE or agent tool may hand
+// over a socket that never closes, and reading it would hang.
+func readTask(words []string, stdin *os.File) (string, error) {
+	task := strings.Join(words, " ")
+	if stdin == nil {
+		return task, nil
+	}
+	fi, err := stdin.Stat()
+	if err != nil || (fi.Mode()&os.ModeNamedPipe == 0 && !fi.Mode().IsRegular()) {
+		return task, nil
+	}
+	b, err := io.ReadAll(stdin)
+	if err != nil {
+		return "", err
+	}
+	if in := strings.TrimSpace(string(b)); in != "" {
+		task = strings.TrimSpace(task + "\n\n" + in)
+	}
+	return task, nil
 }

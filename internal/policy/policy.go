@@ -57,7 +57,8 @@ var denied = [][]string{
 // outsideOK are paths outside the worktree that a command may name: devices,
 // and system folders only root can write to.
 var outsideOK = []string{"/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/tty",
-	"/usr/", "/bin/", "/sbin/", "/System/"}
+	"/usr/bin/", "/usr/sbin/", "/usr/lib/", "/usr/libexec/", "/usr/share/", "/usr/include/", // not /usr/local
+	"/bin/", "/sbin/", "/System/"}
 
 // readOnlyKinds change nothing.
 var readOnlyKinds = map[string]bool{"read": true, "search": true, "think": true, "fetch": true, "switch_mode": true}
@@ -208,6 +209,19 @@ func (p Policy) commandOK(cmd string, in map[string]any) (bool, string) {
 				return false, "deny-list: " + strings.Join(rule, " ")
 			}
 		}
+		for i, w := range seg {
+			if strings.HasPrefix(w, "GIT_CONFIG") {
+				return false, "sets git config through the environment: " + w
+			}
+			switch filepath.Base(w) {
+			case "cd", "pushd", "ln":
+				for _, arg := range seg[i+1:] {
+					if strings.Contains(arg, "$") {
+						return false, "variable in a " + filepath.Base(w) + " target: " + arg
+					}
+				}
+			}
+		}
 	}
 	for _, tok := range strings.Fields(cmd) {
 		for _, cand := range pathCandidates(tok) {
@@ -243,44 +257,62 @@ func segments(cmd string) [][]string {
 	return out
 }
 
-// valueFlags are the global options of git and similar tools that take a
-// separate value.
-var valueFlags = map[string]bool{"-C": true, "-c": true, "--git-dir": true, "--work-tree": true,
-	"--namespace": true, "--config-env": true, "--super-prefix": true, "--exec-path": true}
+// gitValueFlags are git's global options that take a separate value (from
+// git(1); --exec-path takes its value only with "=").
+var gitValueFlags = map[string]bool{"-C": true, "--git-dir": true, "--work-tree": true,
+	"--namespace": true, "--super-prefix": true}
 
 // matches reports whether rule's program appears anywhere in a simple
-// command, followed by rule's subcommand after the program's own options.
-// Matching anywhere catches wrappers (bash -c, xargs, env, sudo, time, eval)
-// at the price of denying a command that merely mentions the words, such as
-// echo git push. git -c is denied outright: it can define an alias for push
-// or set an option that runs commands.
+// command (catching wrappers such as bash -c, xargs, env, sudo, time, eval)
+// and is followed by rule's subcommand words.
+//
+// For git, whose global options are a fixed list, the subcommand is the first
+// word after those options, so git log --grep push stays allowed. git -c and
+// --config-env are denied outright: they can define an alias for push or set
+// an option that runs commands. For every other program the subcommand words
+// may appear anywhere after it, in order, since its flags may take values.
 func matches(words, rule []string) bool {
 	for start := range words {
 		if filepath.Base(words[start]) != rule[0] {
 			continue
 		}
-		i, ok := start+1, true
-		for _, want := range rule[1:] {
-			for i < len(words) && strings.HasPrefix(words[i], "-") {
-				if rule[0] == "git" && words[i] == "-c" {
-					return true
-				}
-				if valueFlags[words[i]] {
-					i++
-				}
-				i++
+		if rule[0] == "git" {
+			if gitMatches(words[start+1:], rule[1:]) {
+				return true
 			}
-			if i >= len(words) || words[i] != want {
-				ok = false
-				break
-			}
-			i++
+			continue
 		}
-		if ok {
+		next := 0
+		for _, w := range words[start+1:] {
+			if next < len(rule)-1 && w == rule[1+next] {
+				next++
+			}
+		}
+		if next == len(rule)-1 {
 			return true
 		}
 	}
 	return false
+}
+
+func gitMatches(args, sub []string) bool {
+	i := 0
+	for i < len(args) && strings.HasPrefix(args[i], "-") {
+		if args[i] == "-c" || args[i] == "--config-env" || strings.HasPrefix(args[i], "--config-env=") {
+			return true
+		}
+		if gitValueFlags[args[i]] {
+			i++
+		}
+		i++
+	}
+	for _, want := range sub {
+		if i >= len(args) || args[i] != want {
+			return false
+		}
+		i++
+	}
+	return true
 }
 
 // pathCandidates returns the parts of a word that may be paths: the word

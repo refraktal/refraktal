@@ -3,8 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestCommands(t *testing.T) {
@@ -27,5 +31,43 @@ func TestCommands(t *testing.T) {
 		if code != tc.code || !strings.Contains(out.String()+errb.String(), tc.out) {
 			t.Errorf("%v: code %d, output %q", tc.args, code, out.String()+errb.String())
 		}
+	}
+}
+
+func TestReadTask(t *testing.T) {
+	// A pipe and a regular file are read and joined to the words.
+	r, w, _ := os.Pipe()
+	w.WriteString("details from stdin\n")
+	w.Close()
+	if got, err := readTask([]string{"fix", "it"}, r); err != nil || got != "fix it\n\ndetails from stdin" {
+		t.Fatalf("pipe: %q %v", got, err)
+	}
+	f := filepath.Join(t.TempDir(), "task")
+	os.WriteFile(f, []byte("only stdin"), 0o600)
+	fh, _ := os.Open(f)
+	if got, _ := readTask(nil, fh); got != "only stdin" {
+		t.Fatalf("file: %q", got)
+	}
+	// A terminal-like device and a socket that never closes are not read.
+	null, _ := os.Open(os.DevNull)
+	if got, _ := readTask([]string{"x"}, null); got != "x" {
+		t.Fatalf("/dev/null: %q", got)
+	}
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := os.NewFile(uintptr(fds[0]), "sock")
+	defer sock.Close()
+	defer syscall.Close(fds[1])
+	done := make(chan string, 1)
+	go func() { got, _ := readTask([]string{"y"}, sock); done <- got }()
+	select {
+	case got := <-done:
+		if got != "y" {
+			t.Fatalf("socket: %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("readTask blocked on a socket that never closes")
 	}
 }
