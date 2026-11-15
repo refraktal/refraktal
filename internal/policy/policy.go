@@ -77,6 +77,8 @@ func (p Policy) Decide(req acp.PermissionRequest) Decision {
 	default:
 		if readOnlyKinds[d.Kind] {
 			d.Allow, d.Reason = true, "does not change files"
+		} else if k := uncheckable(in); k != "" {
+			d.Allow, d.Reason = false, "unknown tool kind "+strconvQuote(d.Kind)+" with a field the policy cannot check: "+k
 		} else if len(d.Paths) > 0 {
 			d.Allow, d.Reason = p.filesInside(d.Paths)
 		} else {
@@ -163,9 +165,23 @@ func paths(req acp.PermissionRequest, in map[string]any) []string {
 // anything.
 var (
 	fileKeys   = []string{"file_path", "path", "Path", "notebook_path"}
-	moveKeys   = []string{"new_path", "old_path", "move_path", "destination", "target", "dest"}
+	moveKeys   = []string{"new_path", "old_path", "move_path", "destination", "target", "dest", "to", "from"}
 	fileChange = map[string]bool{"edit": true, "delete": true, "move": true}
 )
+
+// uncheckable returns a destination-like field or a changes map in rawInput:
+// on an unknown tool kind their meaning is unknown, so they fail closed.
+func uncheckable(in map[string]any) string {
+	if _, ok := in["changes"]; ok {
+		return "changes"
+	}
+	for _, k := range moveKeys {
+		if _, ok := in[k]; ok {
+			return k
+		}
+	}
+	return ""
+}
 
 func pathFields(m map[string]any, keys []string) []string {
 	var out []string
