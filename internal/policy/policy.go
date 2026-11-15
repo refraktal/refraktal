@@ -210,8 +210,14 @@ func (p Policy) commandOK(cmd string, in map[string]any) (bool, string) {
 			}
 		}
 		for i, w := range seg {
-			if strings.HasPrefix(w, "GIT_CONFIG") {
-				return false, "sets git config through the environment: " + w
+			if name, _, ok := strings.Cut(w, "="); ok && (strings.HasPrefix(name, "GIT_") || name == "HOME" || name == "XDG_CONFIG_HOME") {
+				return false, "changes where git reads its config or repository: " + name
+			}
+			switch filepath.Base(w) {
+			case "cd", "pushd":
+				if i+1 >= len(seg) || seg[i+1] == "-" {
+					return false, filepath.Base(w) + " without a folder leaves the worktree"
+				}
 			}
 			switch filepath.Base(w) {
 			case "cd", "pushd", "ln":
@@ -257,10 +263,16 @@ func segments(cmd string) [][]string {
 	return out
 }
 
-// gitValueFlags are git's global options that take a separate value (from
-// git(1); --exec-path takes its value only with "=").
+// gitValueFlags and gitFlags are git's global options (git(1)): those that
+// take a separate value, and those that take none. An option in neither list
+// makes the command denied, since it might hide the subcommand.
 var gitValueFlags = map[string]bool{"-C": true, "--git-dir": true, "--work-tree": true,
-	"--namespace": true, "--super-prefix": true}
+	"--namespace": true, "--super-prefix": true, "--attr-source": true}
+
+var gitFlags = map[string]bool{"-v": true, "--version": true, "-h": true, "--help": true, "-p": true, "--paginate": true,
+	"-P": true, "--no-pager": true, "--bare": true, "--no-replace-objects": true, "--no-lazy-fetch": true,
+	"--no-optional-locks": true, "--no-advice": true, "--literal-pathspecs": true, "--glob-pathspecs": true,
+	"--noglob-pathspecs": true, "--icase-pathspecs": true, "--html-path": true, "--man-path": true, "--info-path": true}
 
 // matches reports whether rule's program appears anywhere in a simple
 // command (catching wrappers such as bash -c, xargs, env, sudo, time, eval)
@@ -301,8 +313,13 @@ func gitMatches(args, sub []string) bool {
 		if args[i] == "-c" || args[i] == "--config-env" || strings.HasPrefix(args[i], "--config-env=") {
 			return true
 		}
-		if gitValueFlags[args[i]] {
+		flag, _, _ := strings.Cut(args[i], "=")
+		switch {
+		case gitValueFlags[args[i]]:
 			i++
+		case gitFlags[args[i]] || gitValueFlags[flag] || flag == "--exec-path" || flag == "--list-cmds":
+		default:
+			return true // an unknown global option: fail closed
 		}
 		i++
 	}

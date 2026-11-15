@@ -139,9 +139,13 @@ func isolateClaude(_ context.Context, o Options, _ string, l *Launch) error {
 	return nil
 }
 
-// configureCodex builds CODEX_CONFIG, which codex-acp merges into each
-// session's config. It always keeps Codex out of /tmp (writes there then need
-// approval) and, given a private TMPDIR, points Codex's temp folder there.
+// configureCodex sets the child's private TMPDIR, which Codex uses as its
+// writable temp root instead of the user's, and builds CODEX_CONFIG, which
+// codex-acp merges into each session's config.
+//
+// /tmp stays writable: codex-acp 2.6.0 sends its own workspace-write sandbox
+// policy with excludeSlashTmp false on every turn, which overrides
+// sandbox_workspace_write.exclude_slash_tmp in the config (M3 open test).
 //
 // For MCP isolation it turns plugins off and disables, by name, every enabled
 // MCP server Codex lists from its own config for this folder. The list comes
@@ -150,11 +154,14 @@ func isolateClaude(_ context.Context, o Options, _ string, l *Launch) error {
 // merges with the server's own definition; an empty mcp_servers table does
 // not remove anything.
 func configureCodex(ctx context.Context, o Options, codex string, l *Launch) error {
-	cfg := map[string]any{"sandbox_workspace_write": map[string]any{"exclude_slash_tmp": true}}
 	if o.TmpDir != "" {
 		l.Env = append(l.Env, "TMPDIR="+o.TmpDir)
 	}
-	if !o.inherit() {
+	if o.inherit() {
+		return nil
+	}
+	cfg := map[string]any{}
+	{
 		names, err := codexMCPServers(ctx, codex, o.Cwd)
 		if err != nil {
 			return fmt.Errorf("cannot isolate Codex from your MCP servers (set harnesses.codex.mcp to %q to run without isolation): %w", MCPInherit, err)

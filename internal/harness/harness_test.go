@@ -146,7 +146,7 @@ func TestCodexIsolationIsBuiltFromItsOwnServerList(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg, ok := env(l, "CODEX_CONFIG")
-	want := `{"features":{"plugins":false},"mcp_servers":{"tools-a":{"enabled":false},"tools-c":{"enabled":false}},"sandbox_workspace_write":{"exclude_slash_tmp":true}}`
+	want := `{"features":{"plugins":false},"mcp_servers":{"tools-a":{"enabled":false},"tools-c":{"enabled":false}}}`
 	if !ok || cfg != want {
 		t.Fatalf("CODEX_CONFIG = %s\nwant          %s", cfg, want)
 	}
@@ -161,8 +161,8 @@ func TestCodexIsolationIsBuiltFromItsOwnServerList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg, _ := env(l, "CODEX_CONFIG"); cfg != `{"sandbox_workspace_write":{"exclude_slash_tmp":true}}` || l.MCP != MCPInherit {
-		t.Fatalf("inherit: CODEX_CONFIG %s, %+v", cfg, l)
+	if cfg, set := env(l, "CODEX_CONFIG"); set || l.MCP != MCPInherit {
+		t.Fatalf("inherit: CODEX_CONFIG %q set, %+v", cfg, l)
 	}
 	if v, _ := env(l, "CODEX_PATH"); v != "/opt/codex" {
 		t.Fatal("executable not passed as CODEX_PATH")
