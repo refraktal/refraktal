@@ -210,12 +210,21 @@ func (p Policy) commandOK(cmd string, in map[string]any) (bool, string) {
 			}
 		}
 		for i, w := range seg {
-			// Any mention of these names, as an assignment (=, +=) or as an
-			// argument to export, read, declare and the like, is denied.
-			name, _, _ := strings.Cut(w, "=")
-			name = strings.TrimSuffix(name, "+")
-			if strings.HasPrefix(name, "GIT_") || name == "HOME" || name == "XDG_CONFIG_HOME" {
-				return false, "changes where git reads its config or repository: " + name
+			// Any mention of these names, on either side of an = (so a nameref
+			// such as declare -n x=GIT_DIR is caught too), is denied.
+			for _, part := range strings.Split(w, "=") {
+				part = strings.Trim(part, "+${}")
+				if strings.HasPrefix(part, "GIT_") || part == "HOME" || part == "XDG_CONFIG_HOME" {
+					return false, "changes where git reads its config or repository: " + part
+				}
+			}
+			switch filepath.Base(w) {
+			case "declare", "typeset", "local", "readonly", "export", "read", "printf", "eval":
+				for _, arg := range seg[i+1:] {
+					if arg == "-n" || strings.Contains(arg, "$") {
+						return false, filepath.Base(w) + " with a nameref or an expanded name may set any variable"
+					}
+				}
 			}
 			switch filepath.Base(w) {
 			case "cd", "pushd":
@@ -378,14 +387,21 @@ func (p Policy) outside(s, cwd string) bool {
 	if p.inside(s, cwd) {
 		return false
 	}
-	r := resolve(s)
+	// Exempt only if the path as written and the path it resolves to are
+	// both in allowed system folders (not necessarily the same one: on some
+	// systems /usr/bin/env links into /usr/lib).
+	return !(systemPath(s) && systemPath(resolve(s)))
+}
+
+func systemPath(p string) bool {
 	for _, ok := range outsideOK {
-		dir := strings.TrimSuffix(ok, "/")
-		if (s == dir || strings.HasPrefix(s, ok)) && (r == dir || strings.HasPrefix(r, ok) || strings.HasPrefix(r, "/private"+ok)) {
-			return false
+		for _, pre := range []string{ok, "/private" + ok} {
+			if p == strings.TrimSuffix(pre, "/") || strings.HasPrefix(p, pre) {
+				return true
+			}
 		}
 	}
-	return true
+	return false
 }
 
 func strconvQuote(s string) string { return `"` + s + `"` }

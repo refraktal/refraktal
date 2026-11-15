@@ -94,6 +94,12 @@ func TestDecide(t *testing.T) {
 		{"cd with an option and no folder", request(t, "execute", map[string]any{"command": "cd -P && touch x"}), false},
 		{"pushd stack rotation", request(t, "execute", map[string]any{"command": "pushd +1 && touch x"}), false},
 		{"cd -P into a subfolder", request(t, "execute", map[string]any{"command": "cd -P src && ls"}), true},
+		{"nameref to GIT_DIR", request(t, "execute", map[string]any{"command": "declare -n x=GIT_DIR; x=/y; git p"}), false},
+		{"nameref without the name", request(t, "execute", map[string]any{"command": "v=G; declare -n x=$v; git p"}), false},
+		{"export an expanded name", request(t, "execute", map[string]any{"command": "n=GI; export ${n}T_DIR=/y"}), false},
+		{"printf -v expanded", request(t, "execute", map[string]any{"command": "printf -v $n x"}), false},
+		{"plain printf", request(t, "execute", map[string]any{"command": "printf 'hi\\n' > out.txt"}), true},
+		{"echo PATH", request(t, "execute", map[string]any{"command": "echo $PATH"}), true},
 		{"system tool path", request(t, "execute", map[string]any{"command": "/usr/bin/env ls > /dev/null"}), true},
 		{"absolute path inside", request(t, "execute", map[string]any{"command": "cat " + filepath.Join(wt, "src")}), true},
 		// Codex
@@ -132,5 +138,11 @@ func TestDecideWithoutARejectOption(t *testing.T) {
 	req.Options = []acp.PermissionOption{{ID: "yes", Kind: "allow_once"}}
 	if d := (Policy{Worktree: t.TempDir()}).Decide(req); d.Allow || d.OptionID != "" {
 		t.Fatalf("want deny with the cancelled outcome, got %+v", d)
+	}
+}
+
+func TestSystemPathFollowsLinksBetweenSystemFolders(t *testing.T) {
+	if !systemPath("/usr/bin/env") || !systemPath("/usr/lib/cargo/bin/coreutils") || systemPath("/usr/local/bin/x") || systemPath("/etc/passwd") {
+		t.Fatal("systemPath misclassifies")
 	}
 }
