@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"refraktal.dev/refraktal/internal/policy"
 	"refraktal.dev/refraktal/internal/price"
 	"refraktal.dev/refraktal/internal/proc"
+	"refraktal.dev/refraktal/internal/route"
 	"refraktal.dev/refraktal/internal/runlog"
 	"refraktal.dev/refraktal/internal/worktree"
 )
@@ -31,14 +34,17 @@ const (
 	RunFailed      = "failed"           // the turn did not end normally
 	RunTimedOut    = "timed_out"        // --mins ran out during the turn
 	RunExhausted   = "budget_exhausted" // a budget was spent before the turn could start
+	RunPlanned     = "planned"          // --dry: routed and planned, nothing run
 	RunUnusable    = "unusable"         // the harness could not be started or logged in
 )
 
 // RunOptions configure Run.
 type RunOptions struct {
 	Task    string
-	Harness string // claude, codex or agy; routing arrives in M5
+	Harness string // claude, codex or agy; "" lets the router choose
 	NoApply bool   // leave the result on the worktree's branch
+	Dry     bool   // plan and route only: no worktree, no harness
+	Fan     int    // 0: the router decides; 1: one harness; wider fan-out arrives in M6
 
 	// Dir is a folder inside the repository. Default: the current folder.
 	// Default folders (this one and WorktreeDir) are refused when under
@@ -60,6 +66,11 @@ type RunOptions struct {
 	// commands run in are recorded and swept. The CLI passes its own path.
 	// Empty means none: those sessions are then not swept.
 	ShellPrefix string
+	// Getenv reads the environment (GEMINI_API_KEY). Default os.Getenv.
+	Getenv func(string) string
+	// RouterEndpoint and RouteCache override the Decisions API endpoint and
+	// the decision cache folder ("-" disables it), for tests.
+	RouterEndpoint, RouteCache string
 	// OnNotice receives each notice as it is made, such as hooks in the
 	// repository or an inherited MCP setup. Optional.
 	OnNotice func(string)
@@ -83,6 +94,7 @@ type RunResult struct {
 	Model      string             `json:"model,omitempty"`
 	Budget     budget.Summary     `json:"budget"`
 	Settlement *budget.Settlement `json:"settlement,omitempty"`
+	Route      *route.Result      `json:"route,omitempty"` // how the harness was chosen, when the router chose it
 	Notices    []string           `json:"notices,omitempty"`
 	Error      string             `json:"error,omitempty"`
 }
@@ -90,7 +102,7 @@ type RunResult struct {
 // ExitCode maps the outcome to the exit codes in docs/DESIGN.md.
 func (r RunResult) ExitCode() int {
 	switch r.Outcome {
-	case RunApplied, RunKept, RunNoChanges:
+	case RunApplied, RunKept, RunNoChanges, RunPlanned:
 		return ExitOK
 	case RunTimedOut, RunExhausted:
 		return ExitBudget
@@ -158,24 +170,31 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	if strings.TrimSpace(o.Task) == "" {
 		return res, errors.New("no task: give it as an argument or on stdin")
 	}
+	if o.Fan > 1 {
+		return res, errors.New("fan-out to several harnesses arrives in M6; use --fan 1 or leave it to the router")
+	}
 	root, err := o.defaults()
 	if err != nil {
 		return res, err
 	}
-	var h harness.Harness
-	for _, c := range o.Harnesses {
-		if c.Name() == o.Harness {
-			h = c
+	find := func(name string) harness.Harness {
+		for _, c := range o.Harnesses {
+			if c.Name() == name {
+				return c
+			}
 		}
+		return nil
 	}
-	if h == nil {
-		return res, fmt.Errorf("unknown harness %q", o.Harness)
+	var h harness.Harness
+	if o.Harness != "" {
+		if h = find(o.Harness); h == nil {
+			return res, fmt.Errorf("unknown harness %q", o.Harness)
+		}
 	}
 	cfg, err := config.Load(o.ConfigPath)
 	if err != nil {
 		return res, err
 	}
-	hcfg := cfg.For(h.Name())
 	if n := proc.Nest(); n > o.Budget.Depth+1 {
 		res.Outcome = RunExhausted
 		res.Error = fmt.Sprintf("refusing to start: nested %d levels deep (%s), past --depth %d + 1", n, proc.NestEnv, o.Budget.Depth)
@@ -224,8 +243,71 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		return res, err
 	}
 	defer log.Close()
-	log.Event("run_start", map[string]any{"harness": h.Name(), "task": o.Task, "no_apply": o.NoApply,
-		"budget": o.Budget, "mins": o.Budget.Wall.Minutes(), "grant": grant, "mcp": hcfg.MCP})
+	log.Event("run_start", map[string]any{"harness": o.Harness, "task": o.Task, "no_apply": o.NoApply, "dry": o.Dry,
+		"budget": o.Budget, "mins": o.Budget.Wall.Minutes(), "grant": grant})
+
+	// Without --harness the router chooses; its call runs alongside the rest
+	// of the setup.
+	type routed struct {
+		r   route.Result
+		err error
+	}
+	var routeCh chan routed
+	if h == nil {
+		key, _ := route.LoadKey(root, o.Getenv)
+		rt := route.New(route.Options{APIKey: key, Endpoint: o.RouterEndpoint, CacheDir: o.RouteCache,
+			LogPath: filepath.Join(root, ".refraktal", "decisions.jsonl")})
+		routeCh = make(chan routed, 1)
+		go func() {
+			r, err := rt.Route(setupCtx, RepoInput(root, o.Task))
+			routeCh <- routed{r, err}
+		}()
+	}
+	joinRoute := func() error {
+		if routeCh == nil {
+			return nil
+		}
+		rr := <-routeCh
+		routeCh = nil
+		if rr.err != nil {
+			return rr.err
+		}
+		r := rr.r
+		res.Route = &r
+		d := r.Decision
+		log.Event("route", map[string]any{"decider": d.Decider, "model": d.Model, "label": d.Harness.Value, "harness": r.Harness,
+			"confidence": d.Harness.Confidence, "probabilities": d.Harness.Probabilities, "action": r.Outcome.Action,
+			"width": r.Outcome.Width, "reason": r.Outcome.Reason, "cached": r.Cached, "latency_ms": d.LatencyMS,
+			"fallback": runlog.ErrorField("fallback", d.FallbackReason)})
+		how := fmt.Sprintf("%s (confidence %.2f, %.0f ms)", d.Decider, d.Harness.Confidence, d.LatencyMS)
+		if r.Cached {
+			how = fmt.Sprintf("%s, cached (confidence %.2f)", d.Decider, d.Harness.Confidence)
+		}
+		if d.Decider == "fallback" {
+			how += "; " + d.FallbackReason
+		}
+		notice(fmt.Sprintf("routed to %s by %s", r.Harness, how))
+		for _, n := range r.Notes {
+			notice(n)
+		}
+		if h = find(r.Harness); h == nil {
+			return fmt.Errorf("the router chose %q, which is not available", r.Harness)
+		}
+		res.Harness = h.Name()
+		return nil
+	}
+	if o.Dry {
+		err := joinRoute()
+		st := ledger.Settle(grant, false)
+		res.Settlement, res.Budget = &st, ledger.Summary()
+		if err != nil {
+			res.Error = err.Error()
+			return res, nil
+		}
+		res.Outcome = RunPlanned
+		log.Event("run_end", map[string]any{"outcome": res.Outcome, "harness": res.Harness})
+		return res, nil
+	}
 	prices, perr0 := price.Load(setupCtx, price.LoadOptions{CachePath: o.PriceCache, URL: o.PriceURL})
 	if setupExpired() {
 		log.Event("run_end", map[string]any{"outcome": RunExhausted, "step": "price fetch"})
@@ -260,6 +342,16 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		return res, err
 	}
 	log.Event("worktree", map[string]any{"branch": wt.Branch, "base": wt.Base})
+	if err := joinRoute(); err != nil {
+		wt.Remove(context.Background())
+		if setupExpired() {
+			return exhausted("routing")
+		}
+		res.Error = err.Error()
+		return res, nil
+	}
+	hcfg := cfg.For(h.Name())
+	log.Event("harness", map[string]any{"harness": h.Name(), "mcp": hcfg.MCP})
 	if hooks := harness.ProjectHooks(wt.Dir, h.Name()); len(hooks) > 0 {
 		notice(fmt.Sprintf("this repository configures %s hooks (%s); they run inside the child, outside Refraktal's permission policy",
 			h.Name(), strings.Join(hooks, ", ")))
@@ -491,4 +583,49 @@ func turnErrorCode(err error) string {
 		return "agent_exited"
 	}
 	return "prompt_failed"
+}
+
+// languages maps file extensions to the language names the router is told.
+var languages = map[string]string{".go": "go", ".py": "python", ".ts": "typescript", ".tsx": "typescript", ".js": "javascript",
+	".jsx": "javascript", ".rs": "rust", ".java": "java", ".kt": "kotlin", ".swift": "swift", ".rb": "ruby", ".c": "c",
+	".h": "c", ".cpp": "cpp", ".cc": "cpp", ".cs": "csharp", ".php": "php", ".scala": "scala", ".m": "objective-c"}
+
+// RepoInput describes the repository for the router: its three most common
+// languages, its tracked file count and whether it has tests.
+func RepoInput(root, task string) route.Input {
+	in := route.Input{Task: task, Repo: route.RepoContext{Languages: []string{}}}
+	out, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
+	if err != nil {
+		return in
+	}
+	counts := map[string]int{}
+	for _, f := range strings.Split(string(out), "\x00") {
+		if f == "" {
+			continue
+		}
+		in.Repo.Files++
+		if l, ok := languages[strings.ToLower(filepath.Ext(f))]; ok {
+			counts[l]++
+		}
+		base := filepath.Base(f)
+		if strings.HasSuffix(base, "_test.go") || strings.HasPrefix(base, "test_") || strings.HasSuffix(base, "_test.py") ||
+			strings.Contains(base, ".test.") || strings.Contains(base, ".spec.") ||
+			strings.Contains("/"+f, "/test/") || strings.Contains("/"+f, "/tests/") {
+			in.Repo.HasTests = true
+		}
+	}
+	for l := range counts {
+		in.Repo.Languages = append(in.Repo.Languages, l)
+	}
+	sort.Slice(in.Repo.Languages, func(i, j int) bool {
+		a, b := in.Repo.Languages[i], in.Repo.Languages[j]
+		if counts[a] != counts[b] {
+			return counts[a] > counts[b]
+		}
+		return a < b
+	})
+	if len(in.Repo.Languages) > 3 {
+		in.Repo.Languages = in.Repo.Languages[:3]
+	}
+	return in
 }

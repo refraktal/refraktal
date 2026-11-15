@@ -2,6 +2,7 @@ package refraktal
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -372,5 +374,95 @@ func TestDoctorEventsCarryNoRawHarnessErrors(t *testing.T) {
 	events, _ := os.ReadFile(filepath.Join(r.root, rep.Run, "events.jsonl"))
 	if strings.Contains(string(events), acptest.AuthEmail) || !strings.Contains(string(events), `"code":"logged_out"`) {
 		t.Fatalf("doctor events:\n%s", events)
+	}
+}
+
+// geminiServer answers like the Decisions API, with one of the spike's
+// recorded responses (the bugfix sample, routed to codex).
+func geminiServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var fx []struct {
+		Raw json.RawMessage `json:"raw_response"`
+	}
+	b, err := os.ReadFile(filepath.Join("internal", "route", "testdata", "spike_live.json"))
+	if err != nil || json.Unmarshal(b, &fx) != nil {
+		t.Fatal(err)
+	}
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.Header.Get("x-goog-api-key") == "" {
+			http.Error(w, "no key", http.StatusUnauthorized)
+			return
+		}
+		w.Write(fx[0].Raw)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+func allFakes() []harness.Harness {
+	return []harness.Harness{fake{name: "claude", agentMode: "turn"}, fake{name: "codex", agentMode: "turn"}, fake{name: "agy", agentMode: "turn"}}
+}
+
+// Without --harness the router chooses: with no key, the deterministic
+// fallback; the decision is logged and the routed harness runs.
+func TestRunRoutesWithoutAHarness(t *testing.T) {
+	r := newRunRig(t)
+	res := r.run(t, fake{}, func(o *RunOptions) {
+		o.Harness, o.Harnesses, o.RouteCache = "", allFakes(), "-"
+		o.Task = "Fix the off-by-one error in pagination: the last page of results is dropped."
+		o.Getenv = func(string) string { return "" }
+	})
+	if res.Route == nil || res.Route.Decision.Decider != "fallback" || res.Harness != "codex" || res.Outcome != RunNoChanges {
+		t.Fatalf("%+v", res)
+	}
+	if !strings.Contains(strings.Join(res.Notices, "\n"), "routed to codex by fallback") {
+		t.Fatalf("notices %v", res.Notices)
+	}
+	if b, err := os.ReadFile(filepath.Join(r.repo, ".refraktal", "decisions.jsonl")); err != nil || !strings.Contains(string(b), `"thresholds"`) {
+		t.Fatalf("decision log: %v", err)
+	}
+	events, _ := os.ReadFile(filepath.Join(r.repo, res.Run, "events.jsonl"))
+	if !strings.Contains(string(events), `"event":"route"`) {
+		t.Fatal("no route event")
+	}
+}
+
+// --dry plans and routes, with or without a key, and runs nothing.
+func TestRunDry(t *testing.T) {
+	r := newRunRig(t)
+	res := r.run(t, fake{}, func(o *RunOptions) {
+		o.Harness, o.Harnesses, o.Dry, o.RouteCache = "", allFakes(), true, "-"
+		o.Getenv = func(string) string { return "" }
+	})
+	if res.Outcome != RunPlanned || res.ExitCode() != ExitOK || res.Route == nil || res.Route.Decision.Decider != "fallback" || exists(r.prompts) {
+		t.Fatalf("without a key: %+v", res)
+	}
+	if entries, _ := os.ReadDir(r.wtDir); len(entries) != 0 {
+		t.Fatal("--dry created a worktree")
+	}
+	srv, hits := geminiServer(t)
+	res = r.run(t, fake{}, func(o *RunOptions) {
+		o.Harness, o.Harnesses, o.Dry, o.RouteCache, o.RouterEndpoint = "", allFakes(), true, "-", srv.URL
+		o.Getenv = func(k string) string { return map[string]string{"GEMINI_API_KEY": "test-key"}[k] }
+	})
+	if res.Outcome != RunPlanned || res.Route == nil || res.Route.Decision.Decider != "gemini" || res.Harness != "codex" || hits.Load() != 1 {
+		t.Fatalf("with a key: %+v (hits %d)", res, hits.Load())
+	}
+}
+
+func TestRunFanAndHarnessOverride(t *testing.T) {
+	r := newRunRig(t)
+	if _, err := Run(context.Background(), RunOptions{Task: "x", Fan: 2, Dir: r.repo}); err == nil || !strings.Contains(err.Error(), "M6") {
+		t.Fatalf("--fan 2: %v", err)
+	}
+	srv, hits := geminiServer(t)
+	res := r.run(t, fake{name: "agy", agentMode: "turn"}, func(o *RunOptions) {
+		o.RouterEndpoint = srv.URL
+		o.Getenv = func(k string) string { return map[string]string{"GEMINI_API_KEY": "test-key"}[k] }
+	})
+	if res.Route != nil || hits.Load() != 0 || res.Harness != "agy" {
+		t.Fatalf("--harness must override the router: %+v (hits %d)", res, hits.Load())
 	}
 }
