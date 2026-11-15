@@ -51,6 +51,8 @@ not a command.
 - **Adapters are installed on first use** into `os.UserCacheDir()` joined with
   `refraktal/adapters/<package>-<version>/`, with `npm install
   --ignore-scripts`. A failed install leaves nothing behind.
+- **Prices:** config overrides win over the table under every key tried;
+  table entries with negative or non-finite prices are skipped.
 - **The ACP layer is hand-rolled** JSON-RPC over stdio on the standard library.
   Do not use an ACP SDK. Pin protocol version 1.
 
@@ -58,7 +60,8 @@ not a command.
 
 Four budgets: `--usd`, `--turns`, `--mins`, `--depth`. Each is passed down the
 tree and only ever shrinks. A child is given at most what its parent has left.
-Defaults: `--usd 10`, `--turns 20`, `--mins 30`, `--depth 2`. A child
+Defaults: `--usd 10`, `--turns 20`, `--mins 30`, `--depth 2`. `--usd` and
+`--mins` must be finite, and `--mins` is at most 1440 (24 hours). A child
 Refraktal will read its grant from `REFRAKTAL_BUDGET` (JSON: usd, turns,
 deadline, depth); `--depth` is how many more levels may nest, and a child gets
 one less. When a budget is spent before a turn can start, `run` sends nothing
@@ -233,10 +236,19 @@ process-group kill does not reach them.
   and the process-group kill, Refraktal kills, with the identity check, every
   process of the current user still in that session, whatever its parent or
   process group. A session ID is inherited through forks, reparenting and new
-  process groups, and survives the leader's exit. `run` and `doctor` sweep
-  the sessions of dead runs the same way, from the live registry.
-  - A session ID is a PID: if the leader's PID now belongs to a different
-    process, the ID may name an unrelated session and nothing is swept.
+  process groups, and survives the leader's exit.
+  - **A session ID is a PID, and can be reused once the session empties.**
+    So: the harness is not reaped until its session has been swept (Refraktal
+    learns of the exit with `waitid(WNOWAIT)`, and the zombie keeps the ID
+    reserved); every session is polled about once a second and dropped for
+    good once it is seen empty (confirmed by a second look), and only
+    sessions never seen empty are swept; a leader is matched on PID and start
+    time, and if its PID now has another start time the session is not
+    swept; a member that started before the leader is skipped. Residual risk:
+    a session that empties and has its ID reused within one poll interval.
+  - **Dead runs are never swept by session ID.** `run` and `doctor` clean up
+    a dead run by killing only the processes its live record names by
+    identity; the session poll keeps the members it sees in that record.
   - **Known limit:** a process that calls `setsid()` itself, as
     pseudo-terminal launchers do, leaves the session and escapes.
   - **Claude's tool commands: recorded sessions.** Claude's Bash tool starts
@@ -249,15 +261,21 @@ process-group kill does not reach them.
     mode selected by `REFRAKTAL_HELPER=shell-prefix` (not a command or a
     flag). The helper appends the session's leader (PID, start time, command
     line) to the run's sessions file, removes its own variables from the
-    environment, and execs the command with Claude's shell (or chains to a
-    prefix the user had set). At shutdown, after the harness session, every
-    recorded session is swept with the same identity check and reused-ID
-    guard; dead runs' recorded sessions are swept from the live registry.
+    environment, restores the harness's prefix variable for the command (the
+    user's own value, or none, so a nested claude or refraktal is not
+    routed through the helper), and execs the command with bash or zsh, as
+    Claude Code does (or chains to a prefix the user had set, never to the
+    helper itself). Recorded sessions are polled and swept like the
+    harness session; the sessions file is read again shortly after the
+    harness has died, so a late record is not missed.
     M4 open test: `late.txt` left nothing on Claude (2 escaped processes
-    swept). Limits: a Claude settings file that sets
-    `CLAUDE_CODE_SHELL_PREFIX` itself would replace Refraktal's, and a library
-    user must call `proc.MaybeShellPrefix()` first in `main`, since the helper
-    is the running binary.
+    swept). The prefix is opt-in: `RunOptions.ShellPrefix` names a binary
+    that calls `proc.MaybeShellPrefix()` first in `main`, and the CLI passes
+    its own path. It is never guessed from `os.Executable()`: in a test or a
+    library host that is another program, which Claude would then run for
+    every tool command (this happened once in M4 review, in a test, and
+    started a cascade of nested runs). Limit: a Claude settings file that
+    sets `CLAUDE_CODE_SHELL_PREFIX` itself would replace Refraktal's.
   - Hooks also run through the prefix, so their sessions are swept too. A
     side finding: children load the user's Claude settings (the adapter asks
     for user, project and local setting sources), so the user's own Claude
@@ -324,8 +342,9 @@ process-group kill does not reach them.
   fails, or the turn did not end normally) the worktree and branch stay and
   are printed; otherwise they are removed.
 - **Budgets** as in Budgets above; `--mins` covers the whole run, from
-  start-up to the end of the turn: `session/cancel`, then shutdown, the tree
-  kill and the session sweep.
+  start-up to the end of the turn: during the turn, `session/cancel`, then
+  shutdown, the tree kill and the session sweep (`timed_out`); during
+  start-up, `budget_exhausted`. Both exit 2.
 - **Exit codes:** 0 applied, kept or no changes; 1 the turn failed or the
   result did not apply; 2 a budget ran out (before the turn, or `--mins`
   during it); 3 the harness could not be started or logged in.
