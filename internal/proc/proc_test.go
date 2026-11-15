@@ -326,11 +326,19 @@ func TestTrackerKeepsAReparentedChildOfATrackedLeader(t *testing.T) {
 			t.Fatal("background child was not reparented")
 		}
 	}
-	if err := c.tracker.Poll(); err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Contains(pids(c.Tracked()), bg) {
-		t.Fatalf("reparented child %d not tracked: %v", bg, pids(c.Tracked()))
+	// The real tracker polls continually; give it a few polls here too (one
+	// poll alone failed once on the macOS CI runner, never locally).
+	for i := 0; ; i++ {
+		if err := c.tracker.Poll(); err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(pids(c.Tracked()), bg) {
+			break
+		}
+		if i == 10 {
+			t.Fatalf("reparented child %d not tracked after %d polls: %v", bg, i+1, pids(c.Tracked()))
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	r := c.Shutdown(time.Second)
 	if !slices.Contains(pids(r.Kill.Killed), bg) || running(bg) {

@@ -100,6 +100,11 @@ func TestDecide(t *testing.T) {
 		{"printf -v expanded", request(t, "execute", map[string]any{"command": "printf -v $n x"}), false},
 		{"plain printf", request(t, "execute", map[string]any{"command": "printf 'hi\\n' > out.txt"}), true},
 		{"echo PATH", request(t, "execute", map[string]any{"command": "echo $PATH"}), true},
+		{"nameref in an option cluster", request(t, "execute", map[string]any{"command": "declare -gn x=y; x=/z"}), false},
+		{"backtick with declare", request(t, "execute", map[string]any{"command": "declare x=`printf GI`"}), false},
+		{"plain declare", request(t, "execute", map[string]any{"command": "declare -i n=3; echo $n"}), true},
+		{"unknown kind with a non-path target", request(t, "other", map[string]any{"target": "production"}), false},
+		{"edit target outside", request(t, "edit", map[string]any{"path": filepath.Join(wt, "a"), "target": filepath.Join(outside, "a")}), false},
 		{"system tool path", request(t, "execute", map[string]any{"command": "/usr/bin/env ls > /dev/null"}), true},
 		{"absolute path inside", request(t, "execute", map[string]any{"command": "cat " + filepath.Join(wt, "src")}), true},
 		// Codex

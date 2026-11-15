@@ -141,25 +141,35 @@ func paths(req acp.PermissionRequest, in map[string]any) []string {
 	for _, l := range loc.ToolCall.Locations {
 		out = append(out, l.Path)
 	}
-	out = append(out, pathFields(in)...)
-	if ch, ok := in["changes"].(map[string]any); ok { // Codex file changes, keyed by path; a change may also move the file
+	keys := fileKeys
+	if fileChange[req.ToolCall.Kind] {
+		keys = append(append([]string{}, fileKeys...), moveKeys...)
+	}
+	out = append(out, pathFields(in, keys)...)
+	if ch, ok := in["changes"].(map[string]any); ok && fileChange[req.ToolCall.Kind] { // Codex file changes, keyed by path; a change may also move the file
 		for k, v := range ch {
 			out = append(out, k)
 			if m, ok := v.(map[string]any); ok {
-				out = append(out, pathFields(m)...)
+				out = append(out, pathFields(m, append(append([]string{}, fileKeys...), moveKeys...))...)
 			}
 		}
 	}
 	return out
 }
 
-// pathKeys are the fields harnesses use for a file path or a destination.
-var pathKeys = []string{"file_path", "path", "Path", "notebook_path", "new_path", "old_path",
-	"move_path", "destination", "target", "dest", "to", "from"}
+// fileKeys are the fields harnesses use for a file path. moveKeys name a
+// destination, and count only for file changes (edit, delete, move), where
+// they can only mean a path; elsewhere a field such as "target" may be
+// anything.
+var (
+	fileKeys   = []string{"file_path", "path", "Path", "notebook_path"}
+	moveKeys   = []string{"new_path", "old_path", "move_path", "destination", "target", "dest"}
+	fileChange = map[string]bool{"edit": true, "delete": true, "move": true}
+)
 
-func pathFields(m map[string]any) []string {
+func pathFields(m map[string]any, keys []string) []string {
 	var out []string
-	for _, k := range pathKeys {
+	for _, k := range keys {
 		if s, ok := m[k].(string); ok && s != "" {
 			out = append(out, s)
 		}
@@ -231,11 +241,16 @@ func (p Policy) commandOK(cmd string, in map[string]any) (bool, string) {
 					return false, "changes where git reads its config or repository: " + part
 				}
 			}
-			switch filepath.Base(w) {
-			case "declare", "typeset", "local", "readonly", "export", "read", "printf", "eval":
+			switch b := filepath.Base(w); b {
+			case "declare", "typeset", "local", "readonly", "export", "read", "printf", "eval", "getopts", "mapfile", "readarray":
+				if strings.ContainsAny(cmd, "`") {
+					return false, b + " in a command with backtick expansion may set any variable"
+				}
 				for _, arg := range seg[i+1:] {
-					if arg == "-n" || strings.Contains(arg, "$") {
-						return false, filepath.Base(w) + " with a nameref or an expanded name may set any variable"
+					nameref := (b == "declare" || b == "typeset" || b == "local") &&
+						(strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "+")) && strings.Contains(arg, "n")
+					if nameref || strings.Contains(arg, "$") {
+						return false, b + " with a nameref or an expanded name may set any variable"
 					}
 				}
 			}
