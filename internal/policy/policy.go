@@ -210,13 +210,21 @@ func (p Policy) commandOK(cmd string, in map[string]any) (bool, string) {
 			}
 		}
 		for i, w := range seg {
-			if name, _, ok := strings.Cut(w, "="); ok && (strings.HasPrefix(name, "GIT_") || name == "HOME" || name == "XDG_CONFIG_HOME") {
+			// Any mention of these names, as an assignment (=, +=) or as an
+			// argument to export, read, declare and the like, is denied.
+			name, _, _ := strings.Cut(w, "=")
+			name = strings.TrimSuffix(name, "+")
+			if strings.HasPrefix(name, "GIT_") || name == "HOME" || name == "XDG_CONFIG_HOME" {
 				return false, "changes where git reads its config or repository: " + name
 			}
 			switch filepath.Base(w) {
 			case "cd", "pushd":
-				if i+1 >= len(seg) || seg[i+1] == "-" {
-					return false, filepath.Base(w) + " without a folder leaves the worktree"
+				j := i + 1
+				for j < len(seg) && strings.HasPrefix(seg[j], "-") && seg[j] != "-" {
+					j++ // options such as -P and --
+				}
+				if j >= len(seg) || seg[j] == "-" || strings.HasPrefix(seg[j], "+") {
+					return false, filepath.Base(w) + " without a folder, to -, or rotating the stack can leave the worktree"
 				}
 			}
 			switch filepath.Base(w) {

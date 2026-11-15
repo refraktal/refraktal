@@ -89,6 +89,11 @@ func TestDecide(t *testing.T) {
 		{"git --attr-source push", request(t, "execute", map[string]any{"command": "git --attr-source HEAD push"}), false},
 		{"git --no-pager log", request(t, "execute", map[string]any{"command": "git --no-pager log --oneline -3"}), true},
 		{"cd into a subfolder", request(t, "execute", map[string]any{"command": "cd src && ls"}), true},
+		{"read into GIT_ variable", request(t, "execute", map[string]any{"command": "read GIT_CONFIG_PARAMETERS < f; export GIT_CONFIG_PARAMETERS; git p"}), false},
+		{"append assignment", request(t, "execute", map[string]any{"command": "GIT_CONFIG_PARAMETERS+=x git p"}), false},
+		{"cd with an option and no folder", request(t, "execute", map[string]any{"command": "cd -P && touch x"}), false},
+		{"pushd stack rotation", request(t, "execute", map[string]any{"command": "pushd +1 && touch x"}), false},
+		{"cd -P into a subfolder", request(t, "execute", map[string]any{"command": "cd -P src && ls"}), true},
 		{"system tool path", request(t, "execute", map[string]any{"command": "/usr/bin/env ls > /dev/null"}), true},
 		{"absolute path inside", request(t, "execute", map[string]any{"command": "cat " + filepath.Join(wt, "src")}), true},
 		// Codex
