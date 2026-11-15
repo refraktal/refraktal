@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"refraktal.dev/refraktal/internal/acp"
+	"refraktal.dev/refraktal/internal/config"
 	"refraktal.dev/refraktal/internal/harness"
 	"refraktal.dev/refraktal/internal/proc"
 	"refraktal.dev/refraktal/internal/runlog"
@@ -53,6 +52,8 @@ type DoctorOptions struct {
 	Getenv func(string) string
 	// Timeout bounds each harness's handshake. Default 90 s.
 	Timeout time.Duration
+	// ConfigPath is the config file. Default os.UserConfigDir()/refraktal/config.json.
+	ConfigPath string
 	// Neutral is where each handshake gets an empty session folder, outside
 	// any repository, so a repository's own harness settings and hooks never
 	// run during doctor. Default os.UserCacheDir()/refraktal/doctor.
@@ -88,7 +89,7 @@ type HarnessCheck struct {
 	Agent            string `json:"agent,omitempty"`                 // name and version from initialize
 	Mode             string `json:"mode"`                            // the permission mode Refraktal sets
 	ModeOK           bool   `json:"mode_ok"`                         // session/set_mode to it succeeded
-	MCP              string `json:"mcp"`                             // isolated, inherit or unavailable
+	MCP              string `json:"mcp"`                             // isolated or inherit
 	HandshakeMs      int64  `json:"handshake_ms,omitempty"`
 	LeftRunning      int    `json:"left_running"` // processes still running after shutdown
 }
@@ -144,13 +145,17 @@ func Doctor(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 		rep.Decider = DeciderCheck{Kind: "gemini", Model: "gemini-decision-1"}
 	}
 
+	cfg, err := config.Load(o.ConfigPath)
+	if err != nil {
+		return rep, err
+	}
 	rep.Harnesses = make([]HarnessCheck, len(o.Harnesses))
 	var wg sync.WaitGroup
 	for i, h := range o.Harnesses {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			rep.Harnesses[i] = checkHarness(ctx, h, o, run, log)
+			rep.Harnesses[i] = checkHarness(ctx, h, cfg.For(h.Name()), o, run, log)
 		}()
 	}
 	wg.Wait()
@@ -184,6 +189,11 @@ func (o *DoctorOptions) defaults() error {
 			return err
 		}
 	}
+	if o.ConfigPath == "" {
+		if o.ConfigPath, err = config.DefaultPath(); err != nil {
+			return err
+		}
+	}
 	if o.Neutral == "" {
 		cache, err := os.UserCacheDir()
 		if err != nil {
@@ -212,76 +222,39 @@ func defaultRoot() (string, error) {
 	return os.Getwd()
 }
 
-func checkHarness(ctx context.Context, h harness.Harness, o DoctorOptions, run runlog.Run, log *runlog.Log) HarnessCheck {
-	c := HarnessCheck{Name: h.Name(), Mode: h.Mode(), MCP: h.MCP()}
+func checkHarness(ctx context.Context, h harness.Harness, hcfg config.Harness, o DoctorOptions, run runlog.Run, log *runlog.Log) HarnessCheck {
+	c := HarnessCheck{Name: h.Name(), Mode: h.Mode(), MCP: hcfg.MCP}
 	scratch := filepath.Join(run.Dir, h.Name())
-	if err := os.MkdirAll(scratch, 0o700); err != nil {
-		c.Status, c.Reason = StatusError, err.Error()
-		return c
-	}
-	l, err := h.Prepare(ctx, scratch)
-	c.Adapter, c.AdapterInstalled, c.Bundled, c.Installed = l.Adapter, l.AdapterInstalled, l.Bundled, l.Installed
-	if err != nil {
-		c.Status, c.Reason = StatusUnavailable, err.Error()
-		return c
-	}
-	stderr, err := os.OpenFile(filepath.Join(scratch, "stderr"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		c.Status, c.Reason = StatusError, err.Error()
-		return c
-	}
-	defer stderr.Close()
 	// An empty folder outside the repository: harnesses load project settings
 	// (and Claude runs project hooks) from the session folder, and doctor must
 	// not run a repository's code.
 	cwd := filepath.Join(o.Neutral, run.ID+"-"+h.Name())
-	if err := os.MkdirAll(cwd, 0o700); err != nil {
-		c.Status, c.Reason = StatusError, err.Error()
-		return c
+	for _, d := range []string{scratch, cwd, filepath.Join(scratch, "tmp")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			c.Status, c.Reason = StatusError, err.Error()
+			return c
+		}
 	}
 	defer os.RemoveAll(cwd)
 
 	start := time.Now()
-	child, err := proc.Start(proc.Spec{Argv: l.Argv, Env: l.Env, Dir: cwd, Stderr: stderr,
-		LiveDir: o.LiveDir, Labels: map[string]string{"run": run.ID, "harness": h.Name()}})
-	if err != nil {
-		c.Status, c.Reason = StatusUnavailable, err.Error()
-		return c
+	s, err := openSession(ctx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, cwd: cwd, tmpDir: filepath.Join(scratch, "tmp"),
+		liveDir: o.LiveDir, labels: map[string]string{"run": run.ID, "harness": h.Name()}, log: log, timeout: o.Timeout})
+	l := s.launch
+	c.Adapter, c.AdapterInstalled, c.Bundled, c.Installed = l.Adapter, l.AdapterInstalled, l.Bundled, l.Installed
+	if l.MCP != "" {
+		c.MCP = l.MCP
 	}
-	client := acp.New(child.Stdout, child.Stdin, acp.Options{ClientName: "refraktal", ClientVersion: Version,
-		OnUpdate:       func(u acp.Update) { log.Update(h.Name(), u.SessionID, u.Kind, u.Raw) },
-		OnNotification: func(m string, p json.RawMessage) { log.Notification(h.Name(), m, p) },
-	})
-	c.Status, c.Reason, c.Agent, c.ModeOK = handshake(ctx, client, h, l, cwd, o.Timeout)
-	c.HandshakeMs = time.Since(start).Milliseconds()
-	sr := child.Shutdown(5 * time.Second)
-	c.LeftRunning = len(sr.Kill.Alive)
-	log.Procs("tracked_"+h.Name(), sr.Tracked)
+	c.Agent = s.agent
+	c.Status, c.ModeOK = StatusOK, err == nil
+	if err != nil {
+		c.Status, c.Reason = statusOf(err), err.Error()
+	}
+	if s.child != nil {
+		c.HandshakeMs = time.Since(start).Milliseconds()
+		c.LeftRunning = len(s.close(log, h.Name(), 5*time.Second).Kill.Alive)
+	}
 	return c
-}
-
-// handshake goes as far as session/new and session/set_mode, and no further:
-// no prompt is sent, so no tokens are spent.
-func handshake(ctx context.Context, client *acp.Client, h harness.Harness, l harness.Launch, cwd string, timeout time.Duration) (status, reason, agent string, modeOK bool) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	a, err := client.Initialize(ctx)
-	if err != nil {
-		return StatusError, err.Error(), "", false
-	}
-	agent = strings.TrimSpace(a.Info.Name + " " + a.Info.Version)
-	s, err := client.NewSession(ctx, cwd, l.Meta)
-	if err != nil {
-		var e *acp.Error
-		if errors.As(err, &e) && (e.Code == -32000 || strings.Contains(strings.ToLower(e.Message), "auth")) {
-			return StatusLoggedOut, e.Message, agent, false
-		}
-		return StatusError, err.Error(), agent, false
-	}
-	if err := client.SetMode(ctx, s.ID, h.Mode()); err != nil {
-		return StatusError, fmt.Sprintf("mode %s: %v", h.Mode(), err), agent, false
-	}
-	return StatusOK, "", agent, true
 }
 
 // WriteDoctorJSON writes the report as JSONL: one line per harness, then the
@@ -335,8 +308,8 @@ func WriteDoctorText(w io.Writer, r DoctorReport) {
 		if c.Reason != "" {
 			p("%-20s%s\n", "", c.Reason)
 		}
-		if c.Status == StatusOK && c.MCP == harness.MCPUnavailable {
-			p("%-20s%s\n", "", "no per-run MCP isolation: this harness uses your own MCP servers and plugins")
+		if c.MCP == harness.MCPInherit {
+			p("%-20s%s\n", "", "mcp inherit (config): this harness uses your own MCP servers and plugins")
 		}
 		if c.LeftRunning > 0 {
 			p("%-20s%d processes still running after shutdown\n", "", c.LeftRunning)

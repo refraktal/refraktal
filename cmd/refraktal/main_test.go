@@ -15,7 +15,10 @@ func TestCommands(t *testing.T) {
 	}{
 		{nil, 3, "usage: refraktal"},
 		{[]string{"--help"}, 0, "doctor          check harnesses"},
-		{[]string{"run", "fix it"}, 3, "not implemented yet"},
+		{[]string{"run", "fix it"}, 3, "--harness is required"},
+		{[]string{"run", "fix it", "--harness", "claude,codex"}, 3, "one harness at a time"},
+		{[]string{"run", "--mins", "5", "--harness", "claude", "x"}, 3, "not implemented yet"},
+		{[]string{"show"}, 3, "not implemented yet"},
 		{[]string{"bogus"}, 3, `unknown command "bogus"`},
 		{[]string{"doctor", "--bogus"}, 3, "flag provided but not defined"},
 	} {
