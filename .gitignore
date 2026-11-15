@@ -8,3 +8,6 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# Live checks: work dirs, adapters and raw harness output (local paths).
+/.live/

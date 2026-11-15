@@ -92,6 +92,11 @@ script, with the run folder redacted.
   confirm the file is not created and record how each harness reports it.
 - Codex private `TMPDIR` and `exclude_slash_tmp` set per run.
 - Codex MCP isolation: look for a per-run switch that keeps the login.
+- A survival check that does not rely on `ps`: a prompt that runs
+  `(sleep 30; touch late.txt) &` and then replies DONE. After shutdown, wait
+  40 s and check whether `late.txt` appeared. Run it on each harness.
+- Whether Claude in `default` asks before deny-list commands such as
+  `git push` (against a remote that does not exist).
 
 ## M4. Budgets
 
