@@ -7,7 +7,8 @@ observation that decides it.
 
 Live run of 2026-11-15: verdicts are in the **Live result** column; the deciding
 observation for each is in `LIVE-RESULTS.md`; A14, A17 and R7 were settled
-by the follow-up run in `FOLLOWUP-RESULTS.md`.
+by the follow-up run in `FOLLOWUP-RESULTS.md`; A17 was corrected by the third
+round in `FOLLOWUP2-RESULTS.md`.
 
 Source key: **verified** (observed running, but without logins), **source**
 (read from an adapter's source code), **docs** (vendor docs), **unknown**.
@@ -32,7 +33,7 @@ Source key: **verified** (observed running, but without logins), **source**
 | A14 | Antigravity applies its own permission rules before any ACP permission request | docs | confirmed (follow-up: reads run unasked; `execute` asks in `default`, not in `auto`) |
 | A15 | A cached Codex login is enough to get past `session/new` | unknown | confirmed |
 | A16 | On a subscription login a dollar figure is still reported (a notional one) | unknown | confirmed for Claude only |
-| A17 | Adapters need a process-group kill to shut down cleanly | verified | confirmed for Claude (bundled `claude` outlives the adapter), not Codex or Antigravity |
+| A17 | Adapters need a process-group kill to shut down cleanly | verified | not needed for the harnesses themselves: Claude's bundled `claude` exits within about 1 s of the adapter (third round corrects the follow-up); Codex and Antigravity leave nothing. The real leak is tool processes, which run in process groups of their own: Codex's outlived the cancel, Antigravity's outlived `agy` itself (see `FOLLOWUP2-RESULTS.md`) |
 | A18 | Harnesses send non-standard notifications and updates before the first prompt | verified | confirmed for Claude and Codex, not Antigravity |
 
 Conclusion that depends on A6 and A8: **a USD budget cannot stop a turn in
