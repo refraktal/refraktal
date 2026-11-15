@@ -3,9 +3,11 @@ package proc
 import (
 	"cmp"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -32,6 +34,12 @@ type Spec struct {
 	Env       []string      // KEY=VALUE pairs added to the scrubbed parent environment
 	Stderr    io.Writer     // nil discards it
 	PollEvery time.Duration // how often to look for new descendants; default 200 ms
+
+	// LiveDir, if set, is the shared folder of live records (see Record). The
+	// child's record is written there at start, rewritten as tracking grows,
+	// and removed after Shutdown kills everything.
+	LiveDir string
+	Labels  map[string]string // stored in the live record, such as the run ID and harness
 }
 
 // Child is a running harness process in a process group of its own, with its
@@ -48,6 +56,10 @@ type Child struct {
 
 	once   sync.Once
 	report ShutdownReport
+
+	record     string // live record path, or ""
+	recordBase Record
+	recordErr  error // the last error writing the live record
 }
 
 // Start starts the child and begins tracking its descendants.
@@ -91,13 +103,21 @@ func Start(s Spec) (*Child, error) {
 			return true
 		}
 	})
+	if s.LiveDir != "" {
+		c.startRecord(s.LiveDir, s.Labels)
+	}
 	every := cmp.Or(s.PollEvery, 200*time.Millisecond)
 	go func() {
 		defer close(c.polling)
 		t := time.NewTicker(every)
 		defer t.Stop()
+		written := 0
 		for {
 			c.tracker.Poll()
+			if n := len(c.tracker.Tracked()); c.record != "" && n != written {
+				c.writeRecord()
+				written = n
+			}
 			select {
 			case <-c.stop:
 				return
@@ -106,6 +126,34 @@ func Start(s Spec) (*Child, error) {
 		}
 	}()
 	return c, nil
+}
+
+// startRecord writes the child's first live record. Failing to write it does
+// not stop the child; the error is reported by Shutdown.
+func (c *Child) startRecord(dir string, labels map[string]string) {
+	all, err := List()
+	if err == nil {
+		err = os.MkdirAll(dir, 0o700)
+	}
+	if err != nil {
+		c.recordErr = err
+		return
+	}
+	self := os.Getpid()
+	c.recordBase = Record{Owner: all[self], Child: all[c.PID()], Labels: labels}
+	if c.recordBase.Child.PID == 0 { // exited before it could be listed
+		c.recordBase.Child = Proc{PID: c.PID()}
+	}
+	c.record = filepath.Join(dir, fmt.Sprintf("%d-%d.json", self, c.PID()))
+	c.writeRecord()
+}
+
+func (c *Child) writeRecord() {
+	r := c.recordBase
+	r.Tracked = c.tracker.Tracked()
+	if err := writeRecord(c.record, r); err != nil {
+		c.recordErr = err
+	}
 }
 
 // PID is the child's process ID, which is also its process group ID.
@@ -167,6 +215,12 @@ func (c *Child) shutdown(grace time.Duration) ShutdownReport {
 	case <-time.After(5 * time.Second):
 	}
 	c.Stdout.Close()
+	if c.record != "" && err == nil && len(kr.Alive) == 0 {
+		os.Remove(c.record) // clean exit; otherwise the record stays for CleanLeftovers
+	}
+	if err == nil {
+		err = c.recordErr
+	}
 	r.Tracked, r.Kill = tracked, kr
 	if err != nil {
 		r.Err = err.Error()

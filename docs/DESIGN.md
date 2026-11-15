@@ -48,6 +48,9 @@ not a command.
   default; `doctor` reports both bundled and installed versions; config may
   point an adapter at the installed CLI (`CLAUDE_CODE_EXECUTABLE`,
   `CODEX_PATH`).
+- **Adapters are installed on first use** into `os.UserCacheDir()` joined with
+  `refraktal/adapters/<package>-<version>/`, with `npm install
+  --ignore-scripts`. A failed install leaves nothing behind.
 - **The ACP layer is hand-rolled** JSON-RPC over stdio on the standard library.
   Do not use an ACP SDK. Pin protocol version 1.
 
@@ -142,8 +145,15 @@ process-group kill does not reach them.
   time must still match what was recorded. The tree includes the user's MCP
   servers, plugin hooks and helpers from other apps' bundles; never kill by
   name or pattern.
-- Record tracked processes in the run folder; `run` and `doctor` clean up
-  leftovers from dead runs, which also covers Refraktal itself being killed.
+- **Live registry.** Every live child is registered in a global folder,
+  `os.UserConfigDir()` joined with `refraktal/live/`, one file per child. The
+  file names the owning Refraktal process (PID, start time, command line), the
+  child and every descendant tracked so far, and is rewritten as tracking
+  grows. It is removed on a clean shutdown. `doctor` and `run` clean up the
+  entries of dead runs (owner no longer running as recorded): they kill the
+  listed processes with the identity check, then remove the file. This also
+  covers Refraktal itself being killed. The folder is global because runs in
+  different repositories share one machine.
 - Keep a process-group kill as well; it is free.
 - The kill path is proven against real processes in tests (a child that
   leaves the harness's group, a reparented background child, a reused PID
@@ -161,12 +171,40 @@ process-group kill does not reach them.
 
 - One folder per run; child runs nest inside it. JSONL for events, decisions,
   verdicts and costs.
+- **Run folders live in the repository** at `.refraktal/runs/<id>/` (the git
+  top level, or the current folder outside a repository). Refraktal writes
+  `.refraktal/.gitignore` containing `*`, so nothing there is committed. The
+  ID is the start time plus a random suffix.
+- A repository may not be trusted: if `.refraktal`, `.refraktal/runs` or
+  `.refraktal/.gitignore` is a symlink, Refraktal refuses to continue rather
+  than write through it. `.gitignore` is replaced by renaming a new file over
+  it.
 - **Redact.** Harnesses send the account email, organisation and plan in auth
   notifications. Log an allowlist of known update kinds verbatim; for anything
   else, the method name and size only. Never forward a child's auth
   notifications upstream. Process listings contain local paths: same rule.
 - Store large repeated updates (for example `available_commands_update`, tens
   of KB, sent several times a turn) as a size and a hash.
+
+## Configuration
+
+- The config file is JSON, read with the standard library. `doctor` (M2) uses
+  the defaults; the file itself arrives in M3.
+
+## Doctor
+
+- The login check is a zero-token handshake: `initialize`, `session/new` with
+  the run's isolation options, and `session/set_mode` to the harness's mode,
+  then shutdown. No prompt is ever sent.
+- Each handshake runs in an empty folder outside any repository
+  (`os.UserCacheDir()` joined with `refraktal/doctor/`, removed afterwards).
+  Harnesses load project settings from the session folder, and Claude runs a
+  project's hooks at session start: `doctor` must never run a repository's
+  code. (`run` works in the repository by design, so this applies to `doctor`
+  only.)
+- A harness is `ok`, `logged_out` (`session/new` refused for
+  authentication), `unavailable` (not installed, or its adapter could not be
+  prepared) or `error`. Exit code 3 when no harness is `ok`.
 
 ## Routing
 
