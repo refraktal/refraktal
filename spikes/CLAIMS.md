@@ -6,7 +6,8 @@ mark each claim **confirmed**, **contradicted** or **still unknown**, with the
 observation that decides it.
 
 Live run of 2026-11-15: verdicts are in the **Live result** column; the deciding
-observation for each is in `LIVE-RESULTS.md`.
+observation for each is in `LIVE-RESULTS.md`; A14, A17 and R7 were settled
+by the follow-up run in `FOLLOWUP-RESULTS.md`.
 
 Source key: **verified** (observed running, but without logins), **source**
 (read from an adapter's source code), **docs** (vendor docs), **unknown**.
@@ -28,10 +29,10 @@ Source key: **verified** (observed running, but without logins), **source**
 | A11 | The prompt response itself carries token usage (Claude Code, Codex) | source | confirmed |
 | A12 | The mid-turn `used` field is context-window fill, not spend | docs | confirmed |
 | A13 | Claude Code sessions start in `auto` permission mode, so permission requests may never reach the client | verified (no login) | confirmed |
-| A14 | Antigravity applies its own permission rules before any ACP permission request | docs | still unknown |
+| A14 | Antigravity applies its own permission rules before any ACP permission request | docs | confirmed (follow-up: reads run unasked; `execute` asks in `default`, not in `auto`) |
 | A15 | A cached Codex login is enough to get past `session/new` | unknown | confirmed |
 | A16 | On a subscription login a dollar figure is still reported (a notional one) | unknown | confirmed for Claude only |
-| A17 | Adapters need a process-group kill to shut down cleanly | verified | still unknown |
+| A17 | Adapters need a process-group kill to shut down cleanly | verified | confirmed for Claude (bundled `claude` outlives the adapter), not Codex or Antigravity |
 | A18 | Harnesses send non-standard notifications and updates before the first prompt | verified | confirmed for Claude and Codex, not Antigravity |
 
 Conclusion that depends on A6 and A8: **a USD budget cannot stop a turn in
@@ -52,7 +53,7 @@ installed on the machine) and the version.
 | R4 | `confidence` equals the top probability (or max(p, 1 - p) for yes/no), so it is not a second signal | docs | confirmed (50 of 50 exact) |
 | R5 | Usage is returned and output tokens are always 0 | docs | confirmed |
 | R6 | A decision is roughly 700 input tokens, about $0.00007 | estimate | confirmed |
-| R7 | Latency is 150 to 250 ms and flat in the number of questions | docs (launch post) | contradicted (latency); flatness still unknown |
+| R7 | Latency is 150 to 250 ms and flat in the number of questions | docs (launch post) | contradicted: medians 478 to 876 ms; flat 1 to 25 questions, 1.8 times higher at 100 |
 | R8 | Hyphenated option keys such as `claude-code` are accepted | assumed | confirmed |
 | R9 | The parser accepts the real response with no rejected fields | unknown | confirmed |
 | R10 | The deterministic fallback agrees with the model on most sample tasks | unknown | confirmed |
