@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,10 +48,16 @@ func shellPrefix(args []string) error {
 	if len(args) == 0 {
 		return errors.New("no command")
 	}
-	// Record first; a failure to record must not stop the command, but is
-	// reported on stderr.
-	if err := recordSession(os.Getenv(SessionsEnv)); err != nil {
-		fmt.Fprintln(os.Stderr, "refraktal shell prefix: session not recorded:", err)
+	// Record, then check the shutdown marker, then run. The parent creates
+	// the marker before its final read, so a command whose session was
+	// recorded too late to be read does not run at all. If the session cannot
+	// be recorded, the command does not run either: it would escape the sweep.
+	sessions := os.Getenv(SessionsEnv)
+	if err := recordSession(sessions); err != nil {
+		return fmt.Errorf("session not recorded, so the command was not run: %w", err)
+	}
+	if _, err := os.Stat(ShutdownMarker(sessions)); err == nil {
+		return errors.New("the run is shutting down, so the command was not run")
 	}
 	next, prefixVar := os.Getenv(NextEnv), os.Getenv(PrefixVarEnv)
 	if self, err := os.Executable(); err == nil && next != "" && SameFile(next, self) {
@@ -133,7 +140,11 @@ func recordSession(path string) error {
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(leader)
+	// Birth identity only: the leader's command line changes when it execs.
+	b, err := json.Marshal(struct {
+		PID   int    `json:"pid"`
+		Start string `json:"start"`
+	}{leader.PID, leader.Start})
 	if err != nil {
 		return err
 	}
@@ -175,21 +186,29 @@ func RecordedSessions(path string) ([]Proc, error) {
 	defer f.Close()
 	seen := map[string]bool{}
 	var out []Proc
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
+	br := bufio.NewReader(f) // no line limit: a bad or very long line is skipped, not fatal
+	for {
+		line, err := br.ReadBytes('\n')
 		var p Proc
-		if json.Unmarshal(sc.Bytes(), &p) != nil || p.PID <= 1 {
-			continue
+		if len(line) < 4096 && json.Unmarshal(line, &p) == nil && p.PID > 1 && p.Start != "" {
+			if k := strconv.Itoa(p.PID) + "|" + p.Start; !seen[k] {
+				seen[k] = true
+				out = append(out, Proc{PID: p.PID, Start: p.Start})
+			}
 		}
-		k := strconv.Itoa(p.PID) + "|" + p.Start + "|" + p.Cmd
-		if !seen[k] {
-			seen[k] = true
-			out = append(out, p)
+		if err == io.EOF {
+			return out, nil
+		}
+		if err != nil {
+			return out, err
 		}
 	}
-	return out, sc.Err()
 }
 
 // betweenRecordedReads runs between the two reads of the sessions file at
 // shutdown; a variable so tests can append a record in that window.
 var betweenRecordedReads = func() {}
+
+// ShutdownMarker is the file whose existence tells a helper that the run is
+// shutting down: it then refuses to run its command.
+func ShutdownMarker(sessions string) string { return sessions + ".closed" }

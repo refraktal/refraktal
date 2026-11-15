@@ -52,7 +52,9 @@ not a command.
   `refraktal/adapters/<package>-<version>/`, with `npm install
   --ignore-scripts`. A failed install leaves nothing behind.
 - **Prices:** config overrides win over the table under every key tried;
-  table entries with negative or non-finite prices are skipped.
+  table entries with negative or non-finite prices are skipped; a cache rate
+  of exactly 0 is a real price, and only a missing one falls back to the
+  input rate.
 - **The ACP layer is hand-rolled** JSON-RPC over stdio on the standard library.
   Do not use an ACP SDK. Pin protocol version 1.
 
@@ -97,7 +99,9 @@ cancels and exits 2 (`timed_out`).
   or `estimated`. Reported wins. An unpriced model continues with a loud warning
   (stderr, run log, `--json`) and counts as $0 against `--usd`. Dollars are a
   budget unit, not a bill: on subscription logins they are notional.
-- **Cancelled turns.** Usage for model calls that finished before the cancel is
+- **Cancelled turns.** A turn is cancelled if Refraktal sent `session/cancel`
+  or the harness's stop reason is `cancelled` (Codex ends a turn so after a
+  denial). Usage for model calls that finished before the cancel is
   reported as normal; charge it. A call the cancel cut off is never reported.
   For enforcement, a cancelled child keeps its whole reservation. For
   reporting, record an `estimated` amount: the last `used` figure priced as
@@ -208,8 +212,12 @@ process-group kill does not reach them.
 - While a child runs, record its descendants by parent PID, whatever their
   process group. Walk the tree once more just before shutdown, while lineage is
   still visible, then kill every tracked descendant and the harness.
-- **Kill only by tracked PID, after an identity check:** command line and start
-  time must still match what was recorded. The tree includes the user's MCP
+- **Kill only by tracked PID, after an identity check:** a process's identity
+  is its birth identity, PID and start time, everywhere (tracker, live
+  registry, kills, sweeps); the command line is kept for display only, since
+  it changes when a process execs. (A PID reused within the same second of
+  `ps`'s one-second resolution would look the same; that is the accepted
+  limit.) The tree includes the user's MCP
   servers, plugin hooks and helpers from other apps' bundles; never kill by
   name or pattern.
 - **Live registry.** Every live child is registered in a global folder,
@@ -266,8 +274,15 @@ process-group kill does not reach them.
     routed through the helper), and execs the command with bash or zsh, as
     Claude Code does (or chains to a prefix the user had set, never to the
     helper itself). Recorded sessions are polled and swept like the
-    harness session; the sessions file is read again shortly after the
-    harness has died, so a late record is not missed.
+    harness session. The helper records only the leader's PID and start
+    time, then checks a shutdown marker, then runs the command; if it cannot
+    record, or the marker exists, it says why on stderr and exits 126
+    without running the command. Before its final read of the sessions file
+    Refraktal creates the marker, so every command that ran was recorded in
+    time. The file is read with no line limit, skipping bad lines.
+  - **Rejected review finding: forged session records.** A process that
+    can append to the sessions file runs as the same user, so it can already
+    kill any of the user's processes; a forged record gains it nothing.
     M4 open test: `late.txt` left nothing on Claude (2 escaped processes
     swept). The prefix is opt-in: `RunOptions.ShellPrefix` names a binary
     that calls `proc.MaybeShellPrefix()` first in `main`, and the CLI passes
@@ -286,6 +301,15 @@ process-group kill does not reach them.
     shows none, through `KERN_PROCARGS2` or `ps -E`), so it cannot work there.
 - Every child carries `REFRAKTAL_RUN=<run id>-<harness>` in its environment,
   as a tag for logs only.
+- **No real harness in `go test`.** Inside a test binary, the launcher
+  refuses any executable other than the test binary itself (which is how the
+  fake agent and test helpers run) unless `REFRAKTAL_LIVE=1`, which only the
+  live scripts set. In a test, the shell prefix may only be the test binary,
+  whose `TestMain` calls `proc.MaybeShellPrefix` first.
+- **Nesting guard, independent of budgets.** Every child gets
+  `REFRAKTAL_NEST` one higher than its parent; `run` and `doctor` refuse to
+  start past `--depth` + 1 levels, so no recursion can fan out without bound
+  even if budgets are lost.
 - Scrub the child's environment of the parent's session markers
   (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`).
 
@@ -343,8 +367,10 @@ process-group kill does not reach them.
   are printed; otherwise they are removed.
 - **Budgets** as in Budgets above; `--mins` covers the whole run, from
   start-up to the end of the turn: during the turn, `session/cancel`, then
-  shutdown, the tree kill and the session sweep (`timed_out`); during
-  start-up, `budget_exhausted`. Both exit 2.
+  shutdown, the tree kill and the session sweep (`timed_out`); during any
+  setup step (price fetch, worktree, starting the harness),
+  `budget_exhausted`. Both exit 2. Writes to a harness are bounded (10 s, the
+  cancel 2 s), so one that stopped reading cannot hold up the stop.
 - **Exit codes:** 0 applied, kept or no changes; 1 the turn failed or the
   result did not apply; 2 a budget ran out (before the turn, or `--mins`
   during it); 3 the harness could not be started or logged in.

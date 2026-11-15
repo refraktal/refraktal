@@ -67,6 +67,14 @@ func TestMain(m *testing.M) {
 			os.Exit(2)
 		}
 		io.Copy(io.Discard, os.Stdin)
+	case "execs": // a child in a group of its own that execs half a second after it starts
+		kid := exec.Command("sh", "-c", "sleep 0.5; exec sleep 30")
+		kid.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := kid.Start(); err != nil {
+			os.Exit(2)
+		}
+		fmt.Println(kid.Process.Pid)
+		io.Copy(io.Discard, os.Stdin)
 	case "deaf": // ignore stdin closing
 		time.Sleep(time.Hour)
 	case "env":
@@ -186,14 +194,12 @@ func TestKillLeavesAReusedPIDAlone(t *testing.T) {
 
 	oldStart := now
 	oldStart.Start = "Mon Jan 1 00:00:00 2001" // the recorded process started long ago
-	oldCmd := now
-	oldCmd.Cmd = "some-mcp-server --stdio" // the recorded process ran another command
-	r, err := Kill([]Proc{oldStart, oldCmd})
+	r, err := Kill([]Proc{oldStart})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(r.Killed) != 0 || len(r.Changed) != 2 {
-		t.Fatalf("want both left alone as changed: %+v", r)
+	if len(r.Killed) != 0 || len(r.Changed) != 1 {
+		t.Fatalf("want it left alone as changed: %+v", r)
 	}
 	if !running(pid) {
 		t.Fatal("unrelated process was killed")

@@ -317,3 +317,32 @@ func TestNestingGuard(t *testing.T) {
 		t.Fatalf("child env: %q", b)
 	}
 }
+
+// 14. A turn the harness ended as cancelled on its own counts as cancelled:
+// the child keeps its whole reservation, and the cut-off call is estimated.
+func TestHarnessCancelledTurnKeepsItsReservation(t *testing.T) {
+	r := newRunRig(t)
+	res := r.run(t, fake{name: "codex", agentMode: "selfcancel"}, nil)
+	if res.Settlement == nil || !near(res.Settlement.Spent, 5) || !near(res.Budget.Estimated, 4000*1e-6) {
+		t.Fatalf("settlement %+v budget %+v", res.Settlement, res.Budget)
+	}
+}
+
+// 15. The grant's deadline covers every setup step, the price fetch
+// included: a slow fetch must not outlive --mins.
+func TestSlowPriceFetchHonoursTheDeadline(t *testing.T) {
+	r := newRunRig(t)
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		select {
+		case <-time.After(4 * time.Second):
+		case <-req.Context().Done():
+		}
+		w.Write([]byte(prices))
+	}))
+	defer slow.Close()
+	start := time.Now()
+	res := r.run(t, fake{name: "claude", agentMode: "turn"}, func(o *RunOptions) { o.Budget.Wall = time.Second; o.PriceURL = slow.URL })
+	if res.Outcome != RunExhausted || res.ExitCode() != ExitBudget || time.Since(start) > 3*time.Second {
+		t.Fatalf("after %s: %+v", time.Since(start), res)
+	}
+}

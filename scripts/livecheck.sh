@@ -13,6 +13,7 @@
 # versions, without install scripts.
 set -eu
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SSE_PORT 2>/dev/null || true
+export REFRAKTAL_LIVE=1 # live checks start real harnesses; go test never does
 cd "$(dirname "$0")/.."
 ROOT=$PWD/.live
 CLAUDE_ACP=@agentclientprotocol/claude-agent-acp@0.107.0

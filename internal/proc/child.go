@@ -300,6 +300,13 @@ func (c *Child) sweepSessions() (KillReport, error) {
 			r.Alive = append(r.Alive, kr.Alive...)
 		}
 	}
+	if c.sessions != "" {
+		// From now on a helper that records its session refuses to run its
+		// command, so every command that runs was recorded before the reads.
+		if err := os.WriteFile(ShutdownMarker(c.sessions), nil, 0o600); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	pass()
 	if c.sessions != "" {
 		betweenRecordedReads()

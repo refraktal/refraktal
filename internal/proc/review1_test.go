@@ -3,6 +3,7 @@ package proc
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -254,5 +255,117 @@ func TestChildNestIsIncremented(t *testing.T) {
 	c.Shutdown(time.Second)
 	if !slices.Contains(strings.Split(string(out), "\n"), "REFRAKTAL_NEST=3") {
 		t.Fatal("child did not get REFRAKTAL_NEST=3")
+	}
+}
+
+func runPrefix(t *testing.T, sessions, command string, extra ...string) (string, int) {
+	t.Helper()
+	sh := exec.Command("sh", "-c", `"$PREFIX" "$CMD"`)
+	sh.Env = append(append(prefixEnv(t, sessions), "CMD="+command), extra...)
+	if sessions == "" {
+		sh.Env = append(sh.Env, SessionsEnv+"=")
+	}
+	sh.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	out, err := sh.CombinedOutput()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	}
+	return string(out), code
+}
+
+// 10. A helper that records after the parent's final read must not run its
+// command: it checks the shutdown marker after recording.
+func TestHelperRefusesAfterTheShutdownMarker(t *testing.T) {
+	sessions := filepath.Join(t.TempDir(), "sessions")
+	os.WriteFile(ShutdownMarker(sessions), nil, 0o600)
+	out, code := runPrefix(t, sessions, "echo RAN")
+	if code != 126 || strings.Contains(out, "RAN") {
+		t.Fatalf("exit %d, output %q: the command ran after shutdown began", code, out)
+	}
+	if l, _ := RecordedSessions(sessions); len(l) != 1 {
+		t.Fatal("the helper must record before it checks the marker")
+	}
+}
+
+// 10. Shutdown creates the marker before its final read of the sessions file.
+func TestShutdownCreatesTheMarkerBeforeItsFinalRead(t *testing.T) {
+	sessions := filepath.Join(t.TempDir(), "sessions")
+	var seen bool
+	orig := betweenRecordedReads
+	betweenRecordedReads = func() { _, err := os.Stat(ShutdownMarker(sessions)); seen = err == nil }
+	defer func() { betweenRecordedReads = orig }()
+	c := helperEvery(t, "deaf", time.Hour)
+	c.sessions = sessions
+	c.Shutdown(100 * time.Millisecond)
+	if !seen {
+		t.Fatal("no shutdown marker before the final read")
+	}
+}
+
+// 11. If the helper cannot record its session, it says why and does not run
+// the command.
+func TestHelperFailsClosedWithoutARecord(t *testing.T) {
+	out, code := runPrefix(t, filepath.Join(t.TempDir(), "missing-dir", "sessions"), "echo RAN")
+	if code != 126 || strings.Contains(out, "RAN") || !strings.Contains(out, "not recorded") {
+		t.Fatalf("exit %d, output %q", code, out)
+	}
+}
+
+// 12. Records hold PID and start time only; a bad or very long line is
+// skipped, not fatal to the records after it.
+func TestRecordedSessionsAreBirthIdentityAndSkipBadLines(t *testing.T) {
+	sessions := filepath.Join(t.TempDir(), "sessions")
+	runPrefix(t, sessions, "true")
+	b, _ := os.ReadFile(sessions)
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil || len(m) != 2 || m["pid"] == nil || m["start"] == nil {
+		t.Fatalf("record %s: want only pid and start", b)
+	}
+	f, _ := os.OpenFile(sessions, os.O_WRONLY|os.O_APPEND, 0o600)
+	f.WriteString("not json\n" + strings.Repeat("x", 200<<10) + "\n" + `{"pid":4242,"start":"Mon Jan 1 00:00:00 2001"}` + "\n")
+	f.Close()
+	l, err := RecordedSessions(sessions)
+	if err != nil || len(l) != 2 || l[1].PID != 4242 {
+		t.Fatalf("records %+v %v", l, err)
+	}
+}
+
+// 13. The live record stays when the session sweep fails, for a later cleanup.
+func TestLiveRecordKeptWhenTheSweepFails(t *testing.T) {
+	live := t.TempDir()
+	orig := membersOf
+	membersOf = func(int) ([]Proc, bool, error) { return nil, true, errors.New("ps failed") }
+	defer func() { membersOf = orig }()
+	self, _ := os.Executable()
+	c, err := Start(Spec{Argv: []string{self}, Env: []string{helperEnv + "=deaf", "GORACE=atexit_sleep_ms=0"}, LiveDir: live, PollEvery: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := c.Shutdown(100 * time.Millisecond)
+	if files, _ := filepath.Glob(filepath.Join(live, "*.json")); len(files) != 1 || r.Err == "" {
+		t.Fatalf("record removed after a failed sweep: %v, err %q", files, r.Err)
+	}
+}
+
+// 17. Identity is birth identity (PID and start time): a tracked process
+// that execs is still ours and is killed.
+func TestTrackedProcessThatExecsIsStillKilled(t *testing.T) {
+	c := helperEvery(t, "execs", 20*time.Millisecond)
+	pid := readPID(t, bufio.NewReader(c.Stdout))
+	defer syscall.Kill(pid, syscall.SIGKILL)
+	for deadline := time.Now().Add(3 * time.Second); !slices.Contains(pids(c.Tracked()), pid); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("not tracked before its exec")
+		}
+	}
+	for deadline := time.Now().Add(3 * time.Second); listed(t, pid).Cmd != "sleep 30"; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("did not exec")
+		}
+	}
+	r := c.Shutdown(time.Second)
+	if running(pid) || !slices.Contains(pids(r.Kill.Killed), pid) {
+		t.Fatalf("the identity-checked kill did not take the tracked process that exec'd: %+v", r.Kill)
 	}
 }

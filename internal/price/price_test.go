@@ -124,3 +124,12 @@ func TestParseSkipsNegativePrices(t *testing.T) {
 		}
 	}
 }
+
+// 16. A cache-read price of exactly 0 is a price, not a missing one.
+func TestZeroCacheReadPriceIsAPrice(t *testing.T) {
+	tb, _ := Parse([]byte(`{"m": {"input_cost_per_token": 1e-6, "output_cost_per_token": 2e-6, "cache_read_input_token_cost": 0}}`))
+	p, _, _ := tb.Lookup("m")
+	if got := p.Cost(acp.Usage{InputTokens: 10, CachedReadTokens: i64(1000)}); !near(got, 10e-6) {
+		t.Fatalf("cost %v: cached reads were priced as input", got)
+	}
+}

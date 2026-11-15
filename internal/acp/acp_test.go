@@ -289,3 +289,33 @@ func TestAgentExitEndsAPrompt(t *testing.T) {
 		t.Fatalf("want ErrAgentExited, got %v", err)
 	}
 }
+
+// 18. A harness that stopped reading must not block a cancel: writes are
+// bounded, and the timeout path never waits on a blocked writer.
+func TestCancelDoesNotBlockOnAHarnessThatStoppedReading(t *testing.T) {
+	r := start(t, "noread", acp.Options{CancelGrace: 200 * time.Millisecond})
+	s := r.session(t)
+	// The first prompt makes the harness stop reading for good.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	_, err := r.client.Prompt(ctx, s.ID, "go")
+	cancel()
+	if !errors.Is(err, acp.ErrCancelIgnored) {
+		t.Fatalf("first prompt: %v", err)
+	}
+	// A 4 MB prompt cannot fit in the pipe: its write blocks.
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, err := r.client.Prompt(ctx, s.ID, strings.Repeat("y", 4<<20))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a prompt to a harness that is not reading succeeded")
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Prompt blocked on a harness that stopped reading")
+	}
+}

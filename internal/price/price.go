@@ -30,8 +30,12 @@ const MaxAge = 24 * time.Hour
 type Price struct {
 	Input      float64 `json:"input"`
 	Output     float64 `json:"output"`
-	CacheRead  float64 `json:"cache_read"`  // 0 means: priced as input
-	CacheWrite float64 `json:"cache_write"` // 0 means: priced as input
+	CacheRead  float64 `json:"cache_read"`
+	CacheWrite float64 `json:"cache_write"`
+	// Whether a cache rate is given at all: a rate of exactly 0 is a real
+	// price; a missing one means "priced as input".
+	HasCacheRead  bool `json:"has_cache_read"`
+	HasCacheWrite bool `json:"has_cache_write"`
 }
 
 // Cost prices one turn's usage. The harnesses report input tokens without
@@ -39,10 +43,10 @@ type Price struct {
 // part of the output.
 func (p Price) Cost(u acp.Usage) float64 {
 	read, write := p.CacheRead, p.CacheWrite
-	if read == 0 {
+	if !p.HasCacheRead {
 		read = p.Input
 	}
-	if write == 0 {
+	if !p.HasCacheWrite {
 		write = p.Input
 	}
 	c := float64(u.InputTokens)*p.Input + float64(u.OutputTokens)*p.Output
@@ -106,10 +110,10 @@ func Parse(b []byte) (Table, error) {
 		}
 		p := Price{Input: *e.Input, Output: *e.Output}
 		if e.CacheRead != nil {
-			p.CacheRead = *e.CacheRead
+			p.CacheRead, p.HasCacheRead = *e.CacheRead, true
 		}
 		if e.CacheWrite != nil {
-			p.CacheWrite = *e.CacheWrite
+			p.CacheWrite, p.HasCacheWrite = *e.CacheWrite, true
 		}
 		t.prices[k] = p
 	}

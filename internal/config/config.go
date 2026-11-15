@@ -37,10 +37,10 @@ type Config struct {
 
 // Price is a per-model price override, in US dollars per million tokens.
 type Price struct {
-	Input      float64 `json:"input"`
-	Output     float64 `json:"output"`
-	CacheRead  float64 `json:"cache_read,omitempty"`
-	CacheWrite float64 `json:"cache_write,omitempty"`
+	Input      float64  `json:"input"`
+	Output     float64  `json:"output"`
+	CacheRead  *float64 `json:"cache_read,omitempty"`  // absent: priced as input; 0 is a real price
+	CacheWrite *float64 `json:"cache_write,omitempty"` // absent: priced as input; 0 is a real price
 }
 
 // Harness holds the settings for one harness.
@@ -101,7 +101,7 @@ func Load(path string) (Config, error) {
 		}
 	}
 	for model, p := range c.Prices {
-		if p.Input < 0 || p.Output < 0 || p.CacheRead < 0 || p.CacheWrite < 0 || (p.Input == 0 && p.Output == 0) {
+		if p.Input < 0 || p.Output < 0 || (p.CacheRead != nil && *p.CacheRead < 0) || (p.CacheWrite != nil && *p.CacheWrite < 0) || (p.Input == 0 && p.Output == 0) {
 			return c, fmt.Errorf("%s: prices.%s needs non-negative input and output prices (US dollars per million tokens)", path, model)
 		}
 	}

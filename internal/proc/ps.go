@@ -15,8 +15,9 @@ import (
 	"strings"
 )
 
-// Proc identifies one process. A PID alone is not an identity, because PIDs
-// are reused: Start and Cmd must also match.
+// Proc identifies one process by its birth identity: PID and start time. A
+// PID alone is not an identity, because PIDs are reused. The command line is
+// for display and logs only: it changes when a process execs.
 type Proc struct {
 	PID   int    `json:"pid"`
 	PPID  int    `json:"ppid"`
@@ -26,10 +27,11 @@ type Proc struct {
 	Cmd   string `json:"cmd"`   // command line; it holds local paths, so never log it verbatim
 }
 
-// Same reports whether p and q are the same process: same PID, start time and
-// command line.
+// Same reports whether p and q are the same process: same PID and start
+// time. (A PID reused within the same second of ps's one-second resolution
+// would look the same; that is the accepted limit.)
 func (p Proc) Same(q Proc) bool {
-	return p.PID == q.PID && p.Start == q.Start && p.Cmd == q.Cmd
+	return p.PID == q.PID && p.Start == q.Start
 }
 
 // List returns every running process on the machine, by PID. Zombies and,

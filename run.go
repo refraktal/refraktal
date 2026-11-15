@@ -201,6 +201,17 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 			o.OnNotice(s)
 		}
 	}
+	// --mins covers every setup step too: the price fetch, the worktree and
+	// starting the harness all run under the grant's deadline.
+	setupCtx, setupCancel := context.WithDeadline(ctx, grant.Deadline)
+	defer setupCancel()
+	setupExpired := func() bool { return errors.Is(setupCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil }
+	exhausted := func(step string) (RunResult, error) {
+		st := ledger.Settle(grant, false)
+		res.Outcome, res.Settlement, res.Budget = RunExhausted, &st, ledger.Summary()
+		res.Error = "budget exhausted: --mins ran out during " + step
+		return res, nil
+	}
 
 	cleanup, cerr := proc.CleanLeftovers(o.LiveDir)
 	run, err := runlog.NewRun(root)
@@ -215,9 +226,20 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	defer log.Close()
 	log.Event("run_start", map[string]any{"harness": h.Name(), "task": o.Task, "no_apply": o.NoApply,
 		"budget": o.Budget, "mins": o.Budget.Wall.Minutes(), "grant": grant, "mcp": hcfg.MCP})
-	prices, perr0 := price.Load(ctx, price.LoadOptions{CachePath: o.PriceCache, URL: o.PriceURL})
+	prices, perr0 := price.Load(setupCtx, price.LoadOptions{CachePath: o.PriceCache, URL: o.PriceURL})
+	if setupExpired() {
+		log.Event("run_end", map[string]any{"outcome": RunExhausted, "step": "price fetch"})
+		return exhausted("the price fetch")
+	}
 	for model, p := range cfg.Prices {
-		prices.Override(model, price.Price{Input: p.Input / 1e6, Output: p.Output / 1e6, CacheRead: p.CacheRead / 1e6, CacheWrite: p.CacheWrite / 1e6})
+		pp := price.Price{Input: p.Input / 1e6, Output: p.Output / 1e6}
+		if p.CacheRead != nil {
+			pp.CacheRead, pp.HasCacheRead = *p.CacheRead/1e6, true
+		}
+		if p.CacheWrite != nil {
+			pp.CacheWrite, pp.HasCacheWrite = *p.CacheWrite/1e6, true
+		}
+		prices.Override(model, pp)
 	}
 	if perr0 != nil {
 		notice("warning: " + perr0.Error())
@@ -230,8 +252,11 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	if err := os.MkdirAll(o.WorktreeDir, 0o755); err != nil {
 		return res, err
 	}
-	wt, err := worktree.Create(ctx, root, filepath.Join(o.WorktreeDir, run.ID), "refraktal/"+run.ID)
+	wt, err := worktree.Create(setupCtx, root, filepath.Join(o.WorktreeDir, run.ID), "refraktal/"+run.ID)
 	if err != nil {
+		if setupExpired() {
+			return exhausted("worktree creation")
+		}
 		return res, err
 	}
 	log.Event("worktree", map[string]any{"branch": wt.Branch, "base": wt.Base})
@@ -251,9 +276,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	var reply strings.Builder
 	childBudget, _ := json.Marshal(map[string]any{"usd": grant.USD, "turns": grant.Turns,
 		"deadline": grant.Deadline.UTC().Format(time.RFC3339), "depth": grant.Depth})
-	openCtx, openCancel := context.WithDeadline(ctx, grant.Deadline)
-	defer openCancel()
-	s, err := openSession(openCtx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, cwd: wt.Dir, tmpDir: tmp,
+	s, err := openSession(setupCtx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, cwd: wt.Dir, tmpDir: tmp,
 		liveDir: o.LiveDir, labels: map[string]string{"run": run.ID, "harness": h.Name()}, log: log, timeout: 2 * time.Minute,
 		// REFRAKTAL_RUN tags the child's processes for logs only (the session
 		// sweep finds leftovers). REFRAKTAL_BUDGET is what a child Refraktal
@@ -286,7 +309,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	if err != nil {
 		s.close(log, h.Name(), 5*time.Second)
 		res.Error = fmt.Sprintf("%s: %v", statusOf(err), err)
-		if errors.Is(openCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+		if setupExpired() {
 			// --mins ran out while the harness was starting: a spent budget.
 			res.Outcome, res.Error = RunExhausted, "budget exhausted: --mins ran out while starting the harness ("+res.Error+")"
 		}
@@ -311,6 +334,9 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	cancel()
 	sr := s.close(log, h.Name(), 10*time.Second)
 	res.Model = cmpOr(turn.Model, s.model)
+	// A turn is cancelled if we sent session/cancel or the harness ended it
+	// as cancelled on its own (Codex does after a denial).
+	turn.Cancelled = turn.Cancelled || turn.StopReason == "cancelled"
 	for _, c := range charges(h.Name(), res.Model, turn, prices) {
 		ledger.Charge(grant, c)
 		log.Event("charge", map[string]any{"harness": h.Name(), "charge": c})

@@ -10,6 +10,7 @@
 # runs through the session sweep. Output stays in .live: never commit it.
 set -u
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SSE_PORT 2>/dev/null || true
+export REFRAKTAL_LIVE=1 # live checks start real harnesses; go test never does
 cd "$(dirname "$0")/.."
 LIVE=$PWD/.live/m4
 BIN=$PWD/.live/bin/refraktal

@@ -19,6 +19,8 @@
 //	oldproto  initialize answers with protocol version 2
 //	auth      as turn, and first sends an auth/status_update carrying an email
 //	slowstart answers initialize only after 3 s
+//	selfcancel ends the turn with stop reason cancelled on its own
+//	noread    stops reading stdin when a prompt arrives
 //	tools     asks permission for three tool calls, shaped as Claude sends
 //	          them, and performs each only if allowed: write hello.txt in the
 //	          cwd, write ../outside.txt, and run git push (simulated: it writes
@@ -205,6 +207,9 @@ func (a *agent) handle(m message, line string) {
 		a.send(message{ID: m.ID, Result: obj{}})
 		a.update(obj{"sessionUpdate": "current_mode_update", "currentModeId": "default"})
 	case "session/prompt":
+		if a.mode == "noread" { // stops reading stdin for good: the client's writes back up
+			time.Sleep(time.Hour)
+		}
 		if f := os.Getenv("ACPTEST_PROMPTS"); f != "" {
 			if fh, err := os.OpenFile(f, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err == nil {
 				fh.WriteString("prompt\n")
@@ -229,6 +234,10 @@ func (a *agent) handle(m message, line string) {
 
 func (a *agent) prompt(id json.RawMessage) {
 	switch a.mode {
+	case "selfcancel": // ends the turn as cancelled on its own, as Codex does after a denial
+		a.update(obj{"sessionUpdate": "usage_update", "used": 4000, "size": 200000})
+		a.send(message{ID: id, Result: obj{"stopReason": "cancelled", "usage": obj{"totalTokens": 300, "inputTokens": 200, "outputTokens": 100}}})
+		return
 	case "hang":
 		a.chunk("working")
 		a.update(obj{"sessionUpdate": "usage_update", "used": 5000, "size": 200000})
