@@ -221,6 +221,7 @@ func TestChildEnvironmentIsScrubbed(t *testing.T) {
 func TestParsePS(t *testing.T) {
 	out := "  10     1    10 Ss   Sun Nov 15 15:45:51 2026 /bin/sh -c sleep  20\n" +
 		"  11    10    10 Z    Sun Nov 15 15:45:52 2026 (sleep)\n" +
+		"  12    10    10 SE   Sun Nov 15 15:45:53 2026 (claude)\n" +
 		"garbage\n"
 	got := parsePS(out)
 	want := Proc{PID: 10, PPID: 1, PGID: 10, Start: "Sun Nov 15 15:45:51 2026", Cmd: "/bin/sh -c sleep 20"}

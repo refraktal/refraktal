@@ -31,8 +31,10 @@ func (p Proc) Same(q Proc) bool {
 	return p.PID == q.PID && p.Start == q.Start && p.Cmd == q.Cmd
 }
 
-// List returns every running process on the machine, by PID. Zombies are
-// left out: they have exited and cannot be killed.
+// List returns every running process on the machine, by PID. Zombies and,
+// on macOS, processes already exiting (state flag E, shown with the command
+// in parentheses) are left out: they cannot be killed and their command line
+// no longer matches the record.
 func List() (map[int]Proc, error) {
 	// These flags work with both the BSD ps on macOS and procps on Linux. -ww
 	// stops the command line being cut to the terminal width; LC_ALL=C fixes
@@ -57,7 +59,7 @@ func parsePS(out string) map[int]Proc {
 		pid, err1 := strconv.Atoi(f[0])
 		ppid, err2 := strconv.Atoi(f[1])
 		pgid, err3 := strconv.Atoi(f[2])
-		if err1 != nil || err2 != nil || err3 != nil || strings.HasPrefix(f[3], "Z") {
+		if err1 != nil || err2 != nil || err3 != nil || strings.HasPrefix(f[3], "Z") || strings.Contains(f[3], "E") {
 			continue
 		}
 		all[pid] = Proc{PID: pid, PPID: ppid, PGID: pgid,
