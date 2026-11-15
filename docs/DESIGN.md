@@ -351,8 +351,13 @@ process-group kill does not reach them.
   ID is the start time plus a random suffix.
 - A repository may not be trusted: if `.refraktal`, `.refraktal/runs` or
   `.refraktal/.gitignore` is a symlink, Refraktal refuses to continue rather
-  than write through it. `.gitignore` is replaced by renaming a new file over
-  it.
+  than write through it. Creation uses pinned `os.Root` directory handles;
+  `.gitignore` is checked with at most three bytes, then removed and recreated
+  exclusively if needed, preserving hard-linked files and refusing link swaps.
+- The run retains a pinned `os.Root` until `run` returns. Event logs, result
+  patches, scratch folders and temp folders are created through that handle,
+  so replacing the run's pathname cannot redirect Refraktal's writes. The
+  pathname remains available for display and for child-process options.
 - **Redact.** Harnesses send the account email, organisation and plan in auth
   notifications. Log an allowlist of known update kinds verbatim; for anything
   else, the method name and size only. Never forward a child's auth
@@ -384,9 +389,49 @@ process-group kill does not reach them.
   it. Outside the repository so harnesses walking up from the session folder
   do not find the user's checkout. Never under a temp folder.
 - The child shares the repository's `.git` (a linked worktree). Refraktal's
-  own git commands therefore run with hooks, fsmonitor, external diff,
-  textconv, pager and ssh command turned off, and the policy denies
-  `git config`.
+  own git commands discard inherited `GIT_*` variables and disable hooks,
+  fsmonitor, signing, filters, external diff, textconv, pager and ssh command.
+  Creation uses `git worktree add --no-checkout`, then discovers drivers in
+  the new worktree before populating it with `git reset --hard --quiet HEAD`.
+  Conditional `onbranch:` and `gitdir:` includes therefore match the new
+  branch and path during discovery. Creation records the new worktree's Git
+  directory under the repository's common `worktrees/<id>` directory. Every
+  Refraktal command in that worktree, including discovery, passes this recorded
+  `--git-dir` and an explicit `--work-tree`. Collect fails if the gitfile no
+  longer points at the recorded directory; a rewrite during a command also
+  fails without redirecting Git to another repository.
+  A read-only `git config --null --get-regexp` lists filter, merge-driver and
+  `lfs.*` keys and values from all scopes and includes, using the same sanitized
+  environment and static protections. Every command has a before/after
+  comparison; within one operation and repository context, a successful,
+  compared post-command snapshot supplies the next pre-command snapshot.
+  Every command still takes a fresh post-command snapshot. If the
+  configuration changes during the command, the operation fails.
+  Per-command `-c` options set each filter's `clean`, `smudge` and `process`
+  to empty strings and `required=false`. Unconfigured filters are harmless
+  pass-throughs. Each configured `merge.<name>.driver` is empty: Git runs no
+  program and reports a conflict if a three-way merge reaches it. It does not
+  select the built-in text merger. A driver key containing `=` is refused
+  because `-c key=value` cannot represent it safely. Git LFS is allowed only when its clean, smudge
+  and process values are exactly `git-lfs clean -- %f`, `git-lfs smudge -- %f`
+  and `git-lfs filter-process`, with exactly one value for each, and no
+  `lfs.extension.*`, `lfs.customtransfer.*` or `lfs.standalonetransferagent`
+  key set in any scope. In that case all three commands are pinned with
+  explicit `-c` options and its required setting is preserved; otherwise the
+  whole LFS driver is disabled like any other filter.
+  Collect and Apply set `GIT_LFS_SKIP_SMUDGE=1` on every Git command because
+  the child may have rewritten `.lfsconfig`; Create keeps normal smudge, and
+  Apply returns a notice naming affected `filter=lfs` paths left as pointers
+  until the user restores them with
+  `git lfs smudge` (the objects are local; `git lfs checkout` does not apply,
+  because the patch is not staged).
+  Credential helpers remain allowed as the user's own configuration. Isolation
+  never edits shared Git configuration or `info/attributes`, and needs no
+  isolation lock, backup or restoration.
+  Patches use fixed `a/` and `b/` prefixes without color, external diff or
+  textconv. Staging uses normal `git add -A`; staging and repository-mode
+  apply honor the user's line-ending, encoding and attribute conversions.
+  The policy denies `git config`.
 - **Result.** After the turn, everything the child changed is committed on
   the branch and applied to the working tree with `git apply`, checked first
   so a diff that does not apply cleanly changes nothing. The diff is kept in
@@ -476,6 +521,12 @@ A System 1 decision model chooses; harnesses are System 2.
   runs without `GEMINI_API_KEY` or `GOOGLE_API_KEY` (so nothing silently
   bills a key instead of the subscription), and Refraktal's git commands run
   without them and without `GIT_*` variables, with fsmonitor and hooks off.
+  Worktree and safegit share one sanitized environment through `proc.ScrubEnv`
+  and the full static protections; driver-capable commands also share driver
+  neutralisation and before/after checks, while `rev-parse`, `ls-files` and
+  `check-attr` cannot run filters or drivers and safegit uses the cheaper path.
+  Safegit queries and post-turn Git operations have short timeouts, and
+  worktree setup runs under the run's deadline.
   A nested Refraktal that should route with Gemini gets the key only when the
   user sets `REFRAKTAL_PASS_GEMINI_KEY=1`.
 - Decision log: `.refraktal/decisions.jsonl` in the repository (gitignored),

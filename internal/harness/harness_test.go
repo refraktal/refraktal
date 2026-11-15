@@ -105,7 +105,12 @@ func TestAgyGetsAFreshGeminiDir(t *testing.T) {
 	script(t, bin, "agy", `echo 1.5.9`)
 	t.Setenv("PATH", bin)
 	scratch := t.TempDir()
-	l, err := Defaults("")[2].Prepare(context.Background(), Options{Scratch: scratch})
+	pinned, err := os.OpenRoot(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pinned.Close()
+	l, err := Defaults("")[2].Prepare(context.Background(), Options{Scratch: scratch, ScratchRoot: pinned})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,5 +222,35 @@ func TestProjectHooks(t *testing.T) {
 	put(".agents/hooks.json", `{}`)
 	if got := ProjectHooks(dir, "agy"); strings.Join(got, ",") != ".agents/hooks.json" {
 		t.Errorf("agy hooks.json: %v", got)
+	}
+}
+
+func TestAgyCreatesGeminiDirThroughPinnedRoot(t *testing.T) {
+	bin := t.TempDir()
+	script(t, bin, "agy", `echo 1.5.9`)
+	t.Setenv("PATH", bin)
+	scratch, outside := t.TempDir(), t.TempDir()
+	pinned, err := os.OpenRoot(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pinned.Close()
+	held := scratch + "-held"
+	if err := os.Rename(scratch, held); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(held)
+	if err := os.Symlink(outside, scratch); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Defaults("")[2].Prepare(context.Background(), Options{Scratch: scratch, ScratchRoot: pinned})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
+		t.Errorf("gemini dir escaped: %v, %v", entries, err)
+	}
+	if fi, err := os.Stat(filepath.Join(held, "gemini-dir")); err != nil || !fi.IsDir() {
+		t.Errorf("gemini dir missing from pinned folder: %v", err)
 	}
 }

@@ -20,14 +20,15 @@ import (
 
 // sessionSpec says how to open a session with one harness.
 type sessionSpec struct {
-	h       harness.Harness
-	hcfg    config.Harness
-	scratch string // inside the run folder
-	cwd     string // the session folder
-	tmpDir  string // a private TMPDIR, used by Codex
-	liveDir string
-	labels  map[string]string
-	env     []string // extra variables for the child, such as REFRAKTAL_RUN
+	h           harness.Harness
+	hcfg        config.Harness
+	scratch     string   // inside the run folder
+	scratchRoot *os.Root // required: pinned scratch folder for all writes
+	cwd         string   // the session folder
+	tmpDir      string   // a private TMPDIR, used by Codex
+	liveDir     string
+	labels      map[string]string
+	env         []string // extra variables for the child, such as REFRAKTAL_RUN
 	// prefixExe is a binary that calls proc.MaybeShellPrefix first in main,
 	// used as the harness's shell prefix; "" means none. It is never guessed
 	// from os.Executable(): in a test or a library host that is a different
@@ -63,13 +64,16 @@ func (e *openError) Error() string { return e.err.Error() }
 // no prompt. On error the returned session may hold a child to shut down.
 func openSession(ctx context.Context, sp sessionSpec) (*session, error) {
 	s := &session{}
+	if sp.scratchRoot == nil {
+		return s, &openError{StatusError, errors.New("session: scratch root required")}
+	}
 	var err error
-	s.launch, err = sp.h.Prepare(ctx, harness.Options{Scratch: sp.scratch, Cwd: sp.cwd, MCP: sp.hcfg.MCP,
+	s.launch, err = sp.h.Prepare(ctx, harness.Options{Scratch: sp.scratch, ScratchRoot: sp.scratchRoot, Cwd: sp.cwd, MCP: sp.hcfg.MCP,
 		Executable: sp.hcfg.Executable, TmpDir: sp.tmpDir})
 	if err != nil {
 		return s, &openError{StatusUnavailable, err}
 	}
-	stderr, err := os.OpenFile(filepath.Join(sp.scratch, "stderr"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	stderr, err := sp.scratchRoot.OpenFile("stderr", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return s, &openError{StatusError, err}
 	}

@@ -137,12 +137,13 @@ func ErrorField(code, raw string) map[string]any {
 	return map[string]any{"code": code, "digest": Of([]byte(raw))}
 }
 
-// AppendRaw appends an error's raw text to a stderr capture file.
-func AppendRaw(path, what, raw string) {
-	if raw == "" {
+// AppendRaw appends an error's raw text to the stderr capture file name,
+// opened through the pinned folder root so a swapped path cannot redirect it.
+func AppendRaw(root *os.Root, name, what, raw string) {
+	if raw == "" || root == nil {
 		return
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return
 	}
