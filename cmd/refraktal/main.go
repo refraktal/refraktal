@@ -11,8 +11,10 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 
 	"refraktal.dev/refraktal"
+	"refraktal.dev/refraktal/internal/budget"
 )
 
 const usage = `usage: refraktal <command> [flags]        task comes from the arg, stdin, or both
@@ -90,11 +92,11 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 	asJSON := fs.Bool("json", false, "JSONL on stdout")
 	fan := fs.Int("fan", 0, "fan-out width (not yet: M6)")
 	dry := fs.Bool("dry", false, "plan and route only (not yet: M5)")
-	var usd, turns, mins, depth string
-	fs.StringVar(&usd, "usd", "", "budget (not yet: M4)")
-	fs.StringVar(&turns, "turns", "", "budget (not yet: M4)")
-	fs.StringVar(&mins, "mins", "", "budget (not yet: M4)")
-	fs.StringVar(&depth, "depth", "", "budget (not yet: M4)")
+	d := budget.Defaults
+	usd := fs.Float64("usd", d.USD, "dollar budget, checked before each turn (notional on subscriptions)")
+	turns := fs.Int("turns", d.Turns, "prompts Refraktal may send to harnesses")
+	mins := fs.Float64("mins", d.Wall.Minutes(), "wall-clock minutes; never unlimited")
+	depth := fs.Int("depth", d.Depth, "levels of Refraktal that may nest below this run")
 	var words []string
 	for {
 		if err := fs.Parse(args); err != nil {
@@ -107,8 +109,11 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 		args = fs.Args()[1:]
 	}
 	switch {
-	case *fan != 0, *dry, usd != "", turns != "", mins != "", depth != "":
-		fmt.Fprintln(stderr, "refraktal run: --fan, --dry and the budget flags are not implemented yet")
+	case *fan != 0, *dry:
+		fmt.Fprintln(stderr, "refraktal run: --fan and --dry are not implemented yet")
+		return refraktal.ExitNothingUsable
+	case *usd < 0 || *turns < 0 || *mins <= 0:
+		fmt.Fprintln(stderr, "refraktal run: --usd and --turns must not be negative, and --mins must be more than 0")
 		return refraktal.ExitNothingUsable
 	case *harnessName == "":
 		fmt.Fprintln(stderr, "refraktal run: --harness is required until routing lands")
@@ -123,7 +128,8 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 		return refraktal.ExitNothingUsable
 	}
 	enc := json.NewEncoder(stdout)
-	res, err := refraktal.Run(ctx, refraktal.RunOptions{Task: task, Harness: *harnessName, NoApply: *noApply,
+	lim := budget.Limits{USD: *usd, Turns: *turns, Wall: time.Duration(*mins * float64(time.Minute)), Depth: *depth}
+	res, err := refraktal.Run(ctx, refraktal.RunOptions{Task: task, Harness: *harnessName, NoApply: *noApply, Budget: &lim,
 		OnNotice: func(n string) {
 			if *asJSON {
 				enc.Encode(map[string]string{"type": "notice", "text": n})
@@ -152,6 +158,15 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 		fmt.Fprintf(stdout, ", %d files: %s", len(res.Files), strings.Join(res.Files, " "))
 	}
 	fmt.Fprintf(stdout, " (permissions: %d allowed, %d denied)\n", res.Allowed, res.Denied)
+	b := res.Budget
+	fmt.Fprintf(stdout, "budget: $%.4f of $%.2f charged", b.Spent, b.Limits.USD)
+	if b.Estimated > 0 {
+		fmt.Fprintf(stdout, " (plus $%.4f estimated for a cut-off call)", b.Estimated)
+	}
+	for _, c := range b.Charges {
+		fmt.Fprintf(stdout, "; %s $%.4f", c.Source, c.USD)
+	}
+	fmt.Fprintf(stdout, "; turns %d of %d\n", b.Turns, b.Limits.Turns)
 	if res.Branch != "" {
 		fmt.Fprintf(stdout, "branch %s, worktree %s\n", res.Branch, res.Worktree)
 	}

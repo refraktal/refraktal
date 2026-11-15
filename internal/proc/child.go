@@ -57,6 +57,8 @@ type Child struct {
 	once   sync.Once
 	report ShutdownReport
 
+	leader Proc // the child as listed just after it started: the session leader
+
 	record     string // live record path, or ""
 	recordBase Record
 	recordErr  error // the last error writing the live record
@@ -82,8 +84,8 @@ func Start(s Spec) (*Child, error) {
 	cmd := exec.Command(s.Argv[0], s.Argv[1:]...)
 	cmd.Dir, cmd.Stdin, cmd.Stdout, cmd.Stderr = s.Dir, inR, outW, s.Stderr
 	cmd.Env = append(ScrubEnv(os.Environ()), s.Env...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = 2 * time.Second // a descendant holding stderr open must not hang Wait
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // a session of its own, and so a process group of its own
+	cmd.WaitDelay = 2 * time.Second                      // a descendant holding stderr open must not hang Wait
 	err = cmd.Start()
 	inR.Close()
 	outW.Close()
@@ -103,6 +105,10 @@ func Start(s Spec) (*Child, error) {
 			return true
 		}
 	})
+	c.leader = Proc{PID: c.PID()}
+	if all, err := List(); err == nil && all[c.PID()].PID == c.PID() {
+		c.leader = all[c.PID()]
+	}
 	if s.LiveDir != "" {
 		c.startRecord(s.LiveDir, s.Labels)
 	}
@@ -140,10 +146,7 @@ func (c *Child) startRecord(dir string, labels map[string]string) {
 		return
 	}
 	self := os.Getpid()
-	c.recordBase = Record{Owner: all[self], Child: all[c.PID()], Labels: labels}
-	if c.recordBase.Child.PID == 0 { // exited before it could be listed
-		c.recordBase.Child = Proc{PID: c.PID()}
-	}
+	c.recordBase = Record{Owner: all[self], Child: c.leader, Session: true, Labels: labels}
 	c.record = filepath.Join(dir, fmt.Sprintf("%d-%d.json", self, c.PID()))
 	c.writeRecord()
 }
@@ -170,13 +173,15 @@ type ShutdownReport struct {
 	ExitedOnItsOwn bool       `json:"exited_on_its_own"` // exited within the grace period after stdin closed
 	Tracked        []Proc     `json:"tracked"`           // every descendant seen while it ran
 	Kill           KillReport `json:"kill"`              // the identity-checked kill of the child and its descendants
+	Swept          KillReport `json:"swept"`             // processes still in the child's session afterwards, killed by the session sweep
 	Err            string     `json:"error,omitempty"`   // listing processes failed at some point
 }
 
 // Shutdown stops the child and everything it started. It looks at the tree a
 // last time while lineage is still visible, closes stdin, gives the child
 // grace to exit, then kills its process group and every tracked process that
-// is still running as recorded. Later calls return the first call's report.
+// is still running as recorded, and finally sweeps the child's session for
+// anything that detached. Later calls return the first call's report.
 func (c *Child) Shutdown(grace time.Duration) ShutdownReport {
 	c.once.Do(func() { c.report = c.shutdown(grace) })
 	return c.report
@@ -210,12 +215,17 @@ func (c *Child) shutdown(grace time.Duration) ShutdownReport {
 	if err == nil {
 		err = c.tracker.Err()
 	}
+	swept, serr := SweepSession(c.leader)
+	if err == nil {
+		err = serr
+	}
 	select {
 	case <-c.exited:
 	case <-time.After(5 * time.Second):
 	}
 	c.Stdout.Close()
-	if c.record != "" && err == nil && len(kr.Alive) == 0 {
+	r.Swept = swept
+	if c.record != "" && err == nil && len(kr.Alive) == 0 && len(swept.Alive) == 0 {
 		os.Remove(c.record) // clean exit; otherwise the record stays for CleanLeftovers
 	}
 	if err == nil {

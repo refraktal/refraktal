@@ -83,6 +83,7 @@ type Client struct {
 	nextID  int
 	pending map[string]chan message
 	turns   map[string]*turnState // active turn by session ID
+	models  map[string]string     // current model by session ID
 	done    chan struct{}
 }
 
@@ -98,7 +99,7 @@ func New(r io.Reader, w io.Writer, opts Options) *Client {
 	opts.CancelGrace = cmp.Or(opts.CancelGrace, 5*time.Second)
 	opts.ClientName = cmp.Or(opts.ClientName, "refraktal")
 	c := &Client{w: w, opts: opts, pending: map[string]chan message{},
-		turns: map[string]*turnState{}, done: make(chan struct{})}
+		turns: map[string]*turnState{}, models: map[string]string{}, done: make(chan struct{})}
 	go c.readLoop(r)
 	return c
 }
@@ -207,6 +208,16 @@ func (c *Client) notification(m message) {
 	}
 	u := parseUpdate(m.Params)
 	c.mu.Lock()
+	if u.Kind == "config_option_update" {
+		var co struct {
+			ConfigOptions []ConfigOption `json:"configOptions"`
+		}
+		if json.Unmarshal(u.Raw, &co) == nil {
+			if model := modelOf(co.ConfigOptions); model != "" {
+				c.models[u.SessionID] = model
+			}
+		}
+	}
 	if ts := c.turns[u.SessionID]; ts != nil && u.Kind == "usage_update" {
 		if u.Used != nil {
 			ts.turn.LastUsed = u.Used
@@ -300,6 +311,13 @@ func (c *Client) NewSession(ctx context.Context, cwd string, meta json.RawMessag
 	if err := json.Unmarshal(res, &s); err != nil || s.ID == "" {
 		return Session{}, fmt.Errorf("session/new: no session ID in %d-byte result", len(res))
 	}
+	if model := s.Model(); model != "" {
+		c.mu.Lock()
+		if c.models[s.ID] == "" {
+			c.models[s.ID] = model
+		}
+		c.mu.Unlock()
+	}
 	return s, nil
 }
 
@@ -333,6 +351,7 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string) (Turn, erro
 		defer c.mu.Unlock()
 		delete(c.turns, sessionID)
 		ts.turn.Wall = time.Since(start)
+		ts.turn.Model = c.models[sessionID]
 		return ts.turn
 	}
 

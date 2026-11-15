@@ -137,3 +137,40 @@ func TestCleanLeftoversWithoutAFolder(t *testing.T) {
 		t.Fatalf("%+v %v", r, err)
 	}
 }
+
+// A dead run's session is swept too: a member that left the parent-PID tree
+// is killed with the leader.
+func TestCleanLeftoversSweepsTheSession(t *testing.T) {
+	dir := t.TempDir()
+	lead := exec.Command("sh", "-c", "sleep 30 & echo $!; exec sleep 31")
+	lead.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	out, _ := lead.StdoutPipe()
+	if err := lead.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { lead.Process.Kill(); lead.Wait() }()
+	member := readPID(t, bufio.NewReader(out))
+	defer syscall.Kill(member, syscall.SIGKILL)
+	var leader Proc
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if leader = listed(t, lead.Process.Pid); leader.Cmd == "sleep 31" {
+			break // the exec has happened
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("leader is %q", leader.Cmd)
+		}
+	}
+	if err := writeRecord(filepath.Join(dir, "dead.json"), Record{Owner: deadOwner(t), Child: leader, Session: true}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := CleanLeftovers(dir)
+	if err != nil || r.Dead != 1 {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if running(lead.Process.Pid) || running(member) {
+		t.Fatalf("leader or session member survived: %+v", r.Kill)
+	}
+	if !slices.Contains(pids(r.Kill.Killed), member) {
+		t.Fatalf("member %d not in killed %v", member, pids(r.Kill.Killed))
+	}
+}

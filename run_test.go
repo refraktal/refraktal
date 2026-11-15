@@ -2,6 +2,9 @@ package refraktal
 
 import (
 	"context"
+	"math"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,18 +12,26 @@ import (
 	"testing"
 	"time"
 
+	"refraktal.dev/refraktal/internal/budget"
 	"refraktal.dev/refraktal/internal/harness"
 )
 
 type runRig struct {
-	repo, wtDir, live, config, prompts string
+	repo, wtDir, live, config, prompts, priceURL, priceCache string
 }
+
+// prices is a small LiteLLM-style table: fake-model costs $1 per million
+// input tokens and $2 per million output tokens.
+const prices = `{"fake-model": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06}}`
 
 func newRunRig(t *testing.T) runRig {
 	t.Helper()
 	d := t.TempDir()
 	r := runRig{repo: filepath.Join(d, "repo"), wtDir: filepath.Join(d, "worktrees"), live: filepath.Join(d, "live"),
 		config: filepath.Join(d, "config.json"), prompts: filepath.Join(d, "prompts")}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(prices)) }))
+	t.Cleanup(srv.Close)
+	r.priceURL, r.priceCache = srv.URL, filepath.Join(d, "prices.json")
 	os.MkdirAll(r.repo, 0o755)
 	r.git(t, "init", "-q", "-b", "main")
 	os.WriteFile(filepath.Join(r.repo, "README"), []byte("x\n"), 0o644)
@@ -43,7 +54,8 @@ func (r runRig) git(t *testing.T, args ...string) string {
 func (r runRig) run(t *testing.T, h fake, mut func(*RunOptions)) RunResult {
 	t.Helper()
 	h.prompts = r.prompts
-	o := RunOptions{Task: "do the thing", Harness: h.name, Dir: r.repo, Limit: 10 * time.Second,
+	lim := budget.Limits{USD: 5, Turns: 5, Wall: 10 * time.Second, Depth: 2}
+	o := RunOptions{Task: "do the thing", Harness: h.name, Dir: r.repo, Budget: &lim, PriceURL: r.priceURL, PriceCache: r.priceCache,
 		LiveDir: r.live, ConfigPath: r.config, WorktreeDir: r.wtDir, Harnesses: []harness.Harness{h}}
 	if mut != nil {
 		mut(&o)
@@ -123,9 +135,18 @@ func TestRunWithNoChanges(t *testing.T) {
 
 func TestRunTimesOut(t *testing.T) {
 	r := newRunRig(t)
-	res := r.run(t, fake{name: "agy", agentMode: "hang"}, func(o *RunOptions) { o.Limit = 300 * time.Millisecond })
+	res := r.run(t, fake{name: "agy", agentMode: "hang"}, func(o *RunOptions) { o.Budget.Wall = 2 * time.Second })
 	if res.Outcome != RunTimedOut || res.ExitCode() != ExitBudget || res.StopReason != "cancelled" {
 		t.Fatalf("result %+v", res)
+	}
+	// The cancelled child keeps its whole reservation for enforcement. Its
+	// finished call (200 in, 100 out) is computed; the call the cancel cut off
+	// is estimated from the last context fill (5000) priced as input.
+	if res.Settlement == nil || !near(res.Settlement.Spent, 5) || res.Settlement.Returned != 0 {
+		t.Fatalf("settlement %+v", res.Settlement)
+	}
+	if !near(res.Budget.Reported, 200*1e-6+100*2e-6) || !near(res.Budget.Estimated, 5000*1e-6) || !near(res.Budget.Spent, 5) {
+		t.Fatalf("budget %+v", res.Budget)
 	}
 }
 
@@ -179,5 +200,66 @@ func TestRunNoApplyKeepsTheWorktreeEvenWithoutChanges(t *testing.T) {
 	res := r.run(t, fake{name: "claude", agentMode: "turn"}, func(o *RunOptions) { o.NoApply = true })
 	if res.Outcome != RunNoChanges || res.Worktree == "" || !exists(res.Worktree) {
 		t.Fatalf("result %+v", res)
+	}
+}
+
+func near(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
+
+func TestRunRefusesWhenABudgetIsSpent(t *testing.T) {
+	for name, set := range map[string]func(*budget.Limits){
+		"usd":   func(l *budget.Limits) { l.USD = 0 },
+		"turns": func(l *budget.Limits) { l.Turns = 0 },
+		"depth": func(l *budget.Limits) { l.Depth = -1 },
+	} {
+		r := newRunRig(t)
+		res := r.run(t, fake{name: "claude", agentMode: "turn"}, func(o *RunOptions) { set(o.Budget) })
+		if res.Outcome != RunExhausted || res.ExitCode() != ExitBudget || !strings.Contains(res.Error, "--"+name) {
+			t.Errorf("%s: %+v", name, res)
+		}
+		if exists(r.prompts) {
+			t.Errorf("%s: a prompt was sent", name)
+		}
+		if entries, _ := os.ReadDir(r.wtDir); len(entries) != 0 {
+			t.Errorf("%s: worktree created", name)
+		}
+	}
+}
+
+func TestRunCostSources(t *testing.T) {
+	r := newRunRig(t)
+	// Reported: the harness reports a cost (as Claude does).
+	res := r.run(t, fake{name: "claude", agentMode: "turn"}, nil)
+	if len(res.Budget.Charges) != 1 || res.Budget.Charges[0].Source != budget.Reported || !near(res.Budget.Spent, 0.0123) ||
+		res.Settlement == nil || !near(res.Settlement.Returned, 5-0.0123) || res.Model != "fake-model" {
+		t.Fatalf("reported: %+v %+v", res.Budget, res.Settlement)
+	}
+	// Computed: tokens only, priced from the table. Usage: 1400 uncached
+	// input, 1000 cached reads (no cache price: priced as input), 100 output.
+	res = r.run(t, fake{name: "codex", agentMode: "turn", env: []string{"ACPTEST_NOCOST=1"}}, nil)
+	want := 1400*1e-6 + 1000*1e-6 + 100*2e-6
+	if len(res.Budget.Charges) != 1 || res.Budget.Charges[0].Source != budget.Computed || !near(res.Budget.Spent, want) {
+		t.Fatalf("computed: %+v", res.Budget)
+	}
+	// Unpriced: a model the table does not know counts as $0, with a warning.
+	res = r.run(t, fake{name: "agy", agentMode: "turn", env: []string{"ACPTEST_NOCOST=1", "ACPTEST_MODEL=mystery-model"}}, nil)
+	if len(res.Budget.Charges) != 1 || res.Budget.Charges[0].Source != budget.Unpriced || res.Budget.Spent != 0 ||
+		len(res.Budget.Unpriced) != 1 || !strings.Contains(strings.Join(res.Notices, "\n"), `no price for model "mystery-model"`) {
+		t.Fatalf("unpriced: %+v notices %v", res.Budget, res.Notices)
+	}
+	// An override in the config prices the unknown model.
+	os.WriteFile(r.config, []byte(`{"prices":{"mystery-model":{"input":10,"output":20}}}`), 0o600)
+	res = r.run(t, fake{name: "agy", agentMode: "turn", env: []string{"ACPTEST_NOCOST=1", "ACPTEST_MODEL=mystery-model"}}, nil)
+	want = (1400+1000)*10e-6 + 100*20e-6
+	if res.Budget.Charges[0].Source != budget.Computed || !near(res.Budget.Spent, want) {
+		t.Fatalf("override: %+v", res.Budget)
+	}
+}
+
+func TestRunReportsAnOverrun(t *testing.T) {
+	r := newRunRig(t)
+	res := r.run(t, fake{name: "claude", agentMode: "turn"}, func(o *RunOptions) { o.Budget.USD = 0.01 })
+	if res.Outcome != RunNoChanges || res.Settlement == nil || !near(res.Settlement.Overrun, 0.0023) ||
+		!strings.Contains(strings.Join(res.Notices, "\n"), "beyond the --usd grant") {
+		t.Fatalf("%+v notices %v", res.Settlement, res.Notices)
 	}
 }

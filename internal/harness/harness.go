@@ -307,3 +307,22 @@ func ParseVersion(s string) string {
 	}
 	return "unknown"
 }
+
+// PriceKeys are the price-table keys to try, in order, for a harness's model.
+// LiteLLM lists OpenAI models without a prefix and Gemini models under
+// "gemini/". Claude reports its own cost, so its key matters only for
+// estimates.
+func PriceKeys(harness, model string) []string {
+	if model == "" {
+		return nil
+	}
+	switch harness {
+	case "agy":
+		return []string{"gemini/" + model, model}
+	case "codex":
+		return []string{model, "openai/" + model}
+	case "claude":
+		return []string{model, "anthropic/" + model}
+	}
+	return []string{model}
+}

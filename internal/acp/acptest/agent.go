@@ -23,6 +23,11 @@
 //	          cwd, write ../outside.txt, and run git push (simulated: it writes
 //	          pushed.txt in the cwd); then end_turn
 //
+// session/new reports the model in ACPTEST_MODEL (default fake-model). With
+// ACPTEST_NOCOST set, the turn reports tokens but no cost, as Codex and
+// Antigravity do. In hang mode the cancelled response carries usage for a
+// model call that finished before the cancel.
+//
 // If ACPTEST_PROMPTS names a file, every session/prompt appends a line to it,
 // so a test can prove that no prompt was sent, and every session/new appends
 // its cwd to the same name plus ".cwd".
@@ -176,8 +181,13 @@ func (a *agent) handle(m message, line string) {
 				fh.Close()
 			}
 		}
+		model := os.Getenv("ACPTEST_MODEL")
+		if model == "" {
+			model = "fake-model"
+		}
 		a.send(message{ID: m.ID, Result: obj{"sessionId": "fake-1",
-			"modes": obj{"currentModeId": "default", "availableModes": []obj{{"id": "default", "name": "Default"}}}}})
+			"modes":         obj{"currentModeId": "default", "availableModes": []obj{{"id": "default", "name": "Default"}}},
+			"configOptions": []obj{{"id": "model", "category": "model", "currentValue": model}}}})
 		a.update(obj{"sessionUpdate": "available_commands_update", "availableCommands": []obj{{"name": "review", "description": "Review"}}})
 	case "session/set_mode":
 		a.send(message{ID: m.ID, Result: obj{}})
@@ -209,8 +219,11 @@ func (a *agent) prompt(id json.RawMessage) {
 	switch a.mode {
 	case "hang":
 		a.chunk("working")
+		a.update(obj{"sessionUpdate": "usage_update", "used": 5000, "size": 200000})
 		<-a.cancel
-		a.send(message{ID: id, Result: obj{"stopReason": "cancelled"}})
+		// A model call finished before the cancel; the one in flight is not reported.
+		a.send(message{ID: id, Result: obj{"stopReason": "cancelled",
+			"usage": obj{"totalTokens": 300, "inputTokens": 200, "outputTokens": 100}}})
 		return
 	case "deaf":
 		a.chunk("working")
@@ -264,7 +277,11 @@ func (a *agent) prompt(id json.RawMessage) {
 	a.chunk(" permission=" + a.permission())
 	a.chunk(" fs=" + a.ask("fs/read_text_file", obj{"path": filepath.Join(a.cwd, "note.txt")}))
 	a.update(obj{"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"})
-	a.update(obj{"sessionUpdate": "usage_update", "used": 1500, "size": 200000, "cost": obj{"amount": 0.0123, "currency": "USD"}})
+	if os.Getenv("ACPTEST_NOCOST") != "" { // like Codex and Antigravity: tokens only
+		a.update(obj{"sessionUpdate": "usage_update", "used": 1500, "size": 200000})
+	} else {
+		a.update(obj{"sessionUpdate": "usage_update", "used": 1500, "size": 200000, "cost": obj{"amount": 0.0123, "currency": "USD"}})
+	}
 	a.send(message{ID: id, Result: obj{"stopReason": "end_turn",
 		"usage": obj{"totalTokens": 1500, "inputTokens": 1400, "outputTokens": 100, "cachedReadTokens": 1000}}})
 }

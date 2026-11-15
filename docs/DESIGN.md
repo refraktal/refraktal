@@ -58,6 +58,12 @@ not a command.
 
 Four budgets: `--usd`, `--turns`, `--mins`, `--depth`. Each is passed down the
 tree and only ever shrinks. A child is given at most what its parent has left.
+Defaults: `--usd 10`, `--turns 20`, `--mins 30`, `--depth 2`. A child
+Refraktal will read its grant from `REFRAKTAL_BUDGET` (JSON: usd, turns,
+deadline, depth); `--depth` is how many more levels may nest, and a child gets
+one less. When a budget is spent before a turn can start, `run` sends nothing
+and exits 2 (`budget_exhausted`); when `--mins` runs out during a turn, it
+cancels and exits 2 (`timed_out`).
 
 - **`--mins`** is wall-clock time and the only hard stop inside a turn. When it
   runs out: send `session/cancel`, wait a short grace, shut the child down,
@@ -73,8 +79,15 @@ tree and only ever shrinks. A child is given at most what its parent has left.
     minus the previous one.
   - Codex and Antigravity report tokens only, per turn, on the prompt
     response's `usage`. Refraktal prices them from LiteLLM's
-    `model_prices_and_context_window.json`, cached on disk, with per-model
-    overrides in config.
+    `model_prices_and_context_window.json`, cached at
+    `os.UserCacheDir()/refraktal/prices.json` and fetched again after 24
+    hours (a failed fetch falls back to the stale copy, then to "everything
+    unpriced"), with per-model overrides in config (US dollars per million
+    tokens). The model comes from the session's `model` config option. Keys
+    tried: Codex `<model>`, Antigravity `gemini/<model>`.
+  - Token accounting: `inputTokens` excludes cached tokens; cached reads and
+    writes are priced at their own rates (input rate if the table has none);
+    thought tokens are part of `outputTokens`.
   - Bill from the prompt response's `usage`, never from the mid-turn `used`
     field, which is context fill and under-counts.
 - **Cost sources.** Every figure is tagged `reported`, `computed`, `unpriced`
@@ -213,17 +226,25 @@ process-group kill does not reach them.
 - Tracking also widens through a process group, but only one whose leader
   (PID == PGID) is tracked. This keeps a tool's backgrounded child after its
   shell exits, without pulling in unrelated members of a shared group.
-- **The detach gap: decided, to build in M4.** A process that detaches and
-  is reparented between two samples, with its group leader never seen,
-  escapes tracking. M3's `ps`-free survival test (`(sleep 30; touch late.txt)
-  &`, then shutdown, then wait 40 s) hit it on Claude: `late.txt` appeared
-  after shutdown, the `sleep` was never in the tracked set, and Claude itself
-  exited cleanly. Codex and Antigravity left nothing.
-  **Decision:** every child gets a unique `REFRAKTAL_RUN` environment
-  variable. At shutdown Refraktal also kills, with the identity check, every
-  process of the current user whose environment carries this run's value,
-  whatever its parent or process group. Environment variables are inherited
-  by a detached process, so the sweep finds what lineage and groups miss.
+- **Session sweep (closes the detach gap).** A process that detaches and is
+  reparented between two samples, with its group leader never seen, escapes
+  parent-PID tracking: M3's survival test hit it on Claude. So each harness
+  starts as the leader of a new session, and at shutdown, after the tree kill
+  and the process-group kill, Refraktal kills, with the identity check, every
+  process of the current user still in that session, whatever its parent or
+  process group. A session ID is inherited through forks, reparenting and new
+  process groups, and survives the leader's exit. `run` and `doctor` sweep
+  the sessions of dead runs the same way, from the live registry.
+  - A session ID is a PID: if the leader's PID now belongs to a different
+    process, the ID may name an unrelated session and nothing is swept.
+  - **Known limit:** a process that calls `setsid()` itself, as
+    pseudo-terminal launchers do, leaves the session and escapes.
+  - Why not the environment: the first plan tagged children with
+    `REFRAKTAL_RUN` and swept by environment. On macOS 27 a process can read
+    only its own environment (M4 open test: another process of the same user
+    shows none, through `KERN_PROCARGS2` or `ps -E`), so it cannot work there.
+- Every child carries `REFRAKTAL_RUN=<run id>-<harness>` in its environment,
+  as a tag for logs only.
 - Scrub the child's environment of the parent's session markers
   (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`).
 
@@ -279,11 +300,12 @@ process-group kill does not reach them.
   the run folder as `result.diff`. With `--no-apply` (or when the apply
   fails, or the turn did not end normally) the worktree and branch stay and
   are printed; otherwise they are removed.
-- **Time limit** 30 minutes until `--mins` arrives (M4): `session/cancel`,
-  then shutdown and the tree kill.
+- **Budgets** as in Budgets above; `--mins` covers the whole run, from
+  start-up to the end of the turn: `session/cancel`, then shutdown, the tree
+  kill and the session sweep.
 - **Exit codes:** 0 applied, kept or no changes; 1 the turn failed or the
-  result did not apply; 2 the time limit ran out; 3 the harness could not be
-  started or logged in.
+  result did not apply; 2 a budget ran out (before the turn, or `--mins`
+  during it); 3 the harness could not be started or logged in.
 
 ## Doctor
 

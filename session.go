@@ -26,6 +26,7 @@ type sessionSpec struct {
 	tmpDir  string // a private TMPDIR, used by Codex
 	liveDir string
 	labels  map[string]string
+	env     []string // extra variables for the child, such as REFRAKTAL_RUN
 	log     *runlog.Log
 	timeout time.Duration // for initialize, session/new and set_mode
 
@@ -40,6 +41,7 @@ type session struct {
 	client *acp.Client
 	id     string
 	agent  string // name and version from initialize
+	model  string // the model session/new reported, if any
 }
 
 // openError says how far opening got: status is one of the Status constants.
@@ -66,7 +68,7 @@ func openSession(ctx context.Context, sp sessionSpec) (*session, error) {
 		return s, &openError{StatusError, err}
 	}
 	defer stderr.Close() // the child holds its own copy of the descriptor
-	s.child, err = proc.Start(proc.Spec{Argv: s.launch.Argv, Env: s.launch.Env, Dir: sp.cwd, Stderr: stderr,
+	s.child, err = proc.Start(proc.Spec{Argv: s.launch.Argv, Env: append(append([]string{}, s.launch.Env...), sp.env...), Dir: sp.cwd, Stderr: stderr,
 		LiveDir: sp.liveDir, Labels: sp.labels})
 	if err != nil {
 		return s, &openError{StatusUnavailable, err}
@@ -98,7 +100,7 @@ func openSession(ctx context.Context, sp sessionSpec) (*session, error) {
 		}
 		return s, &openError{StatusError, err}
 	}
-	s.id = ses.ID
+	s.id, s.model = ses.ID, ses.Model()
 	if err := s.client.SetMode(hctx, s.id, sp.h.Mode()); err != nil {
 		return s, &openError{StatusError, fmt.Errorf("mode %s: %w", sp.h.Mode(), err)}
 	}

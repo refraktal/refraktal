@@ -2,6 +2,7 @@ package proc
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -47,6 +48,14 @@ func TestMain(m *testing.M) {
 			os.Exit(2)
 		}
 		io.Copy(io.Discard, os.Stdin)
+	case "escape": // after the tracker's first poll, start a child in a group of its own, print its PID and exit at once
+		time.Sleep(300 * time.Millisecond)
+		kid := exec.Command("sleep", "30")
+		kid.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := kid.Start(); err != nil {
+			os.Exit(2)
+		}
+		fmt.Println(kid.Process.Pid)
 	case "deaf": // ignore stdin closing
 		time.Sleep(time.Hour)
 	case "env":
@@ -184,40 +193,53 @@ func TestKillLeavesAReusedPIDAlone(t *testing.T) {
 	}
 }
 
+// rootHelper starts a helper with plain exec, in the test's own session, and
+// a tracker rooted at it. The group-rule tests need this: a process can join
+// a process group only within its own session, and a Child leads a new one.
+func rootHelper(t *testing.T, name string, env ...string) (*Tracker, *bufio.Reader) {
+	t.Helper()
+	self, _ := os.Executable()
+	cmd := exec.Command(self)
+	cmd.Env = append(append(os.Environ(), env...), helperEnv+"="+name, "GORACE=atexit_sleep_ms=0")
+	stdin, _ := cmd.StdinPipe()
+	stdout, _ := cmd.StdoutPipe()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	t.Cleanup(func() { stdin.Close(); cmd.Process.Kill(); <-done })
+	go func() { cmd.Wait(); close(done) }()
+	tr := NewTracker(cmd.Process.Pid, func() bool {
+		select {
+		case <-done:
+			return false
+		default:
+			return true
+		}
+	})
+	return tr, bufio.NewReader(stdout)
+}
+
 // A process in the group of a live tracked process is tracked even when it is
 // not a descendant by parent PID, as a tool's background child is after its
 // shell exits and it is reparented to PID 1.
 func TestTrackerFollowsATrackedProcessGroup(t *testing.T) {
-	c := helper(t, "detach")
-	line, _ := bufio.NewReader(c.Stdout).ReadString('\n')
-	leader, _ := strconv.Atoi(strings.TrimSpace(line))
+	tr, out := rootHelper(t, "detach")
+	leader := readPID(t, out)
 	defer syscall.Kill(leader, syscall.SIGKILL)
-	waitTracked(t, c, leader)
-
-	// Started by the test, not the child, but placed in the leader's group.
-	member := exec.Command("sleep", "30")
-	member.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: leader}
-	if err := member.Start(); err != nil {
+	if err := tr.Poll(); err != nil || !slices.Contains(pids(tr.Tracked()), leader) {
+		t.Fatalf("leader %d not tracked: %v %v", leader, pids(tr.Tracked()), err)
+	}
+	// Started by the test, not the root, but placed in the leader's group.
+	member := startSleep(t, &syscall.SysProcAttr{Setpgid: true, Pgid: leader})
+	// Outside every tracked group and lineage.
+	stranger := startSleep(t, &syscall.SysProcAttr{Setpgid: true})
+	if err := tr.Poll(); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { member.Process.Kill(); member.Wait() }()
-	waitTracked(t, c, member.Process.Pid)
-
-	// A process outside every tracked group and lineage is not tracked.
-	stranger := exec.Command("sleep", "30")
-	stranger.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := stranger.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { stranger.Process.Kill(); stranger.Wait() }()
-	time.Sleep(100 * time.Millisecond)
-	if slices.Contains(pids(c.Tracked()), stranger.Process.Pid) {
-		t.Fatal("an unrelated process was tracked")
-	}
-
-	r := c.Shutdown(2 * time.Second)
-	if !slices.Contains(pids(r.Kill.Killed), member.Process.Pid) || running(stranger.Process.Pid) == false {
-		t.Fatalf("member not killed or stranger killed: %+v", r.Kill)
+	got := pids(tr.Tracked())
+	if !slices.Contains(got, member) || slices.Contains(got, stranger) {
+		t.Fatalf("tracked %v: want member %d, not stranger %d", got, member, stranger)
 	}
 }
 
@@ -243,12 +265,12 @@ func TestChildEnvironmentIsScrubbed(t *testing.T) {
 }
 
 func TestParsePS(t *testing.T) {
-	out := "  10     1    10 Ss   Sun Nov 15 15:45:51 2026 /bin/sh -c sleep  20\n" +
-		"  11    10    10 Z    Sun Nov 15 15:45:52 2026 (sleep)\n" +
-		"  12    10    10 SE   Sun Nov 15 15:45:53 2026 (claude)\n" +
+	out := "  10     1    10   501 Ss   Sun Nov 15 15:45:51 2026 /bin/sh -c sleep  20\n" +
+		"  11    10    10   501 Z    Sun Nov 15 15:45:52 2026 (sleep)\n" +
+		"  12    10    10   501 SE   Sun Nov 15 15:45:53 2026 (claude)\n" +
 		"garbage\n"
 	got := parsePS(out)
-	want := Proc{PID: 10, PPID: 1, PGID: 10, Start: "Sun Nov 15 15:45:51 2026", Cmd: "/bin/sh -c sleep 20"}
+	want := Proc{PID: 10, PPID: 1, PGID: 10, UID: 501, Start: "Sun Nov 15 15:45:51 2026", Cmd: "/bin/sh -c sleep 20"}
 	if len(got) != 1 || got[10] != want {
 		t.Fatalf("got %+v", got)
 	}
@@ -278,73 +300,87 @@ func startSleep(t *testing.T, attr *syscall.SysProcAttr) int {
 // A tracked process that sits in a group led by an untracked process must not
 // pull that group's other members into tracking.
 func TestTrackerIgnoresAGroupWhoseLeaderIsNotTracked(t *testing.T) {
-	leader := startSleep(t, &syscall.SysProcAttr{Setpgid: true}) // the test's, not the child's
-	c := helperEvery(t, "join", time.Hour, "JOIN_PGID="+strconv.Itoa(leader))
-	defer c.Shutdown(time.Second)
-	joined := readPID(t, bufio.NewReader(c.Stdout))
+	leader := startSleep(t, &syscall.SysProcAttr{Setpgid: true}) // the test's, not the root's
+	tr, out := rootHelper(t, "join", "JOIN_PGID="+strconv.Itoa(leader))
+	joined := readPID(t, out)
 	defer syscall.Kill(joined, syscall.SIGKILL)
 	stranger := startSleep(t, &syscall.SysProcAttr{Setpgid: true, Pgid: leader})
-
-	if err := c.tracker.Poll(); err != nil {
+	if err := tr.Poll(); err != nil {
 		t.Fatal(err)
 	}
-	got := pids(c.Tracked())
+	got := pids(tr.Tracked())
 	if !slices.Contains(got, joined) {
-		t.Fatalf("the child's own descendant %d not tracked: %v", joined, got)
+		t.Fatalf("the root's own descendant %d not tracked: %v", joined, got)
 	}
 	if slices.Contains(got, stranger) || slices.Contains(got, leader) {
 		t.Fatalf("tracked through a group whose leader is untracked: %v (leader %d, stranger %d)", got, leader, stranger)
 	}
 }
 
-// A tool shell leads its own group and backgrounds a child, then exits; the
-// child is reparented. Tracking it relies only on the group rule: the shell
-// was tracked as leader, and the child is first seen after it is reparented.
-func TestTrackerKeepsAReparentedChildOfATrackedLeader(t *testing.T) {
+// A tool shell backgrounds a child and exits; the child is reparented. It
+// must not survive shutdown. Before the session sweep this was tested by
+// polling the tracker until the group rule found the child, which failed
+// intermittently on the macOS CI runner (2 of 13 runs, never locally; cause
+// not found). The session sweep kills it whether or not tracking saw it, so
+// the test asserts that, with no retries.
+func TestReparentedBackgroundChildDoesNotSurviveShutdown(t *testing.T) {
 	c := helperEvery(t, "bg", time.Hour)
 	out := bufio.NewReader(c.Stdout)
 	shell := readPID(t, out)
-	if err := c.tracker.Poll(); err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Contains(pids(c.Tracked()), shell) {
-		t.Fatalf("shell %d not tracked", shell)
-	}
 	fmt.Fprintln(c.Stdin, "go")
 	bg := readPID(t, out)
 	defer syscall.Kill(bg, syscall.SIGKILL)
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		all, _ := List()
-		_, shellUp := all[shell]
-		if p, ok := all[bg]; ok && p.PPID != shell && !shellUp {
-			if p.PGID != shell {
-				t.Fatalf("background child in group %d, want the shell's %d", p.PGID, shell)
-			}
-			break // reparented, and its leader has exited
+		if _, up := all[shell]; !up && all[bg].PID == bg && all[bg].PPID != shell {
+			break // reparented, and its shell has exited
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("background child was not reparented")
 		}
 	}
-	// The real tracker polls continually; give it a few polls here too. This
-	// has failed intermittently on the macOS CI runner, never locally; the
-	// failure message prints what ps and the tracker saw.
-	for i := 0; ; i++ {
-		if err := c.tracker.Poll(); err != nil {
-			t.Fatal(err)
-		}
-		if slices.Contains(pids(c.Tracked()), bg) {
-			break
-		}
-		if i == 10 {
-			all, _ := List()
-			t.Fatalf("reparented child %d not tracked after %d polls: tracked %+v; now: shell %+v, child %+v; test pgid %d",
-				bg, i+1, c.Tracked(), all[shell], all[bg], syscall.Getpgrp())
-		}
-		time.Sleep(50 * time.Millisecond)
+	if sid, err := syscall.Getsid(bg); err != nil || sid != c.PID() {
+		t.Fatalf("background child in session %d (%v), want the child's %d", sid, err, c.PID())
 	}
 	r := c.Shutdown(time.Second)
-	if !slices.Contains(pids(r.Kill.Killed), bg) || running(bg) {
-		t.Fatalf("reparented child %d not killed: %+v", bg, r.Kill)
+	if running(bg) || !slices.Contains(append(pids(r.Kill.Killed), pids(r.Swept.Killed)...), bg) {
+		t.Fatalf("reparented child %d survived: kill %+v swept %+v", bg, r.Kill, r.Swept)
+	}
+}
+
+// A child that detaches before the tracker ever sees it, in a group of its
+// own and reparented, escapes the parent-PID tree and the group kill. The
+// session sweep must find it.
+func TestSessionSweepCatchesAnUntrackedDetachedChild(t *testing.T) {
+	stranger := startSleep(t, &syscall.SysProcAttr{Setsid: true}) // another session: must survive
+	c := helperEvery(t, "escape", time.Hour)
+	pid := readPID(t, bufio.NewReader(c.Stdout))
+	defer syscall.Kill(pid, syscall.SIGKILL)
+	select {
+	case <-c.Exited():
+	case <-time.After(5 * time.Second):
+		t.Fatal("helper did not exit")
+	}
+	r := c.Shutdown(time.Second)
+	if slices.Contains(pids(r.Tracked), pid) || slices.Contains(pids(r.Kill.Killed), pid) {
+		t.Fatalf("the child was tracked; the test needs it untracked: %+v", r)
+	}
+	if !slices.Contains(pids(r.Swept.Killed), pid) || running(pid) || r.Err != "" {
+		t.Fatalf("detached child %d not swept: %+v", pid, r)
+	}
+	if !running(stranger) {
+		t.Fatal("the sweep killed a process in another session")
+	}
+}
+
+// A session ID is a PID. If the leader's PID now belongs to another process,
+// the ID may name an unrelated session: nothing may be killed.
+func TestSessionSweepRefusesAReusedID(t *testing.T) {
+	leader := startSleep(t, &syscall.SysProcAttr{Setsid: true})
+	rec := listed(t, leader)
+	rec.Start = "Mon Jan 1 00:00:00 2001" // the recorded leader was another process
+	r, err := SweepSession(rec)
+	if !errors.Is(err, ErrSessionReused) || len(r.Killed) != 0 || !running(leader) {
+		t.Fatalf("err %v report %+v", err, r)
 	}
 }

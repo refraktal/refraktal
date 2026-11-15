@@ -27,7 +27,8 @@ func TestMain(m *testing.M) {
 type fake struct {
 	name, agentMode, mcp string
 	prepErr              error
-	prompts              string // file the fake agent appends to on session/prompt
+	prompts              string   // file the fake agent appends to on session/prompt
+	env                  []string // extra environment for the fake agent
 }
 
 func (f fake) Name() string { return f.name }
@@ -38,7 +39,7 @@ func (f fake) Prepare(_ context.Context, o harness.Options) (harness.Launch, err
 	}
 	argv, env := acptest.Command(f.agentMode)
 	mcp := cmp.Or(f.mcp, o.MCP)
-	return harness.Launch{Argv: argv, Env: append(env, "ACPTEST_PROMPTS="+f.prompts), MCP: mcp,
+	return harness.Launch{Argv: argv, Env: append(append(env, "ACPTEST_PROMPTS="+f.prompts), f.env...), MCP: mcp,
 		Adapter: "fake-acp@1.0.0", Bundled: "1.0.0", Installed: "1.0.1"}, nil
 }
 

@@ -19,6 +19,7 @@ import (
 type Record struct {
 	Owner   Proc              `json:"owner"`   // the Refraktal process that started the child
 	Child   Proc              `json:"child"`   // the harness process itself
+	Session bool              `json:"session"` // the child led a session of its own: sweep it
 	Tracked []Proc            `json:"tracked"` // its descendants seen so far
 	Labels  map[string]string `json:"labels,omitempty"`
 }
@@ -98,6 +99,15 @@ func CleanLeftovers(dir string) (CleanupReport, error) {
 		r.Kill.Gone = append(r.Kill.Gone, kr.Gone...)
 		r.Kill.Changed = append(r.Kill.Changed, kr.Changed...)
 		r.Kill.Alive = append(r.Kill.Alive, kr.Alive...)
+		if rec.Session {
+			sr, err := SweepSession(rec.Child)
+			if err != nil && !errors.Is(err, ErrSessionReused) {
+				r.Errors = append(r.Errors, fmt.Sprintf("%s: %v", e.Name(), err))
+			}
+			r.Kill.Killed = append(r.Kill.Killed, sr.Killed...)
+			r.Kill.Alive = append(r.Kill.Alive, sr.Alive...)
+			kr.Alive = append(kr.Alive, sr.Alive...)
+		}
 		if len(kr.Alive) == 0 {
 			os.Remove(path)
 		}
