@@ -114,8 +114,9 @@ Policy (`internal/policy`); every request is logged with its decision:
   root-owned system folders and `/dev/null`-like devices are exempt), or a
   variable is expanded inside a path or a `cd`, `pushd` or `ln` target, or a
   bare `cd` leaves the worktree.
-- Any other tool kind: allowed only if it names paths and all are inside
-  the worktree; otherwise denied.
+- Any other tool kind: allowed only when its input is absent, or holds
+  nothing but known file-path fields (string values) that are all inside the
+  worktree. Any other field, a nested value or a non-object input is denied.
 
 This is a gate, not a sandbox: Refraktal sees a command's text, not
 everything it touches. A command built at run time (an interpreter's code,
