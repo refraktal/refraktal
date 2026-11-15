@@ -11,11 +11,13 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -60,14 +62,47 @@ func main() {
 	flag.BoolVar(&cfg.handshake, "handshake", false, "stop after session/new: send no prompt, spend no tokens")
 	flag.StringVar(&cfg.mode, "mode", "", "session mode id to set with session/set_mode before prompting")
 	flag.IntVar(&cfg.turns, "turns", 1, "number of times to send the prompt in the same session")
+	flag.Func("step", "repeatable: SECONDS:PROMPT, one turn of a scripted session (0 = use --mins); a cancelled step does not end the session",
+		func(v string) error {
+			secs, prompt, ok := strings.Cut(v, ":")
+			f, err := strconv.ParseFloat(secs, 64)
+			if !ok || err != nil || f < 0 || strings.TrimSpace(prompt) == "" {
+				return fmt.Errorf("want SECONDS:PROMPT, got %q", v)
+			}
+			cfg.steps = append(cfg.steps, Step{Limit: time.Duration(f * float64(time.Second)), Prompt: prompt})
+			return nil
+		})
+	flag.Func("session-meta", "JSON object sent as _meta on session/new", func(v string) error {
+		var o map[string]any
+		if err := json.Unmarshal([]byte(v), &o); err != nil {
+			return fmt.Errorf("not a JSON object: %w", err)
+		}
+		cfg.sessionMeta = json.RawMessage(v)
+		return nil
+	})
+	flag.Func("survivor-samples", "comma-separated delays after the harness exits at which to list survivors (default 200ms)", func(v string) error {
+		for _, f := range strings.Split(v, ",") {
+			d, err := time.ParseDuration(strings.TrimSpace(f))
+			if err != nil || d < 0 {
+				return fmt.Errorf("bad duration %q", f)
+			}
+			cfg.survivorSamples = append(cfg.survivorSamples, d)
+		}
+		return nil
+	})
 	flag.Parse()
 	cfg.limit = time.Duration(mins * float64(time.Minute))
+	for i := range cfg.steps {
+		if cfg.steps[i].Limit == 0 {
+			cfg.steps[i].Limit = cfg.limit
+		}
+	}
 	cfg.prompt = strings.Join(flag.Args(), " ")
-	if cfg.prompt == "" && !cfg.handshake {
+	if cfg.prompt == "" && !cfg.handshake && len(cfg.steps) == 0 {
 		b, _ := io.ReadAll(os.Stdin)
 		cfg.prompt = strings.TrimSpace(string(b))
 	}
-	if cfg.prompt == "" && !cfg.handshake {
+	if cfg.prompt == "" && !cfg.handshake && len(cfg.steps) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: acp-spike [flags] <prompt>   (or prompt on stdin)")
 		os.Exit(2)
 	}

@@ -56,7 +56,8 @@ func driveCfg(t *testing.T, mode string, extra config) (Summary, []line, string,
 	var out, errb bytes.Buffer
 	cfg := config{harness: "fake", cmd: fakeBin + " " + mode, cwd: cwd, prompt: "hi",
 		limit: extra.limit, grace: 300 * time.Millisecond, linger: 150 * time.Millisecond,
-		handshake: extra.handshake, mode: extra.mode, turns: extra.turns}
+		handshake: extra.handshake, mode: extra.mode, turns: extra.turns,
+		steps: extra.steps, sessionMeta: extra.sessionMeta, survivorSamples: extra.survivorSamples}
 	if cfg.limit == 0 {
 		cfg.limit = 5 * time.Second
 	}
@@ -361,5 +362,59 @@ func TestSeveralTurnsInOneSession(t *testing.T) {
 	}
 	if costs[1] != 1 || costs[2] != 1 {
 		t.Fatalf("want one cost per turn, got %v", costs)
+	}
+}
+
+func TestScriptedStepsContinueAfterCancel(t *testing.T) {
+	steps := []Step{{5 * time.Second, "one"}, {300 * time.Millisecond, "two"}, {5 * time.Second, "three"}}
+	sum, _, _, err := driveCfg(t, "hang2", config{steps: steps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.TurnsDone != 3 || strings.Join(sum.TurnStops, ",") != "end_turn,cancelled,end_turn" {
+		t.Fatalf("turns_done=%d stops=%v", sum.TurnsDone, sum.TurnStops)
+	}
+	costs := map[int]int{}
+	for _, u := range sum.Usage {
+		if u.Cost != nil {
+			costs[u.Turn]++
+		}
+	}
+	if costs[1] != 1 || costs[2] != 0 || costs[3] != 1 {
+		t.Fatalf("costs per turn %v", costs)
+	}
+	if len(sum.ProcsAtCancel) == 0 || len(sum.ProcsAfterCancel) == 0 {
+		t.Fatalf("missing cancel snapshots: at=%v after=%v", sum.ProcsAtCancel, sum.ProcsAfterCancel)
+	}
+}
+
+func TestSessionMetaIsSent(t *testing.T) {
+	_, _, cwd, err := driveCfg(t, "default", config{handshake: true, sessionMeta: json.RawMessage(`{"x":{"y":1}}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(cwd, "meta.json"); got != `{"x":{"y":1}}` {
+		t.Fatalf("meta.json = %q", got)
+	}
+}
+
+func TestSurvivorSamples(t *testing.T) {
+	sum, _, cwd, err := driveCfg(t, "orphan", config{handshake: true,
+		survivorSamples: []time.Duration{100 * time.Millisecond, 400 * time.Millisecond}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := strconv.Atoi(readFile(cwd, "child.pid"))
+	if len(sum.SurvivorSamples) != 2 || sum.SurvivorSamples[1].AtMs < 400 {
+		t.Fatalf("samples %+v", sum.SurvivorSamples)
+	}
+	for _, smp := range sum.SurvivorSamples {
+		found := false
+		for _, p := range smp.Procs {
+			found = found || p.PID == pid
+		}
+		if !found {
+			t.Fatalf("child %d missing from sample at %d ms", pid, smp.AtMs)
+		}
 	}
 }

@@ -10,8 +10,9 @@ are in `CLAIMS.md` in this folder.
   route vs fan-out, with a deterministic fallback. See `routing/FINDINGS.md`.
 
 Both pass `go vet ./...` and `go test ./...`. The first live run is done; see
-`LIVE-RESULTS.md`. **Next: `FOLLOWUP.md`**, a second brief that runs the
-follow-up tests. The brief below is the first run's, kept for reference.
+`LIVE-RESULTS.md`, and the follow-up in `FOLLOWUP-RESULTS.md`. **Next:
+`FOLLOWUP2.md`**, the third round. The brief below is the first run's, kept
+for reference.
 
 ## Live run: brief for Claude Code
 

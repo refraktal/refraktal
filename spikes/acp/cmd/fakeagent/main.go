@@ -14,6 +14,9 @@
 //	orphan     as default, and at session/new also starts a child process that
 //	           ignores stdin closing, to test the client's survivor check
 //	nomode     session/set_mode fails with -32602
+//	hang2      the second prompt hangs until session/cancel; others as default
+//
+// If session/new carries _meta, it is written to meta.json in the cwd.
 //
 // In every mode session/set_mode succeeds (except nomode) and the session can
 // take several prompts.
@@ -48,6 +51,7 @@ var (
 	nextID  int
 	cancel  = make(chan struct{})
 	cwd     string
+	prompts int
 )
 
 func send(m msg) {
@@ -83,6 +87,13 @@ func ask(method string, params obj) string {
 }
 
 func prompt(id json.RawMessage, mode string) {
+	mu.Lock()
+	prompts++
+	n := prompts
+	mu.Unlock()
+	if mode == "hang2" && n == 2 {
+		mode = "hang"
+	}
 	chunk("Hello")
 	switch mode {
 	case "hang":
@@ -137,6 +148,7 @@ func main() {
 		var raw struct {
 			Result json.RawMessage `json:"result"`
 			Cwd    string          `json:"cwd"`
+			Meta   json.RawMessage `json:"_meta"`
 		}
 		if json.Unmarshal(in.Bytes(), &m) != nil {
 			continue
@@ -161,6 +173,9 @@ func main() {
 				continue
 			}
 			cwd = raw.Cwd
+			if len(raw.Meta) > 0 {
+				os.WriteFile(filepath.Join(cwd, "meta.json"), raw.Meta, 0o644)
+			}
 			if mode == "orphan" { // stays in our process group; stdio goes to /dev/null
 				child := exec.Command("sleep", "30")
 				child.Start()
