@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"refraktal.dev/refraktal/internal/acp"
@@ -77,8 +78,8 @@ func (p Policy) Decide(req acp.PermissionRequest) Decision {
 	default:
 		if readOnlyKinds[d.Kind] {
 			d.Allow, d.Reason = true, "does not change files"
-		} else if k := uncheckable(in); k != "" {
-			d.Allow, d.Reason = false, "unknown tool kind "+strconvQuote(d.Kind)+" with a field the policy cannot check: "+k
+		} else if k := uncheckable(req.ToolCall.RawInput); k != "" {
+			d.Allow, d.Reason = false, "unknown tool kind "+strconvQuote(d.Kind)+" with input the policy cannot check: "+k
 		} else if len(d.Paths) > 0 {
 			d.Allow, d.Reason = p.filesInside(d.Paths)
 		} else {
@@ -169,15 +170,23 @@ var (
 	fileChange = map[string]bool{"edit": true, "delete": true, "move": true}
 )
 
-// uncheckable returns a destination-like field or a changes map in rawInput:
-// on an unknown tool kind their meaning is unknown, so they fail closed.
-func uncheckable(in map[string]any) string {
-	if _, ok := in["changes"]; ok {
-		return "changes"
+// uncheckable reports why an unknown tool kind's input cannot be checked,
+// or "" if it can. It is an allowlist: the input must be absent, or an
+// object whose every field is a known file-path field holding a string.
+// Any other field, a nested value or a non-object fails closed, since its
+// meaning is unknown.
+func uncheckable(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
 	}
-	for _, k := range moveKeys {
-		if _, ok := in[k]; ok {
-			return k
+	var in map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return "input is not an object"
+	}
+	for k, v := range in {
+		var str string
+		if !slices.Contains(fileKeys, k) || json.Unmarshal(v, &str) != nil {
+			return "field " + strconvQuote(k)
 		}
 	}
 	return ""
