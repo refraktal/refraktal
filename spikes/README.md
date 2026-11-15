@@ -1,8 +1,8 @@
 # Spikes: ACP and routing
 
 Two throwaway spikes for Refraktal. Each is its own Go module (standard library
-only) and is not part of the root module. Findings so far are in the Refraktal
-Claude project doc `SPIKES.md`.
+only) and is not part of the root module. The findings so far, as a checklist,
+are in `CLAIMS.md` in this folder.
 
 - `acp/`: a small ACP client that drives Claude Code, Codex and Antigravity
   over stdio and records usage and cost updates. See `acp/FINDINGS.md`.
@@ -76,6 +76,9 @@ For routing:
    with the policy outcome for each.
 5. Where the model and the `EXPECTED` column disagree, list those rows.
 
-Finish by telling Adhish, in a few lines, which entries in the project's
-`SPIKES.md` are now confirmed, which are contradicted, and which are still
-unknown.
+Then go through `spikes/CLAIMS.md` and mark every claim confirmed,
+contradicted or still unknown, with the observation that decides it. That
+file is the complete list; there is no other document to look for.
+
+Finish by telling Adhish, in a few lines, which claims are now confirmed,
+which are contradicted, and which are still unknown.
