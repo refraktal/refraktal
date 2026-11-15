@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -73,8 +74,16 @@ func planChecks(ctx context.Context, root, base string, cfg config.Config, confi
 		return p
 	}
 	var kinds []string
-	if mk := worktree.Show(ctx, root, base, "Makefile"); mk != nil && regexp.MustCompile(`(?m)^test\s*:`).Match(mk) {
-		kinds = append(kinds, "make")
+	// make reads the first of these that exists; run that one explicitly.
+	makefile := ""
+	for _, name := range makefiles {
+		if mk := worktree.Show(ctx, root, base, name); mk != nil {
+			if regexp.MustCompile(`(?m)^test\s*:`).Match(mk) {
+				makefile = name
+				kinds = append(kinds, "make")
+			}
+			break
+		}
 	}
 	if worktree.Show(ctx, root, base, "go.mod") != nil {
 		kinds = append(kinds, "go")
@@ -84,14 +93,14 @@ func planChecks(ctx context.Context, root, base string, cfg config.Config, confi
 	}
 	switch {
 	case len(kinds) == 0:
-		p.Note = "no check: no config entry, and no Makefile test target, go.mod or package.json test script"
+		p.Note = "no check: no config entry, and no makefile test target, go.mod or package.json test script"
 	case len(kinds) > 1:
 		p.Note = "no check: more than one kind detected (" + strings.Join(kinds, ", ") + "); set one in the config's checks"
 	default:
 		p.Source = kinds[0]
 		switch kinds[0] {
 		case "make":
-			p.Steps = []checkStep{{"test", []string{"make", "test"}}}
+			p.Steps = []checkStep{{"test", []string{"make", "-f", makefile, "test"}}}
 		case "go":
 			p.Steps = []checkStep{{"build", []string{"go", "build", "./..."}}, {"test", []string{"go", "test", "./..."}}}
 		case "npm":
@@ -99,6 +108,25 @@ func planChecks(ctx context.Context, root, base string, cfg config.Config, confi
 		}
 	}
 	return p
+}
+
+// makefiles are the names make looks for, in its order.
+var makefiles = []string{"GNUmakefile", "makefile", "Makefile"}
+
+// testFile reports whether a path is a test file by common conventions:
+// *_test.go, test_*.py and *_test.py, *.test.* and *.spec.*, or anything
+// under a test, tests or __tests__ folder.
+func testFile(path string) bool {
+	dirs := strings.Split(path, "/")
+	base := dirs[len(dirs)-1]
+	for _, d := range dirs[:len(dirs)-1] {
+		if d == "test" || d == "tests" || d == "__tests__" {
+			return true
+		}
+	}
+	return strings.HasSuffix(base, "_test.go") || strings.HasSuffix(base, "_test.py") ||
+		(strings.HasPrefix(base, "test_") && strings.HasSuffix(base, ".py")) ||
+		strings.Contains(base, ".test.") || strings.Contains(base, ".spec.")
 }
 
 // npmTest returns package.json's test script, or "" for none or npm's
@@ -125,8 +153,13 @@ func canonPath(p string) string {
 }
 
 // touchesDefinition says why a candidate's change touches the check's own
-// definition, or "" if it does not. Such a candidate cannot win on checks.
+// definition or the tests it runs, or "" if it does not. Such a candidate
+// cannot win on checks. With no check there is nothing to win on checks, so
+// nothing is flagged.
 func (p checkPlan) touchesDefinition(files []string, diff []byte) string {
+	if len(p.Steps) == 0 {
+		return ""
+	}
 	tools := map[string]bool{}
 	for _, s := range p.Steps {
 		tools[filepath.Base(s.Argv[0])] = true
@@ -137,8 +170,10 @@ func (p checkPlan) touchesDefinition(files []string, diff []byte) string {
 			return "changes CI files (" + f + ")"
 		case p.config != "" && f == p.config:
 			return "changes the config file that defines the check"
-		case f == "Makefile" && (tools["make"] || p.Source == "make"):
-			return "changes the Makefile the check runs"
+		case slices.Contains(makefiles, f) && (tools["make"] || p.Source == "make"):
+			return "changes a makefile (" + f + ")"
+		case testFile(f):
+			return "changes test files (" + f + ")"
 		case f == "package.json" && (tools["npm"] || tools["yarn"] || tools["pnpm"]):
 			return "changes package.json, which defines the test script"
 		case f == "go.mod" && tools["go"] && goModToolchainChanged(diff):

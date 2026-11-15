@@ -553,3 +553,60 @@ func TestJudgeIsPickedOutsideTheCloseCall(t *testing.T) {
 		t.Fatal("the run log's verdict does not record that the judge judged its own candidate")
 	}
 }
+
+// (5) make reads GNUmakefile, then makefile, then Makefile: detect all three
+// from the base, run the one make would use explicitly, and flag changes to
+// any of them.
+func TestMakeVariants(t *testing.T) {
+	r := newRunRig(t)
+	ctx := context.Background()
+	commit := func(files map[string]string) string {
+		for f, c := range files {
+			os.WriteFile(filepath.Join(r.repo, f), []byte(c), 0o644)
+		}
+		r.git(t, "add", "-A")
+		r.git(t, "commit", "-q", "-m", "x")
+		return strings.TrimSpace(r.git(t, "rev-parse", "HEAD"))
+	}
+	base := commit(map[string]string{"makefile": "test:\n\ttrue\n"})
+	p := planChecks(ctx, r.repo, base, config.Config{}, r.config)
+	if p.Source != "make" || strings.Join(p.Steps[0].Argv, " ") != "make -f makefile test" {
+		t.Fatalf("lowercase makefile: %+v", p)
+	}
+	base = commit(map[string]string{"GNUmakefile": "test:\n\ttrue\n", "Makefile": "build:\n\ttrue\n"})
+	p = planChecks(ctx, r.repo, base, config.Config{}, r.config)
+	if p.Source != "make" || strings.Join(p.Steps[0].Argv, " ") != "make -f GNUmakefile test" {
+		t.Fatalf("GNUmakefile first: %+v", p)
+	}
+	for _, f := range []string{"GNUmakefile", "makefile", "Makefile"} {
+		if why := p.touchesDefinition([]string{f}, nil); why == "" {
+			t.Errorf("a change to %s is not flagged", f)
+		}
+	}
+	// make uses the first file present: here GNUmakefile, which has no test
+	// target, so there is no make check even though Makefile has one.
+	base = commit(map[string]string{"GNUmakefile": "build:\n\ttrue\n", "Makefile": "test:\n\ttrue\n"})
+	if p := planChecks(ctx, r.repo, base, config.Config{}, r.config); p.Source == "make" {
+		t.Fatalf("detected a target make would not use: %+v", p)
+	}
+}
+
+// (4) A candidate that edits or deletes tests cannot win on checks alone.
+func TestTestFileChangesAreFlagged(t *testing.T) {
+	p := checkPlan{Steps: []checkStep{{"test", []string{"go", "test", "./..."}}}, Source: "go"}
+	for _, f := range []string{"pkg/a_test.go", "test/x.sh", "src/tests/y.py", "web/__tests__/z.js", "a.test.ts", "b.spec.js",
+		"test_mod.py", "pkg/mod_test.py"} {
+		if why := p.touchesDefinition([]string{f}, nil); !strings.Contains(why, "test files") {
+			t.Errorf("%s not flagged: %q", f, why)
+		}
+	}
+	for _, f := range []string{"main.go", "testing.md", "contest/a.go", "latest.go", "attestation.go"} {
+		if why := p.touchesDefinition([]string{f}, nil); why != "" {
+			t.Errorf("%s flagged: %q", f, why)
+		}
+	}
+	// Without a check there is nothing to win on checks: nothing is flagged.
+	if why := (checkPlan{Source: "none"}).touchesDefinition([]string{"a_test.go", ".github/x.yml"}, nil); why != "" {
+		t.Errorf("flagged with no check: %q", why)
+	}
+}
