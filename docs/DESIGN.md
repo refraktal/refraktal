@@ -175,6 +175,10 @@ process-group kill does not reach them.
   top level, or the current folder outside a repository). Refraktal writes
   `.refraktal/.gitignore` containing `*`, so nothing there is committed. The
   ID is the start time plus a random suffix.
+- A repository may not be trusted: if `.refraktal`, `.refraktal/runs` or
+  `.refraktal/.gitignore` is a symlink, Refraktal refuses to continue rather
+  than write through it. `.gitignore` is replaced by renaming a new file over
+  it.
 - **Redact.** Harnesses send the account email, organisation and plan in auth
   notifications. Log an allowlist of known update kinds verbatim; for anything
   else, the method name and size only. Never forward a child's auth
@@ -192,6 +196,12 @@ process-group kill does not reach them.
 - The login check is a zero-token handshake: `initialize`, `session/new` with
   the run's isolation options, and `session/set_mode` to the harness's mode,
   then shutdown. No prompt is ever sent.
+- Each handshake runs in an empty folder outside any repository
+  (`os.UserCacheDir()` joined with `refraktal/doctor/`, removed afterwards).
+  Harnesses load project settings from the session folder, and Claude runs a
+  project's hooks at session start: `doctor` must never run a repository's
+  code. (`run` works in the repository by design, so this applies to `doctor`
+  only.)
 - A harness is `ok`, `logged_out` (`session/new` refused for
   authentication), `unavailable` (not installed, or its adapter could not be
   prepared) or `error`. Exit code 3 when no harness is `ok`.

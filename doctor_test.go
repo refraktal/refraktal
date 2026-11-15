@@ -42,20 +42,21 @@ func (f fake) Prepare(context.Context, string) (harness.Launch, error) {
 }
 
 type rig struct {
-	root, live, prompts string
+	root, live, prompts, neutral string
 }
 
 func newRig(t *testing.T) rig {
 	t.Helper()
 	d := t.TempDir()
-	return rig{root: filepath.Join(d, "repo"), live: filepath.Join(d, "live"), prompts: filepath.Join(d, "prompts")}
+	return rig{root: filepath.Join(d, "repo"), live: filepath.Join(d, "live"), prompts: filepath.Join(d, "prompts"),
+		neutral: filepath.Join(d, "neutral")}
 }
 
 func (r rig) doctor(t *testing.T, hs ...harness.Harness) DoctorReport {
 	t.Helper()
 	os.MkdirAll(r.root, 0o755)
 	rep, err := Doctor(context.Background(), DoctorOptions{Root: r.root, LiveDir: r.live, Harnesses: hs,
-		Getenv: func(string) string { return "" }, Timeout: 10 * time.Second})
+		Getenv: func(string) string { return "" }, Timeout: 10 * time.Second, Neutral: r.neutral})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +96,13 @@ func TestDoctorAllUsable(t *testing.T) {
 	}
 	if strings.Contains(string(events), acptest.AuthEmail) {
 		t.Fatal("account email reached the run log")
+	}
+	// Each session folder must be the neutral folder, never the repository.
+	if cwds, _ := os.ReadFile(r.prompts + ".cwd"); strings.Contains(string(cwds), r.root) || !strings.Contains(string(cwds), r.neutral) {
+		t.Fatalf("session folders %q: want under %s, never %s", cwds, r.neutral, r.root)
+	}
+	if left, _ := os.ReadDir(r.neutral); len(left) != 0 {
+		t.Fatalf("neutral session folders not removed: %d left", len(left))
 	}
 	if rep.Decider.Kind != "fallback" {
 		t.Fatalf("decider %+v", rep.Decider)
@@ -155,7 +163,7 @@ func TestDoctorCleansUpDeadRuns(t *testing.T) {
 func TestDoctorDeciderAndJSON(t *testing.T) {
 	r := newRig(t)
 	os.MkdirAll(r.root, 0o755)
-	rep, err := Doctor(context.Background(), DoctorOptions{Root: r.root, LiveDir: r.live,
+	rep, err := Doctor(context.Background(), DoctorOptions{Root: r.root, LiveDir: r.live, Neutral: r.neutral,
 		Harnesses: []harness.Harness{fake{name: "claude", agentMode: "auth", mcp: harness.MCPIsolated, prompts: r.prompts}},
 		Getenv:    func(k string) string { return map[string]string{"GEMINI_API_KEY": "secret-value"}[k] }})
 	if err != nil {

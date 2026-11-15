@@ -90,3 +90,57 @@ func TestCreateRefusesAnExistingFile(t *testing.T) {
 		t.Fatal("Create overwrote an existing log")
 	}
 }
+
+func TestNewRunWritesTheIgnoreFile(t *testing.T) {
+	root := t.TempDir()
+	r, err := NewRun(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(root, ".refraktal", ".gitignore")); string(b) != "*\n" {
+		t.Fatalf(".gitignore = %q", b)
+	}
+	if fi, err := os.Stat(r.Dir); err != nil || !fi.IsDir() || r.Rel != filepath.Join(".refraktal", "runs", r.ID) {
+		t.Fatalf("run %+v: %v", r, err)
+	}
+	os.WriteFile(filepath.Join(root, ".refraktal", ".gitignore"), []byte("other\n"), 0o644)
+	if _, err := NewRun(root); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(root, ".refraktal", ".gitignore")); string(b) != "*\n" {
+		t.Fatalf(".gitignore not restored: %q", b)
+	}
+}
+
+// A repository may commit .refraktal, runs or .gitignore as symlinks to files
+// outside it. NewRun must refuse rather than write through them.
+func TestNewRunRefusesSymlinks(t *testing.T) {
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim")
+	os.WriteFile(victim, []byte("keep\n"), 0o644)
+
+	cases := map[string]func(root string){
+		".gitignore": func(root string) {
+			os.Mkdir(filepath.Join(root, ".refraktal"), 0o755)
+			os.Symlink(victim, filepath.Join(root, ".refraktal", ".gitignore"))
+		},
+		".refraktal": func(root string) { os.Symlink(outside, filepath.Join(root, ".refraktal")) },
+		"runs": func(root string) {
+			os.Mkdir(filepath.Join(root, ".refraktal"), 0o755)
+			os.Symlink(outside, filepath.Join(root, ".refraktal", "runs"))
+		},
+	}
+	for name, plant := range cases {
+		root := t.TempDir()
+		plant(root)
+		if _, err := NewRun(root); err == nil {
+			t.Errorf("%s symlink: NewRun did not refuse", name)
+		}
+		if b, _ := os.ReadFile(victim); string(b) != "keep\n" {
+			t.Fatalf("%s symlink: file outside the repo overwritten: %q", name, b)
+		}
+		if entries, _ := os.ReadDir(outside); len(entries) != 1 {
+			t.Fatalf("%s symlink: wrote into the folder outside the repo", name)
+		}
+	}
+}

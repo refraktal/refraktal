@@ -53,6 +53,10 @@ type DoctorOptions struct {
 	Getenv func(string) string
 	// Timeout bounds each harness's handshake. Default 90 s.
 	Timeout time.Duration
+	// Neutral is where each handshake gets an empty session folder, outside
+	// any repository, so a repository's own harness settings and hooks never
+	// run during doctor. Default os.UserCacheDir()/refraktal/doctor.
+	Neutral string
 }
 
 // DoctorReport is what Doctor found.
@@ -180,6 +184,13 @@ func (o *DoctorOptions) defaults() error {
 			return err
 		}
 	}
+	if o.Neutral == "" {
+		cache, err := os.UserCacheDir()
+		if err != nil {
+			return err
+		}
+		o.Neutral = filepath.Join(cache, "refraktal", "doctor")
+	}
 	if o.Harnesses == nil {
 		cache, err := harness.DefaultCacheDir()
 		if err != nil {
@@ -220,9 +231,18 @@ func checkHarness(ctx context.Context, h harness.Harness, o DoctorOptions, run r
 		return c
 	}
 	defer stderr.Close()
+	// An empty folder outside the repository: harnesses load project settings
+	// (and Claude runs project hooks) from the session folder, and doctor must
+	// not run a repository's code.
+	cwd := filepath.Join(o.Neutral, run.ID+"-"+h.Name())
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		c.Status, c.Reason = StatusError, err.Error()
+		return c
+	}
+	defer os.RemoveAll(cwd)
 
 	start := time.Now()
-	child, err := proc.Start(proc.Spec{Argv: l.Argv, Env: l.Env, Dir: o.Root, Stderr: stderr,
+	child, err := proc.Start(proc.Spec{Argv: l.Argv, Env: l.Env, Dir: cwd, Stderr: stderr,
 		LiveDir: o.LiveDir, Labels: map[string]string{"run": run.ID, "harness": h.Name()}})
 	if err != nil {
 		c.Status, c.Reason = StatusUnavailable, err.Error()
@@ -232,7 +252,7 @@ func checkHarness(ctx context.Context, h harness.Harness, o DoctorOptions, run r
 		OnUpdate:       func(u acp.Update) { log.Update(h.Name(), u.SessionID, u.Kind, u.Raw) },
 		OnNotification: func(m string, p json.RawMessage) { log.Notification(h.Name(), m, p) },
 	})
-	c.Status, c.Reason, c.Agent, c.ModeOK = handshake(ctx, client, h, l, o)
+	c.Status, c.Reason, c.Agent, c.ModeOK = handshake(ctx, client, h, l, cwd, o.Timeout)
 	c.HandshakeMs = time.Since(start).Milliseconds()
 	sr := child.Shutdown(5 * time.Second)
 	c.LeftRunning = len(sr.Kill.Alive)
@@ -242,15 +262,15 @@ func checkHarness(ctx context.Context, h harness.Harness, o DoctorOptions, run r
 
 // handshake goes as far as session/new and session/set_mode, and no further:
 // no prompt is sent, so no tokens are spent.
-func handshake(ctx context.Context, client *acp.Client, h harness.Harness, l harness.Launch, o DoctorOptions) (status, reason, agent string, modeOK bool) {
-	ctx, cancel := context.WithTimeout(ctx, o.Timeout)
+func handshake(ctx context.Context, client *acp.Client, h harness.Harness, l harness.Launch, cwd string, timeout time.Duration) (status, reason, agent string, modeOK bool) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	a, err := client.Initialize(ctx)
 	if err != nil {
 		return StatusError, err.Error(), "", false
 	}
 	agent = strings.TrimSpace(a.Info.Name + " " + a.Info.Version)
-	s, err := client.NewSession(ctx, o.Root, l.Meta)
+	s, err := client.NewSession(ctx, cwd, l.Meta)
 	if err != nil {
 		var e *acp.Error
 		if errors.As(err, &e) && (e.Code == -32000 || strings.Contains(strings.ToLower(e.Message), "auth")) {

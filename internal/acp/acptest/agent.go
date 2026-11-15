@@ -20,7 +20,8 @@
 //	auth      as turn, and first sends an auth/status_update carrying an email
 //
 // If ACPTEST_PROMPTS names a file, every session/prompt appends a line to it,
-// so a test can prove that no prompt was sent.
+// so a test can prove that no prompt was sent, and every session/new appends
+// its cwd to the same name plus ".cwd".
 //
 // Message chunks carry the client's answers, so tests can check them: the
 // permission answer as "permission=<raw response>" and the fs answer as
@@ -164,6 +165,12 @@ func (a *agent) handle(m message, line string) {
 		}
 		json.Unmarshal(m.Params, &p)
 		a.cwd = p.Cwd
+		if f := os.Getenv("ACPTEST_PROMPTS"); f != "" { // also record each session folder, for tests
+			if fh, err := os.OpenFile(f+".cwd", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err == nil {
+				fh.WriteString(p.Cwd + "\n")
+				fh.Close()
+			}
+		}
 		a.send(message{ID: m.ID, Result: obj{"sessionId": "fake-1",
 			"modes": obj{"currentModeId": "default", "availableModes": []obj{{"id": "default", "name": "Default"}}}}})
 		a.update(obj{"sessionUpdate": "available_commands_update", "availableCommands": []obj{{"name": "review", "description": "Review"}}})
