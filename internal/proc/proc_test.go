@@ -326,8 +326,9 @@ func TestTrackerKeepsAReparentedChildOfATrackedLeader(t *testing.T) {
 			t.Fatal("background child was not reparented")
 		}
 	}
-	// The real tracker polls continually; give it a few polls here too (one
-	// poll alone failed once on the macOS CI runner, never locally).
+	// The real tracker polls continually; give it a few polls here too. This
+	// has failed intermittently on the macOS CI runner, never locally; the
+	// failure message prints what ps and the tracker saw.
 	for i := 0; ; i++ {
 		if err := c.tracker.Poll(); err != nil {
 			t.Fatal(err)
@@ -336,7 +337,9 @@ func TestTrackerKeepsAReparentedChildOfATrackedLeader(t *testing.T) {
 			break
 		}
 		if i == 10 {
-			t.Fatalf("reparented child %d not tracked after %d polls: %v", bg, i+1, pids(c.Tracked()))
+			all, _ := List()
+			t.Fatalf("reparented child %d not tracked after %d polls: tracked %+v; now: shell %+v, child %+v; test pgid %d",
+				bg, i+1, c.Tracked(), all[shell], all[bg], syscall.Getpgrp())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
