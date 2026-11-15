@@ -78,25 +78,27 @@ type RunOptions struct {
 
 // RunResult is what Run did.
 type RunResult struct {
-	Run        string             `json:"run"` // run folder, relative to the repository
-	Harness    string             `json:"harness"`
-	Outcome    string             `json:"outcome"`
-	StopReason string             `json:"stop_reason,omitempty"`
-	Reply      string             `json:"reply,omitempty"`
-	Files      []string           `json:"files,omitempty"`    // changed paths
-	Branch     string             `json:"branch,omitempty"`   // when the worktree is kept
-	Worktree   string             `json:"worktree,omitempty"` // when the worktree is kept
-	MCP        string             `json:"mcp,omitempty"`
-	Allowed    int                `json:"permissions_allowed"`
-	Denied     int                `json:"permissions_denied"`
-	Usage      *acp.Usage         `json:"usage,omitempty"`
-	Cost       *acp.Cost          `json:"cost,omitempty"` // as the harness reported it (Claude: cumulative for the session)
-	Model      string             `json:"model,omitempty"`
-	Budget     budget.Summary     `json:"budget"`
-	Settlement *budget.Settlement `json:"settlement,omitempty"`
-	Route      *route.Result      `json:"route,omitempty"` // how the harness was chosen, when the router chose it
-	Notices    []string           `json:"notices,omitempty"`
-	Error      string             `json:"error,omitempty"`
+	Run         string             `json:"run"` // run folder, relative to the repository
+	Harness     string             `json:"harness"`
+	Outcome     string             `json:"outcome"`
+	StopReason  string             `json:"stop_reason,omitempty"`
+	Reply       string             `json:"reply,omitempty"`
+	Files       []string           `json:"files,omitempty"`    // changed paths
+	Branch      string             `json:"branch,omitempty"`   // when the worktree is kept
+	Worktree    string             `json:"worktree,omitempty"` // when the worktree is kept
+	MCP         string             `json:"mcp,omitempty"`
+	Allowed     int                `json:"permissions_allowed"`
+	Denied      int                `json:"permissions_denied"`
+	Usage       *acp.Usage         `json:"usage,omitempty"`
+	Cost        *acp.Cost          `json:"cost,omitempty"` // as the harness reported it (Claude: cumulative for the session)
+	Model       string             `json:"model,omitempty"`
+	Budget      budget.Summary     `json:"budget"`
+	Settlement  *budget.Settlement `json:"settlement,omitempty"`
+	Route       *route.Result      `json:"route,omitempty"` // how the harness was chosen, when the router chose it
+	Notices     []string           `json:"notices,omitempty"`
+	Error       string             `json:"error,omitempty"`
+	LeftRunning int                `json:"left_running"` // processes still running after shutdown
+	Unknown     int                `json:"unknown"`      // processes whose cleanup could not be confirmed
 }
 
 // ExitCode maps the outcome to the exit codes in docs/DESIGN.md.
@@ -337,7 +339,12 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 	log.Event("prices", map[string]any{"source": prices.Source, "warning": errString(perr0)})
 	if cerr != nil || cleanup.Dead > 0 {
-		log.Event("cleanup", map[string]any{"dead": cleanup.Dead, "killed": len(cleanup.Kill.Killed), "error": fmt.Sprint(cerr)})
+		log.Event("cleanup", map[string]any{"dead": cleanup.Dead, "killed": len(cleanup.Kill.Killed),
+			"alive": len(cleanup.Kill.Alive), "unknown": len(cleanup.Kill.Unknown), "errors": cleanup.Errors, "error": fmt.Sprint(cerr)})
+		if len(cleanup.Kill.Alive) > 0 || len(cleanup.Kill.Unknown) > 0 {
+			notice(fmt.Sprintf("cleanup incomplete: %d still running, %d unknown; live records kept for retry",
+				len(cleanup.Kill.Alive), len(cleanup.Kill.Unknown)))
+		}
 	}
 
 	if err := os.MkdirAll(o.WorktreeDir, 0o755); err != nil {
@@ -382,7 +389,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		return res, err
 	}
 	defer scratchRoot.Close()
-	// Durable events carry an error's code and digest only; harness error
+	// Durable events carry an error's code and length bucket only; harness error
 	// text can hold account details, so the raw text goes to the gitignored
 	// stderr capture beside the harness's own.
 	errEvent := func(code, raw string) map[string]any {
@@ -421,11 +428,19 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 			}
 		}})
 	res.MCP = s.launch.MCP
+	closeSession := func(grace time.Duration) proc.ShutdownReport {
+		sr := s.close(log, h.Name(), grace)
+		res.LeftRunning, res.Unknown = shutdownCounts(sr)
+		if res.LeftRunning > 0 || res.Unknown > 0 {
+			notice(fmt.Sprintf("shutdown incomplete: %d still running, %d unknown; live record kept for retry", res.LeftRunning, res.Unknown))
+		}
+		return sr
+	}
 	if res.MCP == harness.MCPInherit {
 		notice(h.Name() + " uses your own MCP servers and plugins (mcp: inherit in the config)")
 	}
 	if err != nil {
-		s.close(log, h.Name(), 5*time.Second)
+		closeSession(5 * time.Second)
 		res.Error = fmt.Sprintf("%s: %v", statusOf(err), err)
 		if setupExpired() {
 			// --mins ran out while the harness was starting: a spent budget.
@@ -443,7 +458,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 
 	if err := ledger.BeginTurn(grant); err != nil {
-		s.close(log, h.Name(), 5*time.Second)
+		closeSession(5 * time.Second)
 		removeWorktree()
 		ledger.Settle(grant, false)
 		res.Outcome, res.Error, res.Budget = RunExhausted, err.Error(), ledger.Summary()
@@ -454,7 +469,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	turn, perr := s.client.Prompt(tctx, s.id, o.Task)
 	timedOut := errors.Is(tctx.Err(), context.DeadlineExceeded)
 	cancel()
-	sr := s.close(log, h.Name(), 10*time.Second)
+	sr := closeSession(10 * time.Second)
 	res.Model = cmpOr(turn.Model, s.model)
 	// A turn is cancelled if we sent session/cancel or the harness ended it
 	// as cancelled on its own (Codex does after a denial).
@@ -477,7 +492,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	res.StopReason, res.Usage, res.Cost = turn.StopReason, turn.Usage, turn.Cost
 	log.Event("turn", map[string]any{"stop_reason": turn.StopReason, "cancelled": turn.Cancelled, "wall_ms": turn.Wall.Milliseconds(),
 		"usage": turn.Usage, "cost": turn.Cost, "last_used": turn.LastUsed, "error": errEvent(turnErrorCode(perr), errString(perr)),
-		"left_running": len(sr.Kill.Alive), "exited_on_its_own": sr.ExitedOnItsOwn})
+		"left_running": res.LeftRunning, "unknown": res.Unknown, "exited_on_its_own": sr.ExitedOnItsOwn})
 
 	// Retain the result even after cancellation, with a bounded collection.
 	collectCtx, cancelCollect := context.WithTimeout(context.WithoutCancel(ctx), safegit.OperationTimeout)
@@ -530,7 +545,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 	log.Event("run_end", map[string]any{"outcome": res.Outcome, "files": res.Files, "branch": res.Branch,
 		"allowed": res.Allowed, "denied": res.Denied, "error": errEvent(res.Outcome, res.Error), "budget": res.Budget, "settlement": res.Settlement,
-		"swept": len(sr.Swept.Killed)})
+		"swept": len(sr.Swept.Killed), "left_running": res.LeftRunning, "unknown": res.Unknown})
 	return res, nil
 }
 

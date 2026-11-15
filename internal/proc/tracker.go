@@ -2,6 +2,8 @@ package proc
 
 import (
 	"cmp"
+	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"syscall"
@@ -108,6 +110,7 @@ type KillReport struct {
 	Gone    []Proc `json:"gone"`    // had already exited
 	Changed []Proc `json:"changed"` // its PID now belongs to a different process: left alone
 	Alive   []Proc `json:"alive"`   // sent SIGKILL but still running a second later
+	Unknown []Proc `json:"unknown"` // lookup failed: identity or exit could not be confirmed
 }
 
 // Kill sends SIGKILL to each process that is still running as recorded: same
@@ -115,7 +118,8 @@ type KillReport struct {
 // window for a PID reuse is as small as one ps call. A process whose PID has
 // been reused is not touched. Kill never targets this process or PID 1.
 func Kill(procs []Proc) (KillReport, error) {
-	r := KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}}
+	r := KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}, Unknown: []Proc{}}
+	var lookupErr error
 	self := syscall.Getpid()
 	for _, p := range procs {
 		if p.PID <= 1 || p.PID == self {
@@ -124,8 +128,11 @@ func Kill(procs []Proc) (KillReport, error) {
 		}
 		now, err := recheckPID(p.PID)
 		switch {
-		case err != nil: // not listed: exited (or a zombie)
+		case errors.Is(err, ErrProcessGone):
 			r.Gone = append(r.Gone, p)
+		case err != nil:
+			r.Unknown = append(r.Unknown, p)
+			lookupErr = errors.Join(lookupErr, fmt.Errorf("process %d: %w", p.PID, err))
 		case !now.Same(p):
 			r.Changed = append(r.Changed, p)
 		default:
@@ -134,12 +141,14 @@ func Kill(procs []Proc) (KillReport, error) {
 		}
 	}
 	if len(r.Killed) == 0 {
-		return r, nil
+		return r, lookupErr
 	}
 	for deadline := time.Now().Add(time.Second); ; time.Sleep(50 * time.Millisecond) {
 		after, err := List()
 		if err != nil {
-			return r, err
+			r.Alive = r.Alive[:0]
+			r.Unknown = append(r.Unknown, r.Killed...)
+			return r, errors.Join(lookupErr, err)
 		}
 		r.Alive = r.Alive[:0]
 		for _, p := range r.Killed {
@@ -148,7 +157,7 @@ func Kill(procs []Proc) (KillReport, error) {
 			}
 		}
 		if len(r.Alive) == 0 || time.Now().After(deadline) {
-			return r, nil
+			return r, lookupErr
 		}
 	}
 }

@@ -142,7 +142,23 @@ func (s *session) close(log *runlog.Log, name string, grace time.Duration) proc.
 	r := s.child.Shutdown(grace)
 	log.Procs("tracked_"+name, r.Tracked)
 	log.Procs("killed_"+name, r.Kill.Killed)
+	alive, unknown := shutdownCounts(r)
+	log.Event("shutdown", map[string]any{"harness": name, "left_running": alive, "unknown": unknown})
 	return r
+}
+
+// shutdownCounts counts each PID once across the tree kill and session sweeps.
+func shutdownCounts(r proc.ShutdownReport) (alive, unknown int) {
+	a, u := map[int]bool{}, map[int]bool{}
+	for _, kr := range []proc.KillReport{r.Kill, r.Swept} {
+		for _, p := range kr.Alive {
+			a[p.PID] = true
+		}
+		for _, p := range kr.Unknown {
+			u[p.PID] = true
+		}
+	}
+	return len(a), len(u)
 }
 
 func statusOf(err error) string {

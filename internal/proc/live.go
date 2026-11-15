@@ -48,18 +48,18 @@ func writeRecord(path string, r Record) error {
 type CleanupReport struct {
 	Records int        `json:"records"` // live records found
 	Live    int        `json:"live"`    // owned by a Refraktal process that is still running: left alone
-	Dead    int        `json:"dead"`    // owned by a process that is gone: cleaned up and removed
+	Dead    int        `json:"dead"`    // owned by a process that is gone: cleanup attempted
 	Kill    KillReport `json:"kill"`    // what happened to the processes the dead records listed
 	Errors  []string   `json:"errors"`
 }
 
 // CleanLeftovers kills the processes listed in records whose owner is no
-// longer running, then removes those records. Each process is killed only if
-// it still matches its record (PID, start time and command line). It never
-// sweeps by session ID: a dead run's sessions may have emptied and their IDs
-// been reused. Session members a run saw are in its record by identity.
+// longer running, then removes records only when cleanup is confirmed. Each
+// process is killed only if it still matches its record (PID and start time).
+// It never sweeps by session ID: a dead run's sessions may have emptied and
+// their IDs been reused. Session members a run saw are in its record by identity.
 func CleanLeftovers(dir string) (CleanupReport, error) {
-	r := CleanupReport{Kill: KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}}, Errors: []string{}}
+	r := CleanupReport{Kill: KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}, Unknown: []Proc{}}, Errors: []string{}}
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return r, nil
@@ -92,15 +92,16 @@ func CleanLeftovers(dir string) (CleanupReport, error) {
 		}
 		r.Dead++
 		kr, err := Kill(append(rec.Tracked, rec.Child))
-		if err != nil {
-			r.Errors = append(r.Errors, fmt.Sprintf("%s: %v", e.Name(), err))
-			continue
-		}
 		r.Kill.Killed = append(r.Kill.Killed, kr.Killed...)
 		r.Kill.Gone = append(r.Kill.Gone, kr.Gone...)
 		r.Kill.Changed = append(r.Kill.Changed, kr.Changed...)
 		r.Kill.Alive = append(r.Kill.Alive, kr.Alive...)
-		if len(kr.Alive) == 0 {
+		r.Kill.Unknown = append(r.Kill.Unknown, kr.Unknown...)
+		if err != nil {
+			r.Errors = append(r.Errors, fmt.Sprintf("%s: %v", e.Name(), err))
+			continue
+		}
+		if len(kr.Alive) == 0 && len(kr.Unknown) == 0 {
 			os.Remove(path)
 		}
 	}

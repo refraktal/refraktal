@@ -2,7 +2,9 @@ package proc
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -38,7 +40,11 @@ func sessionMembers(sid int) (members []Proc, occupied bool, err error) {
 		if p.UID != uid || pid == self || pid <= 1 {
 			continue
 		}
-		if s, err := getsid(pid); err == nil && s == sid {
+		s, err := getsid(pid)
+		if err != nil && !errors.Is(err, syscall.ESRCH) {
+			return nil, true, fmt.Errorf("session lookup for process %d: %w", pid, err)
+		}
+		if err == nil && s == sid {
 			cand = append(cand, pid)
 		}
 	}
@@ -70,13 +76,14 @@ func sessionMembers(sid int) (members []Proc, occupied bool, err error) {
 // reused, from the original: callers sweep only sessions they have never seen
 // empty (Child polls them while it runs).
 func SweepSession(leader Proc) (KillReport, error) {
-	r := KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}}
+	r := KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}, Unknown: []Proc{}}
 	if leader.PID <= 1 {
 		return r, nil
 	}
 	for pass := 0; pass < 3; pass++ { // a member may fork while the sweep runs
 		all, err := List()
 		if err != nil {
+			r.Unknown = append(r.Unknown, leader)
 			return r, err
 		}
 		if now, ok := all[leader.PID]; ok && now.Start != leader.Start {
@@ -84,6 +91,7 @@ func SweepSession(leader Proc) (KillReport, error) {
 		}
 		members, _, err := sessionOf(leader)
 		if err != nil {
+			r.Unknown = append(r.Unknown, leader)
 			return r, err
 		}
 		if len(members) == 0 {
@@ -94,6 +102,7 @@ func SweepSession(leader Proc) (KillReport, error) {
 		r.Gone = append(r.Gone, kr.Gone...)
 		r.Changed = append(r.Changed, kr.Changed...)
 		r.Alive = kr.Alive
+		r.Unknown = append(r.Unknown, kr.Unknown...)
 		if err != nil {
 			return r, err
 		}

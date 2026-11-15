@@ -128,13 +128,18 @@ func (l *Log) Procs(event string, procs []proc.Proc) error {
 }
 
 // ErrorField is how an error from a harness goes into a durable event: a
-// structured code and a digest of the text, never the text itself, which can
-// carry account details. Keep the raw text in the gitignored stderr capture.
+// structured code and a byte-length bucket, never the text or its digest,
+// which can reveal account details. Buckets round up to a power of two,
+// capped at 64 KiB. Keep the raw text in the gitignored stderr capture.
 func ErrorField(code, raw string) map[string]any {
 	if raw == "" {
 		return nil
 	}
-	return map[string]any{"code": code, "digest": Of([]byte(raw))}
+	bucket := 1
+	for bucket < len(raw) && bucket < 64<<10 {
+		bucket *= 2
+	}
+	return map[string]any{"code": code, "bytes_bucket": bucket}
 }
 
 // AppendRaw appends an error's raw text to the stderr capture file name,
