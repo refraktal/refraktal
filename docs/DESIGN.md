@@ -239,6 +239,16 @@ process-group kill does not reach them.
     process, the ID may name an unrelated session and nothing is swept.
   - **Known limit:** a process that calls `setsid()` itself, as
     pseudo-terminal launchers do, leaves the session and escapes.
+  - **Open (M4 open test, contradicts "nothing survives"): Claude escapes
+    the session.** Claude's Bash tool starts each command's shell as the
+    leader of a new session (seen live: the tool shell's session ID equals
+    its own PID, while the bundled `claude` and the adapter are in the
+    harness's session). So whatever a Claude tool command backgrounds is
+    outside the harness's session, and the `late.txt` test still left
+    `late.txt` behind on Claude (the `sleep` was not tracked, the tree kill
+    did not see it, the sweep found nothing). Codex and Antigravity left
+    nothing: their tool runners end the command's background children.
+    Not decided how to close it.
   - Why not the environment: the first plan tagged children with
     `REFRAKTAL_RUN` and swept by environment. On macOS 27 a process can read
     only its own environment (M4 open test: another process of the same user
