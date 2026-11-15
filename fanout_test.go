@@ -610,3 +610,17 @@ func TestTestFileChangesAreFlagged(t *testing.T) {
 		t.Errorf("flagged with no check: %q", why)
 	}
 }
+
+// (7) A judge whose turn did not end normally picks no winner, even if its
+// reply holds a valid answer: the checks ranking decides, with a notice.
+func TestFailedJudgeTurnFallsBackToTheChecksRanking(t *testing.T) {
+	for _, judge := range []string{"stop=max_tokens\nWINNER: B", "stop=cancelled\nWINNER: B", "stop=error\nWINNER: B"} {
+		r := newRunRig(t)
+		r.checkConfig(t, "")
+		res := r.fan(t, []harness.Harness{writer("claude", "out.txt=good-1", "ACPTEST_JUDGE="+judge), writer("codex", "out.txt=good-2")}, nil)
+		if res.Outcome != RunApplied || res.Harness != "claude" || res.Verdict.Method != "checks" ||
+			!strings.Contains(strings.Join(res.Notices, "\n"), "judge did not finish") {
+			t.Errorf("%q: %+v verdict %+v notices %v", judge, res.Outcome, res.Verdict, res.Notices)
+		}
+	}
+}

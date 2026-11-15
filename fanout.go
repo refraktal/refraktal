@@ -565,6 +565,27 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 			res.Verdict = &v
 			finish(RunExhausted, "budget exhausted before the judge could decide a close call ("+j.Error+")", true)
 			return
+		case j.Outcome == candFailed:
+			// Cancelled, max_tokens or an ACP error: its answer does not
+			// count. The checks ranking decides; a flagged candidate cannot
+			// win that way.
+			why := cmpOr(j.StopReason, "error")
+			for _, c := range close {
+				if c.Flagged == "" {
+					winner = c
+					break
+				}
+			}
+			if winner == nil {
+				v.Method, v.Reason = "none", "the judge did not finish ("+why+") and no candidate in the close call can win on checks"
+				res.Verdict = &v
+				e.notice(v.Reason)
+				finish(RunNoWinner, v.Reason, true)
+				return
+			}
+			v.Winner, v.Method = winner.Harness, "checks"
+			v.Reason = "the judge did not finish (" + why + "); the checks ranking decides"
+			e.notice(fmt.Sprintf("the judge did not finish (%s): falling back to the checks ranking, which puts %s first", why, winner.Harness))
 		case w == "" || w == "none":
 			v.Method = "judge"
 			if w == "none" {
@@ -575,13 +596,14 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 			res.Verdict = &v
 			finish(RunNoWinner, v.Reason, true)
 			return
-		}
-		for _, c := range close {
-			if c.Label == w {
-				winner = c
+		default:
+			for _, c := range close {
+				if c.Label == w {
+					winner = c
+				}
 			}
+			v.Winner, v.Method, v.Reason = winner.Harness, "judge", "the judge chose candidate "+w+" in a close call"
 		}
-		v.Winner, v.Method, v.Reason = winner.Harness, "judge", "the judge chose candidate "+w+" in a close call"
 	}
 	res.Verdict = &v
 	e.log.Event("verdict", map[string]any{"verdict": v})

@@ -30,7 +30,8 @@
 // In turn mode, ACPTEST_WRITE ("path=content|...") writes files in the cwd,
 // each after an edit permission request it must be allowed. A prompt that
 // starts "You are judging" is answered with ACPTEST_JUDGE when set: the reply
-// text, or "hang" to wait for session/cancel.
+// text, or "hang" to wait for session/cancel; "stop=<reason>\n<text>" ends
+// the turn with that stop reason, and stop=error with an ACP error.
 //
 // session/new reports the model in ACPTEST_MODEL (default fake-model). With
 // ACPTEST_NOCOST set, the turn reports tokens but no cost, as Codex and
@@ -371,9 +372,17 @@ func (a *agent) judge(id json.RawMessage, reply string) {
 		a.send(message{ID: id, Result: obj{"stopReason": "cancelled"}})
 		return
 	}
+	stop := "end_turn"
+	if rest, ok := strings.CutPrefix(reply, "stop="); ok { // "stop=<reason>\n<reply>"
+		stop, reply, _ = strings.Cut(rest, "\n")
+	}
 	a.chunk(reply)
+	if stop == "error" {
+		a.send(message{ID: id, Error: obj{"code": -32603, "message": "internal error"}})
+		return
+	}
 	a.update(obj{"sessionUpdate": "usage_update", "used": 700, "size": 200000, "cost": obj{"amount": 0.002, "currency": "USD"}})
-	a.send(message{ID: id, Result: obj{"stopReason": "end_turn", "usage": obj{"totalTokens": 700, "inputTokens": 600, "outputTokens": 100}}})
+	a.send(message{ID: id, Result: obj{"stopReason": stop, "usage": obj{"totalTokens": 700, "inputTokens": 600, "outputTokens": 100}}})
 }
 
 func (a *agent) permission() string {
