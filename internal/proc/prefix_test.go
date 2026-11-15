@@ -99,6 +99,9 @@ func TestShutdownSweepsRecordedSessions(t *testing.T) {
 		t.Fatal("the tool command ran in the harness's session; the test needs a session of its own")
 	}
 	r := c.Shutdown(2 * time.Second)
+	if slices.Contains(pids(r.Tracked), bg) {
+		t.Fatalf("the tracker saw the background child; the test needs it untracked: %+v", r.Tracked)
+	}
 	if !slices.Contains(pids(r.Swept.Killed), bg) || running(bg) || r.Err != "" {
 		t.Fatalf("background child %d of a recorded session survived: %+v", bg, r)
 	}
