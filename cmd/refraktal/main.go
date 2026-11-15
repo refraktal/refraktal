@@ -90,11 +90,11 @@ func doctor(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	harnessName := fs.String("harness", "", "run on this harness: claude, codex or agy")
+	harnessName := fs.String("harness", "", "run on this harness: claude, codex or agy (default: the router chooses)")
 	noApply := fs.Bool("no-apply", false, "leave the result on the worktree's branch")
 	asJSON := fs.Bool("json", false, "JSONL on stdout")
-	fan := fs.Int("fan", 0, "fan-out width (not yet: M6)")
-	dry := fs.Bool("dry", false, "plan and route only (not yet: M5)")
+	fan := fs.Int("fan", 0, "fan-out width: 1 for one harness (wider fan-out arrives in M6)")
+	dry := fs.Bool("dry", false, "plan and route only: no worktree, no harness")
 	d := budget.Defaults
 	usd := fs.Float64("usd", d.USD, "dollar budget, checked before each turn (notional on subscriptions)")
 	turns := fs.Int("turns", d.Turns, "prompts Refraktal may send to harnesses")
@@ -112,8 +112,8 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 		args = fs.Args()[1:]
 	}
 	switch {
-	case *fan != 0, *dry:
-		fmt.Fprintln(stderr, "refraktal run: --fan and --dry are not implemented yet")
+	case *fan > 1 || *fan < 0:
+		fmt.Fprintln(stderr, "refraktal run: fan-out to several harnesses arrives in M6; use --fan 1 or leave it to the router")
 		return refraktal.ExitNothingUsable
 	case math.IsNaN(*usd) || math.IsInf(*usd, 0) || math.IsNaN(*mins) || math.IsInf(*mins, 0):
 		fmt.Fprintln(stderr, "refraktal run: --usd and --mins must be finite numbers")
@@ -123,9 +123,6 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 		return refraktal.ExitNothingUsable
 	case *usd < 0 || *turns < 0 || *mins <= 0:
 		fmt.Fprintln(stderr, "refraktal run: --usd and --turns must not be negative, and --mins must be more than 0")
-		return refraktal.ExitNothingUsable
-	case *harnessName == "":
-		fmt.Fprintln(stderr, "refraktal run: --harness is required until routing lands")
 		return refraktal.ExitNothingUsable
 	case strings.Contains(*harnessName, ","):
 		fmt.Fprintln(stderr, "refraktal run: one harness at a time until fan-out lands")
@@ -139,6 +136,7 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 	enc := json.NewEncoder(stdout)
 	lim := budget.Limits{USD: *usd, Turns: *turns, Wall: time.Duration(*mins * float64(time.Minute)), Depth: *depth}
 	res, err := refraktal.Run(ctx, refraktal.RunOptions{Task: task, Harness: *harnessName, NoApply: *noApply, Budget: &lim,
+		Dry: *dry, Fan: *fan,
 		ShellPrefix: selfPath(),
 		OnNotice: func(n string) {
 			if *asJSON {
@@ -157,6 +155,15 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 			refraktal.RunResult
 			Exit int `json:"exit"`
 		}{"result", res, res.ExitCode()})
+		return res.ExitCode()
+	}
+	if res.Outcome == refraktal.RunPlanned {
+		fmt.Fprintf(stdout, "plan: run %s", res.Harness)
+		if rt := res.Route; rt != nil {
+			d := rt.Decision
+			fmt.Fprintf(stdout, " (router: %s, task kind %s, harness confidence %.2f, policy %s)", d.Decider, d.TaskKind.Value, d.Harness.Confidence, rt.Outcome.Action)
+		}
+		fmt.Fprintf(stdout, "\nrun folder: %s\n", res.Run)
 		return res.ExitCode()
 	}
 	if res.Reply != "" {

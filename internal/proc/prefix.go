@@ -161,7 +161,7 @@ func recordSession(path string) error {
 func listPID(pid int) (Proc, error) {
 	cmd := exec.Command("ps", "-ww", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "uid=", "-o", "stat=",
 		"-o", "lstart=", "-o", "command=", "-p", strconv.Itoa(pid))
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	cmd.Env = append(ScrubEnv(os.Environ()), "LC_ALL=C")
 	out, err := cmd.Output()
 	if err != nil {
 		return Proc{}, fmt.Errorf("ps -p %d: %w", pid, err)

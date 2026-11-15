@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -171,9 +173,10 @@ func TestDoctorDeciderAndJSON(t *testing.T) {
 	r := newRig(t)
 	os.MkdirAll(r.root, 0o755)
 	rep, err := Doctor(context.Background(), DoctorOptions{Root: r.root, LiveDir: r.live, Neutral: r.neutral,
-		ConfigPath: filepath.Join(r.root, "no-config.json"),
-		Harnesses:  []harness.Harness{fake{name: "claude", agentMode: "auth", mcp: harness.MCPIsolated, prompts: r.prompts}},
-		Getenv:     func(k string) string { return map[string]string{"GEMINI_API_KEY": "secret-value"}[k] }})
+		ConfigPath:      filepath.Join(r.root, "no-config.json"),
+		Harnesses:       []harness.Harness{fake{name: "claude", agentMode: "auth", mcp: harness.MCPIsolated, prompts: r.prompts}},
+		Getenv:          func(k string) string { return map[string]string{"GEMINI_API_KEY": "secret-value"}[k] },
+		DeciderEndpoint: deciderEndpoint(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,5 +215,35 @@ func TestDefaultRootRefusesTemp(t *testing.T) {
 	_, err := Doctor(context.Background(), DoctorOptions{LiveDir: t.TempDir(), Harnesses: []harness.Harness{}})
 	if err == nil || !strings.Contains(err.Error(), "temporary") {
 		t.Fatalf("want a refusal for a run folder under a temp folder, got %v", err)
+	}
+}
+
+// deciderEndpoint is a local Decisions API answering with a recorded response.
+func deciderEndpoint(t *testing.T) string {
+	srv, _ := geminiServer(t)
+	return srv.URL
+}
+
+// The decider check: no key means fallback; an unreachable API means
+// fallback with the reason; a key in the repository's .env is found.
+func TestDoctorDeciderCheck(t *testing.T) {
+	r := newRig(t)
+	os.MkdirAll(r.root, 0o755)
+	opts := DoctorOptions{Root: r.root, LiveDir: r.live, Neutral: r.neutral, ConfigPath: filepath.Join(r.root, "none.json"),
+		Harnesses: []harness.Harness{}, Getenv: func(string) string { return "" }}
+	if d := checkDecider(context.Background(), opts); d.Kind != "fallback" || !strings.Contains(d.Reason, "not set") {
+		t.Fatalf("no key: %+v", d)
+	}
+	exec.Command("git", "-C", r.root, "init", "-q").Run() // .env counts only in a git work tree, untracked
+	os.WriteFile(filepath.Join(r.root, ".env"), []byte("GEMINI_API_KEY=from-dotenv\n"), 0o600)
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "down", 503) }))
+	defer down.Close()
+	opts.DeciderEndpoint = down.URL
+	if d := checkDecider(context.Background(), opts); d.Kind != "fallback" || d.KeySource != ".env" || !strings.Contains(d.Reason, "unreachable") {
+		t.Fatalf("unreachable: %+v", d)
+	}
+	opts.DeciderEndpoint = deciderEndpoint(t)
+	if d := checkDecider(context.Background(), opts); d.Kind != "gemini" || d.KeySource != ".env" || d.LatencyMS <= 0 {
+		t.Fatalf("reachable: %+v", d)
 	}
 }

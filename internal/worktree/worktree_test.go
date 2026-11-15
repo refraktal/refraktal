@@ -176,3 +176,18 @@ func TestPoisonedConfigRunsNothing(t *testing.T) {
 		t.Fatal("a command from the poisoned git config ran")
 	}
 }
+
+// 1. Refraktal's own git commands never get an API key or GIT_* variables.
+func TestGitGetsNoAPIKeyOrGitVars(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "must-not-leak")
+	t.Setenv("GIT_DIR", "/elsewhere")
+	bin := t.TempDir()
+	log := filepath.Join(bin, "log")
+	os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nenv >> "+log+"\necho /x\n"), 0o755)
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	Root(context.Background(), t.TempDir())
+	b, _ := os.ReadFile(log)
+	if strings.Contains(string(b), "must-not-leak") || strings.Contains(string(b), "GIT_DIR=") {
+		t.Fatalf("git env:\n%s", b)
+	}
+}

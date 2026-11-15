@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -18,7 +17,9 @@ import (
 	"refraktal.dev/refraktal/internal/config"
 	"refraktal.dev/refraktal/internal/harness"
 	"refraktal.dev/refraktal/internal/proc"
+	"refraktal.dev/refraktal/internal/route"
 	"refraktal.dev/refraktal/internal/runlog"
+	"refraktal.dev/refraktal/internal/safegit"
 )
 
 // Exit codes, from docs/DESIGN.md.
@@ -55,6 +56,8 @@ type DoctorOptions struct {
 	Timeout time.Duration
 	// ConfigPath is the config file. Default os.UserConfigDir()/refraktal/config.json.
 	ConfigPath string
+	// DeciderEndpoint overrides the Decisions API endpoint, for tests.
+	DeciderEndpoint string
 	// ShellPrefix: as RunOptions.ShellPrefix.
 	ShellPrefix string
 	// Neutral is where each handshake gets an empty session folder, outside
@@ -99,9 +102,11 @@ type HarnessCheck struct {
 
 // DeciderCheck says which routing decider a run would use.
 type DeciderCheck struct {
-	Kind   string `json:"kind"` // gemini or fallback
-	Model  string `json:"model,omitempty"`
-	Reason string `json:"reason,omitempty"`
+	Kind      string  `json:"kind"` // gemini or fallback
+	Model     string  `json:"model,omitempty"`
+	KeySource string  `json:"key_source,omitempty"` // environment or .env; never the key
+	LatencyMS float64 `json:"latency_ms,omitempty"` // the probe decision's round trip
+	Reason    string  `json:"reason,omitempty"`     // why routing would fall back
 }
 
 // CleanupCheck counts what was cleaned up from dead runs.
@@ -146,10 +151,7 @@ func Doctor(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 	}
 	log.Procs("cleanup_killed", cr.Kill.Killed)
 
-	rep.Decider = DeciderCheck{Kind: "fallback", Reason: "GEMINI_API_KEY not set"}
-	if o.Getenv("GEMINI_API_KEY") != "" {
-		rep.Decider = DeciderCheck{Kind: "gemini", Model: "gemini-decision-1"}
-	}
+	rep.Decider = checkDecider(ctx, o)
 
 	cfg, err := config.Load(o.ConfigPath)
 	if err != nil {
@@ -225,7 +227,7 @@ func (o *DoctorOptions) defaults() error {
 // defaultRoot is the top of the git repository containing the current
 // directory, or the current directory itself.
 func defaultRoot() (string, error) {
-	if out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
+	if out, err := safegit.Command(context.Background(), ".", "rev-parse", "--show-toplevel").Output(); err == nil {
 		if top := strings.TrimSpace(string(out)); top != "" {
 			return top, nil
 		}
@@ -328,7 +330,7 @@ func WriteDoctorText(w io.Writer, r DoctorReport) {
 		}
 	}
 	if r.Decider.Kind == "gemini" {
-		p("%-8s %-11s%s\n", "decider", "gemini", "GEMINI_API_KEY set, model "+r.Decider.Model)
+		p("%-8s %-11s%s\n", "decider", "gemini", fmt.Sprintf("model %s, key from %s, probe %.0f ms", r.Decider.Model, r.Decider.KeySource, r.Decider.LatencyMS))
 	} else {
 		p("%-8s %-11s%s\n", "decider", "fallback", r.Decider.Reason)
 	}
@@ -349,4 +351,20 @@ func WriteDoctorText(w io.Writer, r DoctorReport) {
 		p("\nusable: %s\n", strings.Join(slices.Clone(r.Usable), ", "))
 	}
 	p("run folder: %s\n", r.Run)
+}
+
+// checkDecider reports which decider routing would use: with a key (from the
+// environment or the repository's .env), one probe decision on a trivial task
+// shows whether the Decisions API answers within its timeout.
+func checkDecider(ctx context.Context, o DoctorOptions) DeciderCheck {
+	key, source := route.LoadKey(o.Root, o.Getenv)
+	if key == "" {
+		return DeciderCheck{Kind: "fallback", Reason: route.KeyEnv + " not set (environment or .env)"}
+	}
+	d, err := route.Gemini{APIKey: key, Endpoint: o.DeciderEndpoint}.Decide(ctx,
+		route.Input{Task: "Fix a typo in the README.", Repo: route.RepoContext{Languages: []string{"go"}, Files: 10}})
+	if err != nil {
+		return DeciderCheck{Kind: "fallback", KeySource: source, Reason: "Decisions API unreachable: " + err.Error()}
+	}
+	return DeciderCheck{Kind: "gemini", Model: d.Model, KeySource: source, LatencyMS: d.LatencyMS}
 }
