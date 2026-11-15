@@ -5,11 +5,17 @@
 // command touches, and a harness decides by its own rules which actions to
 // ask about at all.
 //
-//   - Reads, searches and other non-mutating tools: allowed.
+//   - Reads, searches, fetches and thinking: allowed.
 //   - File edits, deletes and moves: allowed only when every path is inside
 //     the child's worktree.
 //   - Shell commands: allowed, unless they match the deny-list (pushing,
-//     publishing, releasing) or name a path outside the worktree.
+//     publishing, releasing, changing git config) anywhere in the command,
+//     name a path outside the worktree, or expand a variable inside a path.
+//   - Any other tool kind: allowed only if it names paths and all of them
+//     are inside the worktree; otherwise denied.
+//
+// Known limits: a command built at run time (an interpreter's code, $(...),
+// a script file the child wrote) is not seen through.
 package policy
 
 import (
@@ -41,16 +47,20 @@ type Policy struct {
 // Each is a program followed by a subcommand, matched after the program's
 // leading flags.
 var denied = [][]string{
-	{"git", "push"},
+	{"git", "push"}, {"git", "config"}, // git config could set core.fsmonitor and the like in the shared .git
 	{"gh", "release"}, {"gh", "pr", "merge"}, {"gh", "repo", "delete"},
 	{"npm", "publish"}, {"pnpm", "publish"}, {"yarn", "publish"}, {"yarn", "npm", "publish"}, {"bun", "publish"},
 	{"cargo", "publish"}, {"twine", "upload"}, {"poetry", "publish"}, {"uv", "publish"}, {"flit", "publish"},
 	{"gem", "push"}, {"docker", "push"}, {"podman", "push"}, {"goreleaser", "release"}, {"mvn", "deploy"},
 }
 
-// outsideOK are paths outside the worktree that a command may name.
+// outsideOK are paths outside the worktree that a command may name: devices,
+// and system folders only root can write to.
 var outsideOK = []string{"/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/tty",
-	"/usr/", "/bin/", "/sbin/", "/opt/homebrew/", "/System/", "/Library/Developer/"}
+	"/usr/", "/bin/", "/sbin/", "/System/"}
+
+// readOnlyKinds change nothing.
+var readOnlyKinds = map[string]bool{"read": true, "search": true, "think": true, "fetch": true, "switch_mode": true}
 
 // Decide answers one request.
 func (p Policy) Decide(req acp.PermissionRequest) Decision {
@@ -64,7 +74,13 @@ func (p Policy) Decide(req acp.PermissionRequest) Decision {
 		d.Command = command(in, req.ToolCall.Title)
 		d.Allow, d.Reason = p.commandOK(d.Command, in)
 	default:
-		d.Allow, d.Reason = true, "does not change files"
+		if readOnlyKinds[d.Kind] {
+			d.Allow, d.Reason = true, "does not change files"
+		} else if len(d.Paths) > 0 {
+			d.Allow, d.Reason = p.filesInside(d.Paths)
+		} else {
+			d.Allow, d.Reason = false, "unknown tool kind "+strconvQuote(d.Kind)+" with no path to check"
+		}
 	}
 	if d.Allow {
 		d.OptionID = first(req, "allow_once", "allow_always")
@@ -195,6 +211,9 @@ func (p Policy) commandOK(cmd string, in map[string]any) (bool, string) {
 	}
 	for _, tok := range strings.Fields(cmd) {
 		for _, cand := range pathCandidates(tok) {
+			if strings.Contains(cand, "$") && strings.Contains(cand, "/") {
+				return false, "variable expanded inside a path: " + cand
+			}
 			if p.outside(cand, cwd) {
 				return false, "path outside the worktree: " + cand
 			}
@@ -203,14 +222,17 @@ func (p Policy) commandOK(cmd string, in map[string]any) (bool, string) {
 	return true, "allowed command"
 }
 
+var unquote = strings.NewReplacer(`"`, "", "'", "", `\`, "")
+
 // segments splits a command line into simple commands at ; & | ( ) and
-// newlines, and each into words. Quotes are stripped, not parsed.
+// newlines, and each into words. Quotes and backslashes are removed, not
+// parsed, so g"i"t and 'git push' inside bash -c are still seen.
 func segments(cmd string) [][]string {
 	var out [][]string
-	for _, s := range strings.FieldsFunc(cmd, func(r rune) bool { return strings.ContainsRune(";&|()\n`", r) }) {
+	for _, s := range strings.FieldsFunc(unquote.Replace(cmd), func(r rune) bool { return strings.ContainsRune(";&|()\n`{}", r) }) {
 		var words []string
 		for _, w := range strings.Fields(s) {
-			if w = strings.Trim(w, `"'`); w != "" {
+			if w != "" {
 				words = append(words, w)
 			}
 		}
@@ -221,52 +243,66 @@ func segments(cmd string) [][]string {
 	return out
 }
 
-// matches reports whether a simple command runs rule's program and
-// subcommand. It skips environment assignments, wrappers (sudo, env,
-// command) and the program's flags (with the values of git -C and -c).
+// valueFlags are the global options of git and similar tools that take a
+// separate value.
+var valueFlags = map[string]bool{"-C": true, "-c": true, "--git-dir": true, "--work-tree": true,
+	"--namespace": true, "--config-env": true, "--super-prefix": true, "--exec-path": true}
+
+// matches reports whether rule's program appears anywhere in a simple
+// command, followed by rule's subcommand after the program's own options.
+// Matching anywhere catches wrappers (bash -c, xargs, env, sudo, time, eval)
+// at the price of denying a command that merely mentions the words, such as
+// echo git push. git -c is denied outright: it can define an alias for push
+// or set an option that runs commands.
 func matches(words, rule []string) bool {
-	i := 0
-	for i < len(words) && (strings.Contains(words[i], "=") || words[i] == "sudo" || words[i] == "env" || words[i] == "command" || words[i] == "exec") {
-		i++
-	}
-	if i >= len(words) || filepath.Base(words[i]) != rule[0] {
-		return false
-	}
-	i++
-	for _, want := range rule[1:] {
-		for i < len(words) && strings.HasPrefix(words[i], "-") {
-			if words[i] == "-C" || words[i] == "-c" {
+	for start := range words {
+		if filepath.Base(words[start]) != rule[0] {
+			continue
+		}
+		i, ok := start+1, true
+		for _, want := range rule[1:] {
+			for i < len(words) && strings.HasPrefix(words[i], "-") {
+				if rule[0] == "git" && words[i] == "-c" {
+					return true
+				}
+				if valueFlags[words[i]] {
+					i++
+				}
 				i++
+			}
+			if i >= len(words) || words[i] != want {
+				ok = false
+				break
 			}
 			i++
 		}
-		if i >= len(words) || words[i] != want {
-			return false
+		if ok {
+			return true
 		}
-		i++
 	}
-	return true
+	return false
 }
 
 // pathCandidates returns the parts of a word that may be paths: the word
 // without quotes and redirections, and anything after an "=".
 func pathCandidates(tok string) []string {
-	tok = strings.Trim(tok, `"'`)
+	tok = unquote.Replace(tok)
 	tok = strings.TrimLeft(tok, "0123456789<>&")
 	var out []string
 	if tok != "" {
 		out = append(out, tok)
 	}
 	if _, v, ok := strings.Cut(tok, "="); ok && v != "" {
-		out = append(out, strings.Trim(v, `"'`))
+		out = append(out, v)
 	}
 	return out
 }
 
-// outside reports whether s looks like a path that leaves the worktree. Only
-// absolute paths, ~ paths and paths with a ".." element are checked, and an
-// absolute path counts only if it or its parent exists, so a regular
-// expression such as /api/ is not taken for a path.
+// outside reports whether s is a path that leaves the worktree: an absolute
+// path, a ~ path or a path with a ".." element that, once cleaned and with
+// symlinks resolved, is not inside the worktree or an allowed system folder.
+// Any word starting with / counts, so a pattern such as '/api/' is denied
+// too: better a refused grep than a missed write.
 func (p Policy) outside(s, cwd string) bool {
 	home, _ := os.UserHomeDir()
 	switch {
@@ -276,22 +312,23 @@ func (p Policy) outside(s, cwd string) bool {
 		}
 		s = filepath.Join(home, strings.TrimPrefix(s, "~"))
 	case filepath.IsAbs(s):
-		if _, err := os.Lstat(s); err != nil {
-			if _, err := os.Lstat(filepath.Dir(filepath.Clean(s))); err != nil {
-				return false
-			}
-		}
 	case strings.Contains("/"+s+"/", "/../"):
+		s = filepath.Join(cwd, s)
 	default:
 		return false
 	}
+	s = filepath.Clean(s)
 	if p.inside(s, cwd) {
 		return false
 	}
+	r := resolve(s)
 	for _, ok := range outsideOK {
-		if s == strings.TrimSuffix(ok, "/") || strings.HasPrefix(s, ok) {
+		dir := strings.TrimSuffix(ok, "/")
+		if (s == dir || strings.HasPrefix(s, ok)) && (r == dir || strings.HasPrefix(r, ok) || strings.HasPrefix(r, "/private"+ok)) {
 			return false
 		}
 	}
 	return true
 }
+
+func strconvQuote(s string) string { return `"` + s + `"` }

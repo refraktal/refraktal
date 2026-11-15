@@ -173,3 +173,11 @@ func TestRunNeedsATaskAndAKnownHarness(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestRunNoApplyKeepsTheWorktreeEvenWithoutChanges(t *testing.T) {
+	r := newRunRig(t)
+	res := r.run(t, fake{name: "claude", agentMode: "turn"}, func(o *RunOptions) { o.NoApply = true })
+	if res.Outcome != RunNoChanges || res.Worktree == "" || !exists(res.Worktree) {
+		t.Fatalf("result %+v", res)
+	}
+}

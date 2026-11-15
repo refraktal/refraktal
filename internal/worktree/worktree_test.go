@@ -145,3 +145,34 @@ func TestCreateNeedsACommit(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// The child shares .git: a config it poisoned must not run anything when
+// Refraktal collects and applies the result.
+func TestPoisonedConfigRunsNothing(t *testing.T) {
+	ctx := context.Background()
+	r := repo(t)
+	w, err := Create(ctx, r, filepath.Join(t.TempDir(), "wt"), "refraktal/poison")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "RAN")
+	evil := filepath.Join(t.TempDir(), "evil.sh")
+	os.WriteFile(evil, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755)
+	for _, kv := range [][]string{{"core.fsmonitor", evil}, {"diff.external", evil}, {"core.pager", evil}} {
+		if out, err := exec.Command("git", "-C", w.Dir, "config", kv[0], kv[1]).CombinedOutput(); err != nil {
+			t.Fatalf("%v %s", err, out)
+		}
+	}
+	os.WriteFile(filepath.Join(w.Dir, "a.txt"), []byte("changed\n"), 0o644)
+	res, err := w.Collect(ctx, "refraktal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Apply(ctx, res); err != nil {
+		t.Fatal(err)
+	}
+	w.Remove(ctx)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a command from the poisoned git config ran")
+	}
+}

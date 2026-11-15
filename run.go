@@ -273,6 +273,8 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	case perr != nil || turn.StopReason != "end_turn":
 		keep(RunFailed)
 		res.Error = errString(perr)
+	case len(r.Files) == 0 && o.NoApply:
+		keep(RunNoChanges) // --no-apply always leaves the worktree
 	case len(r.Files) == 0:
 		res.Outcome = RunNoChanges
 	case o.NoApply:
@@ -289,7 +291,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		if err := wt.Remove(context.Background()); err != nil {
 			log.Event("worktree_remove_failed", map[string]any{"error": err.Error()})
 		}
-	} else if len(r.Files) == 0 && res.Outcome != RunKept {
+	} else if len(r.Files) == 0 && !o.NoApply {
 		// Nothing to keep: a failed or timed-out turn that changed nothing.
 		wt.Remove(context.Background())
 		res.Branch, res.Worktree = "", ""

@@ -58,7 +58,20 @@ func TestDecide(t *testing.T) {
 		{"write to /tmp", request(t, "execute", map[string]any{"command": "echo hi > /tmp/refraktal-policy-test"}), false},
 		{"write to home", request(t, "execute", map[string]any{"command": "touch ~/x"}), false},
 		{"dot-dot escape", request(t, "execute", map[string]any{"command": "printf hi > ../outside.txt"}), false},
-		{"regex is not a path", request(t, "execute", map[string]any{"command": "grep -rn '/api/v9/' ."}), true},
+		{"leading-slash pattern counts as a path", request(t, "execute", map[string]any{"command": "grep -rn '/api/v9/' ."}), false},
+		{"relative pattern", request(t, "execute", map[string]any{"command": "grep -rn 'api/v9' ."}), true},
+		{"bash -c push", request(t, "execute", map[string]any{"command": `bash -c "git push origin HEAD"`}), false},
+		{"xargs push", request(t, "execute", map[string]any{"command": "echo origin | xargs git push"}), false},
+		{"quoted program name", request(t, "execute", map[string]any{"command": `g"i"t push`}), false},
+		{"git -c alias", request(t, "execute", map[string]any{"command": "git -c alias.p=push p"}), false},
+		{"git --git-dir push", request(t, "execute", map[string]any{"command": "git --git-dir .git push"}), false},
+		{"git config", request(t, "execute", map[string]any{"command": "git config core.fsmonitor ./x"}), false},
+		{"dot-dot through a system folder", request(t, "execute", map[string]any{"command": "cat /usr/../etc/x > /usr/../tmp/y"}), false},
+		{"new folder outside", request(t, "execute", map[string]any{"command": "mkdir -p /refraktal-no-such/a && touch /refraktal-no-such/a/b"}), false},
+		{"homebrew is user-writable", request(t, "execute", map[string]any{"command": "touch /opt/homebrew/x"}), false},
+		{"variable in a path", request(t, "execute", map[string]any{"command": `touch "$HOME/x"`}), false},
+		{"cd out", request(t, "execute", map[string]any{"command": "cd .. && ls"}), false},
+		{"variable without a path", request(t, "execute", map[string]any{"command": "echo $PATH"}), true},
 		{"system tool path", request(t, "execute", map[string]any{"command": "/usr/bin/env ls > /dev/null"}), true},
 		{"absolute path inside", request(t, "execute", map[string]any{"command": "cat " + filepath.Join(wt, "src")}), true},
 		// Codex
@@ -73,6 +86,9 @@ func TestDecide(t *testing.T) {
 		// Other kinds
 		{"read anywhere", request(t, "read", map[string]any{"file_path": "/etc/hosts"}), true},
 		{"fetch", request(t, "fetch", map[string]any{"url": "https://example.com"}), true},
+		{"unknown kind without paths", request(t, "other", map[string]any{"server": "x"}), false},
+		{"unknown kind inside", request(t, "other", map[string]any{"path": filepath.Join(wt, "a")}), true},
+		{"unknown kind outside", request(t, "other", map[string]any{"path": filepath.Join(outside, "a")}), false},
 	}
 	for _, tc := range cases {
 		d := p.Decide(tc.req)

@@ -1,8 +1,10 @@
 // Package worktree gives each child a git worktree of its own, collects what
 // the child changed, and applies it to the user's working tree.
 //
-// Refraktal's own git commands never run the repository's git hooks
-// (core.hooksPath is pointed at an empty value), and its commits use a fixed
+// A linked worktree shares the repository's .git with the child. Refraktal's
+// own git commands therefore turn off everything a poisoned config could use
+// to run a command: hooks, fsmonitor, external diff and textconv drivers.
+// (The policy also denies git config to the child.) Its commits use a fixed
 // identity, so no user git config is needed.
 package worktree
 
@@ -30,8 +32,12 @@ type Result struct {
 	Commit string   // "" if nothing changed
 }
 
+// safe are the options every Refraktal git command runs with.
+var safe = []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "diff.external=",
+	"-c", "core.pager=cat", "-c", "core.sshCommand=false"}
+
 func git(ctx context.Context, dir string, args ...string) ([]byte, error) {
-	full := append([]string{"-C", dir, "-c", "core.hooksPath=/dev/null"}, args...)
+	full := append(append([]string{"-C", dir}, safe...), args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0",
 		"GIT_AUTHOR_NAME=Refraktal", "GIT_AUTHOR_EMAIL=refraktal@localhost",
@@ -82,7 +88,7 @@ func (w Worktree) Collect(ctx context.Context, message string) (Result, error) {
 			return Result{}, err
 		}
 	}
-	names, err := git(ctx, w.Dir, "diff", "--name-only", w.Base, "HEAD")
+	names, err := git(ctx, w.Dir, "diff", "--no-ext-diff", "--no-textconv", "--name-only", w.Base, "HEAD")
 	if err != nil {
 		return Result{}, err
 	}
@@ -95,7 +101,7 @@ func (w Worktree) Collect(ctx context.Context, message string) (Result, error) {
 	if len(r.Files) == 0 {
 		return r, nil
 	}
-	if r.Diff, err = git(ctx, w.Dir, "diff", "--binary", w.Base, "HEAD"); err != nil {
+	if r.Diff, err = git(ctx, w.Dir, "diff", "--no-ext-diff", "--no-textconv", "--binary", w.Base, "HEAD"); err != nil {
 		return r, err
 	}
 	head, err := git(ctx, w.Dir, "rev-parse", "HEAD")
@@ -110,7 +116,7 @@ func (w Worktree) Apply(ctx context.Context, r Result) error {
 		return nil
 	}
 	for _, args := range [][]string{{"apply", "--check", "--binary"}, {"apply", "--binary"}} {
-		cmd := exec.CommandContext(ctx, "git", append([]string{"-C", w.Repo}, args...)...)
+		cmd := exec.CommandContext(ctx, "git", append(append([]string{"-C", w.Repo}, safe...), args...)...)
 		cmd.Stdin = bytes.NewReader(r.Diff)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
