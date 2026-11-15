@@ -11,6 +11,12 @@
 //	hang       never finishes, but answers session/cancel with stopReason cancelled
 //	deaf       never finishes and ignores session/cancel (must be killed)
 //	noauth     session/new fails with -32000 Authentication required
+//	orphan     as default, and at session/new also starts a child process that
+//	           ignores stdin closing, to test the client's survivor check
+//	nomode     session/set_mode fails with -32602
+//
+// In every mode session/set_mode succeeds (except nomode) and the session can
+// take several prompts.
 package main
 
 import (
@@ -18,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -154,8 +161,21 @@ func main() {
 				continue
 			}
 			cwd = raw.Cwd
-			send(msg{ID: m.ID, Result: obj{"sessionId": "fake-1"}})
+			if mode == "orphan" { // stays in our process group; stdio goes to /dev/null
+				child := exec.Command("sleep", "30")
+				child.Start()
+				os.WriteFile(filepath.Join(cwd, "child.pid"), []byte(fmt.Sprint(child.Process.Pid)), 0o644)
+			}
+			send(msg{ID: m.ID, Result: obj{"sessionId": "fake-1",
+				"modes": obj{"currentModeId": "default", "availableModes": []obj{{"id": "default", "name": "Default"}, {"id": "auto", "name": "Auto"}}}}})
 			update(obj{"sessionUpdate": "available_commands_update", "availableCommands": []any{}})
+		case "session/set_mode":
+			if mode == "nomode" {
+				send(msg{ID: m.ID, Error: obj{"code": -32602, "message": "unknown mode"}})
+				continue
+			}
+			send(msg{ID: m.ID, Result: obj{}})
+			update(obj{"sessionUpdate": "current_mode_update", "currentModeId": "auto"})
 		case "session/prompt":
 			go prompt(m.ID, mode)
 		case "session/cancel":

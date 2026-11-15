@@ -42,6 +42,12 @@ type line struct {
 // summary, the parsed stdout lines and the session cwd.
 func drive(t *testing.T, mode string, limit time.Duration) (Summary, []line, string, error) {
 	t.Helper()
+	return driveCfg(t, mode, config{limit: limit})
+}
+
+// driveCfg is drive with extra settings: handshake, mode and turns are taken from extra.
+func driveCfg(t *testing.T, mode string, extra config) (Summary, []line, string, error) {
+	t.Helper()
 	parent := t.TempDir()
 	cwd := filepath.Join(parent, "work")
 	if err := os.Mkdir(cwd, 0o755); err != nil {
@@ -49,7 +55,11 @@ func drive(t *testing.T, mode string, limit time.Duration) (Summary, []line, str
 	}
 	var out, errb bytes.Buffer
 	cfg := config{harness: "fake", cmd: fakeBin + " " + mode, cwd: cwd, prompt: "hi",
-		limit: limit, grace: 300 * time.Millisecond, linger: 150 * time.Millisecond}
+		limit: extra.limit, grace: 300 * time.Millisecond, linger: 150 * time.Millisecond,
+		handshake: extra.handshake, mode: extra.mode, turns: extra.turns}
+	if cfg.limit == 0 {
+		cfg.limit = 5 * time.Second
+	}
 	sum, err := run(cfg, &out, &errb)
 	var lines []line
 	for _, l := range strings.Split(strings.TrimSpace(out.String()), "\n") {
@@ -254,5 +264,102 @@ func TestHarnessTable(t *testing.T) {
 	}
 	if argv, _ := resolveCmd(config{harness: "claude", cmd: "foo bar"}); strings.Join(argv, " ") != "foo bar" {
 		t.Errorf("--cmd did not override: %v", argv)
+	}
+}
+
+func TestCancelTiming(t *testing.T) {
+	sum, _, _, err := drive(t, "hang", 300*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.CancelAtMs == nil || *sum.CancelAtMs < 300 {
+		t.Fatalf("cancel_at_ms = %v", sum.CancelAtMs)
+	}
+	if sum.StopAfterMs == nil || *sum.StopAfterMs > 250 {
+		t.Fatalf("stop_after_cancel_ms = %v", sum.StopAfterMs)
+	}
+	if len(sum.ProcsLive) == 0 {
+		t.Fatalf("no process snapshot at cancel (procs_error %q)", sum.ProcsError)
+	}
+	if sum.TurnsDone != 1 || sum.TurnStops[0] != "cancelled" {
+		t.Fatalf("turns_done=%d stops=%v", sum.TurnsDone, sum.TurnStops)
+	}
+}
+
+func TestHandshakeSendsNoPrompt(t *testing.T) {
+	sum, lines, _, err := driveCfg(t, "default", config{handshake: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Stage != "session/new" || sum.TurnsDone != 0 || len(sum.Usage) != 0 {
+		t.Fatalf("%+v", sum)
+	}
+	for _, l := range lines {
+		if l.Phase == "turn" {
+			t.Fatal("a turn ran in handshake mode")
+		}
+	}
+	if !sum.LeaderExited || len(sum.Survivors) != 0 {
+		t.Fatalf("leader_exited=%v survivors=%v", sum.LeaderExited, sum.Survivors)
+	}
+}
+
+func TestSurvivorsAreReportedThenKilled(t *testing.T) {
+	sum, _, cwd, err := driveCfg(t, "orphan", config{handshake: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := strconv.Atoi(readFile(cwd, "child.pid"))
+	found := false
+	for _, p := range sum.Survivors {
+		found = found || p.PID == pid
+	}
+	if pid == 0 || !found {
+		t.Fatalf("child %d not in survivors %v (procs_error %q)", pid, sum.Survivors, sum.ProcsError)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if running(pid) {
+		t.Fatalf("child %d survived the group kill", pid)
+	}
+}
+
+// running reports whether pid is alive and not a zombie. A killed orphan stays
+// a zombie until its new parent reaps it, and kill(pid, 0) still succeeds on it.
+func running(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return false
+	}
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	st := strings.TrimSpace(string(out))
+	return err == nil && st != "" && !strings.HasPrefix(st, "Z")
+}
+
+func TestSetMode(t *testing.T) {
+	sum, _, _, err := driveCfg(t, "default", config{mode: "auto"})
+	if err != nil || sum.ModeSet != "auto" || sum.TurnsDone != 1 {
+		t.Fatalf("err=%v %+v", err, sum)
+	}
+	sum, _, _, err = driveCfg(t, "nomode", config{mode: "auto"})
+	if err == nil || !strings.Contains(err.Error(), "set_mode") || sum.TurnsDone != 0 {
+		t.Fatalf("want a set_mode error and no turn: err=%v %+v", err, sum)
+	}
+}
+
+func TestSeveralTurnsInOneSession(t *testing.T) {
+	sum, _, _, err := driveCfg(t, "default", config{turns: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.TurnsDone != 2 || len(sum.TurnWallMs) != 2 || len(sum.TurnStops) != 2 {
+		t.Fatalf("%+v", sum)
+	}
+	costs := map[int]int{}
+	for _, u := range sum.Usage {
+		if u.Cost != nil {
+			costs[u.Turn]++
+		}
+	}
+	if costs[1] != 1 || costs[2] != 1 {
+		t.Fatalf("want one cost per turn, got %v", costs)
 	}
 }

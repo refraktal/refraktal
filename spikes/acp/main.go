@@ -57,14 +57,17 @@ func main() {
 	flag.Float64Var(&mins, "mins", 2, "wall-clock limit for the prompt turn, in minutes")
 	flag.DurationVar(&cfg.grace, "grace", 5*time.Second, "wait after session/cancel before killing")
 	flag.DurationVar(&cfg.linger, "linger", time.Second, "keep reading after the prompt response")
+	flag.BoolVar(&cfg.handshake, "handshake", false, "stop after session/new: send no prompt, spend no tokens")
+	flag.StringVar(&cfg.mode, "mode", "", "session mode id to set with session/set_mode before prompting")
+	flag.IntVar(&cfg.turns, "turns", 1, "number of times to send the prompt in the same session")
 	flag.Parse()
 	cfg.limit = time.Duration(mins * float64(time.Minute))
 	cfg.prompt = strings.Join(flag.Args(), " ")
-	if cfg.prompt == "" {
+	if cfg.prompt == "" && !cfg.handshake {
 		b, _ := io.ReadAll(os.Stdin)
 		cfg.prompt = strings.TrimSpace(string(b))
 	}
-	if cfg.prompt == "" {
+	if cfg.prompt == "" && !cfg.handshake {
 		fmt.Fprintln(os.Stderr, "usage: acp-spike [flags] <prompt>   (or prompt on stdin)")
 		os.Exit(2)
 	}

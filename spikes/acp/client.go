@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -44,7 +45,14 @@ type Usage struct {
 	Size   *int64          `json:"size,omitempty"`
 	Cost   json.RawMessage `json:"cost,omitempty"` // {amount, currency}
 	Tokens json.RawMessage `json:"tokens,omitempty"`
+	Turn   int             `json:"turn"` // 1-based; several turns share one session with --turns
 	seq    int
+}
+
+// Proc is one process in the harness's process group, from ps.
+type Proc struct {
+	PID int    `json:"pid"`
+	Cmd string `json:"cmd"` // command line, truncated; may contain local paths, so never publish raw
 }
 
 type Summary struct {
@@ -66,11 +74,26 @@ type Summary struct {
 	FirstUsage  string          `json:"first_usage"` // mid_turn | at_end | after_end | none
 	FirstCost   string          `json:"first_cost"`
 	PromptMeta  json.RawMessage `json:"prompt_response_meta,omitempty"`
+
+	// Follow-up measurements.
+	ModeSet      string   `json:"mode_set,omitempty"`             // mode applied with session/set_mode
+	TurnsDone    int      `json:"turns_done"`                     // prompt responses received
+	TurnWallMs   []int64  `json:"turn_wall_ms"`                   // per turn: prompt sent -> response
+	TurnStops    []string `json:"turn_stop_reasons"`              // per turn
+	CancelAtMs   *int64   `json:"cancel_at_ms,omitempty"`         // when session/cancel was sent, ms into the turn
+	StopAfterMs  *int64   `json:"stop_after_cancel_ms,omitempty"` // cancel -> prompt response; absent if killed
+	ProcsLive    []Proc   `json:"procs_live"`                     // process group while the session was live (at cancel, or before shutdown)
+	Survivors    []Proc   `json:"survivors"`                      // still in the group after stdin closed and the leader was reaped, before the group kill
+	LeaderExited bool     `json:"leader_exited"`                  // the spawned process exited on its own after stdin closed
+	ProcsError   string   `json:"procs_error,omitempty"`
 }
 
 type config struct {
 	harness, cmd, cwd, prompt string
 	limit, grace, linger      time.Duration
+	handshake                 bool   // stop after session/new: no prompt is sent, no tokens are spent
+	mode                      string // if set, session/set_mode to this mode id before prompting
+	turns                     int    // prompts to send in the same session (default 1)
 }
 
 type client struct {
@@ -82,9 +105,11 @@ type client struct {
 	nextID    int
 	dead      chan struct{}
 	spawned   time.Time
-	sentAt    time.Time // zero until session/prompt is sent
-	phase     string    // setup | turn | after
-	lastOther int       // seq of the last non-usage update seen during the turn
+	sentAt    time.Time   // zero until session/prompt is sent
+	pgid      int         // process group of the spawned harness
+	phase     string      // setup | turn | after
+	turn      int         // current turn, 1-based
+	lastOther map[int]int // per turn: seq of the last non-usage update seen during it
 	sum       Summary
 }
 
@@ -151,6 +176,7 @@ func (c *client) readLoop(r io.Reader) {
 				if ch != nil && c.phase == "turn" {
 					c.phase = "after" // only session/prompt is outstanding during the turn
 					c.sum.WallMs = time.Since(c.sentAt).Milliseconds()
+					c.sum.TurnWallMs = append(c.sum.TurnWallMs, c.sum.WallMs)
 				}
 				c.mu.Unlock()
 				if ch != nil {
@@ -197,12 +223,12 @@ func (c *client) notification(m msg) {
 		}
 		c.observe(Usage{Source: "usage_update", Used: u.Used, Size: u.Size, Cost: u.Cost})
 	case c.phase == "turn":
-		c.lastOther = c.sum.Updates
+		c.lastOther[c.turn] = c.sum.Updates
 	}
 }
 
 func (c *client) observe(u Usage) { // caller holds c.mu
-	u.seq, u.When = c.sum.Updates, c.phase
+	u.seq, u.When, u.Turn = c.sum.Updates, c.phase, c.turn
 	if !c.sentAt.IsZero() {
 		u.TMs = time.Since(c.sentAt).Milliseconds()
 	}
@@ -212,20 +238,24 @@ func (c *client) observe(u Usage) { // caller holds c.mu
 // run drives one harness through one prompt. The Summary is always filled in;
 // err reports the step that failed, if any.
 func run(cfg config, stdout, stderr io.Writer) (Summary, error) {
-	c := &client{out: stdout, pending: map[string]chan msg{}, dead: make(chan struct{}), phase: "setup"}
+	c := &client{out: stdout, pending: map[string]chan msg{}, dead: make(chan struct{}), phase: "setup",
+		lastOther: map[int]int{}}
 	c.sum = Summary{Type: "summary", Harness: cfg.harness, Stage: "none", UpdateKinds: map[string]int{},
-		Refused: map[string]int{}, Usage: []Usage{}, FirstUsage: "none", FirstCost: "none"}
+		Refused: map[string]int{}, Usage: []Usage{}, FirstUsage: "none", FirstCost: "none",
+		TurnWallMs: []int64{}, TurnStops: []string{}, ProcsLive: []Proc{}, Survivors: []Proc{}}
 	err := c.drive(cfg, stderr)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err != nil {
 		c.sum.Error = err.Error()
 	}
-	slices.SortStableFunc(c.sum.Usage, func(a, b Usage) int { return cmp.Compare(a.TMs, b.TMs) })
+	slices.SortStableFunc(c.sum.Usage, func(a, b Usage) int {
+		return cmp.Or(cmp.Compare(a.Turn, b.Turn), cmp.Compare(a.TMs, b.TMs))
+	})
 	for i := range c.sum.Usage {
 		u := &c.sum.Usage[i]
 		switch {
-		case u.When == "turn" && u.seq < c.lastOther:
+		case u.When == "turn" && u.seq < c.lastOther[u.Turn]:
 			u.When = "mid_turn" // other updates followed it before the turn ended
 		case u.When == "turn" || u.Source == "prompt_response":
 			u.When = "at_end"
@@ -268,9 +298,19 @@ func (c *client) drive(cfg config, stderr io.Writer) error {
 	}
 	c.sum.Stage = "spawn"
 	go c.readLoop(stdoutPipe)
-	defer func() { // close stdin, give the agent a moment to exit, then kill the group
-		if c.sum.Killed { // the turn outlived session/cancel plus the grace period
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	cmd.WaitDelay = 2 * time.Second // a child holding stderr open must not hang Wait
+	pgid := cmd.Process.Pid
+	c.mu.Lock()
+	c.pgid = pgid
+	c.mu.Unlock()
+	defer func() {
+		// Close stdin and give the agent a moment to exit. Before the group kill,
+		// record what is still in the process group, so the run shows whether the
+		// kill was needed at all. A process that called setsid has left the group
+		// and is not seen here.
+		killedEarly := c.sum.Killed // the turn outlived session/cancel plus the grace period
+		if killedEarly {
+			syscall.Kill(-pgid, syscall.SIGKILL)
 		}
 		stdin.Close()
 		select {
@@ -278,8 +318,30 @@ func (c *client) drive(cfg config, stderr io.Writer) error {
 		case <-time.After(cfg.grace):
 			c.sum.Killed = true
 		}
-		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		cmd.Wait()
+		exited := make(chan struct{})
+		go func() { cmd.Wait(); close(exited) }() // reaps the leader so it is not listed as a zombie
+		select {
+		case <-exited:
+			c.mu.Lock()
+			c.sum.LeaderExited = !killedEarly
+			c.mu.Unlock()
+		case <-time.After(cfg.grace):
+		}
+		if !killedEarly {
+			time.Sleep(200 * time.Millisecond) // let children notice the parent is gone
+			procs, perr := groupProcs(pgid)
+			c.mu.Lock()
+			c.sum.Survivors = procs
+			if perr != nil {
+				c.sum.ProcsError = perr.Error()
+			}
+			c.mu.Unlock()
+		}
+		syscall.Kill(-pgid, syscall.SIGKILL)
+		select {
+		case <-exited:
+		case <-time.After(5 * time.Second):
+		}
 	}()
 
 	const setup = 90 * time.Second // npx may have to download the adapter
@@ -308,25 +370,73 @@ func (c *client) drive(cfg config, stderr io.Writer) error {
 
 	c.mu.Lock()
 	c.emit(obj{"type": "session", "result": res})
-	c.sentAt, c.phase = time.Now(), "turn"
 	c.mu.Unlock()
-	turn := c.call("session/prompt", obj{"sessionId": s.ID,
+
+	if cfg.mode != "" {
+		if _, err := c.await(c.call("session/set_mode", obj{"sessionId": s.ID, "modeId": cfg.mode}), setup); err != nil {
+			return fmt.Errorf("session/set_mode %q: %w", cfg.mode, err)
+		}
+		c.mu.Lock()
+		c.sum.ModeSet = cfg.mode
+		c.emit(obj{"type": "mode_set", "mode": cfg.mode})
+		c.mu.Unlock()
+	}
+
+	if cfg.handshake {
+		time.Sleep(cfg.linger) // let the adapter start whatever it starts for a session
+		c.snapshot()
+		return nil
+	}
+
+	for turn := 1; turn <= max(cfg.turns, 1); turn++ {
+		if turn > 1 {
+			time.Sleep(cfg.linger) // catch updates that trail the previous response
+		}
+		done, err := c.prompt(cfg, s.ID, turn)
+		if err != nil {
+			return err
+		}
+		if !done { // cancelled: do not start another turn
+			break
+		}
+	}
+	c.snapshot()
+	time.Sleep(cfg.linger) // catch updates that trail the response
+	return nil
+}
+
+// prompt runs one turn. done is false when the turn was cancelled.
+func (c *client) prompt(cfg config, sessionID string, turn int) (done bool, err error) {
+	c.mu.Lock()
+	c.sentAt, c.phase, c.turn = time.Now(), "turn", turn
+	c.mu.Unlock()
+	call := c.call("session/prompt", obj{"sessionId": sessionID,
 		"prompt": []obj{{"type": "text", "text": cfg.prompt}}})
-	res, err = c.await(turn, cfg.limit)
+	res, err := c.await(call, cfg.limit)
+	cancelled := false
 	if err == errTimeout {
+		cancelled = true
+		c.snapshot() // the harness is mid-turn: this is when its child processes are certainly running
 		c.mu.Lock()
 		c.sum.TimedOut = true
+		at := time.Since(c.sentAt).Milliseconds()
+		c.sum.CancelAtMs = &at
 		c.mu.Unlock()
-		c.write(msg{Method: "session/cancel", Params: json.RawMessage(fmt.Sprintf(`{"sessionId":%q}`, s.ID))})
-		if res, err = c.await(turn, cfg.grace); err != nil {
+		cancelSent := time.Now()
+		c.write(msg{Method: "session/cancel", Params: json.RawMessage(fmt.Sprintf(`{"sessionId":%q}`, sessionID))})
+		if res, err = c.await(call, cfg.grace); err != nil {
 			c.mu.Lock()
 			c.sum.Killed, c.sum.StopReason, c.sum.WallMs = true, "killed", time.Since(c.sentAt).Milliseconds()
 			c.mu.Unlock()
-			return fmt.Errorf("session/prompt: no response within %s of session/cancel: %w", cfg.grace, err)
+			return false, fmt.Errorf("session/prompt: no response within %s of session/cancel: %w", cfg.grace, err)
 		}
+		stop := time.Since(cancelSent).Milliseconds()
+		c.mu.Lock()
+		c.sum.StopAfterMs = &stop
+		c.mu.Unlock()
 	}
 	if err != nil {
-		return fmt.Errorf("session/prompt: %w", err)
+		return false, fmt.Errorf("session/prompt (turn %d): %w", turn, err)
 	}
 	var pr struct {
 		StopReason string          `json:"stopReason"`
@@ -335,12 +445,57 @@ func (c *client) drive(cfg config, stderr io.Writer) error {
 	}
 	json.Unmarshal(res, &pr)
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.sum.Stage, c.sum.StopReason, c.sum.PromptMeta = "session/prompt", pr.StopReason, pr.Meta
+	c.sum.TurnsDone++
+	c.sum.TurnStops = append(c.sum.TurnStops, pr.StopReason)
 	if len(pr.Usage) > 0 && string(pr.Usage) != "null" {
 		c.observe(Usage{Source: "prompt_response", Tokens: pr.Usage})
 		c.sum.Usage[len(c.sum.Usage)-1].TMs = c.sum.WallMs
 	}
+	return !cancelled, nil
+}
+
+// snapshot records the harness's process group while the session is live.
+func (c *client) snapshot() {
+	c.mu.Lock()
+	pgid := c.pgid
 	c.mu.Unlock()
-	time.Sleep(cfg.linger) // catch updates that trail the response
-	return nil
+	procs, err := groupProcs(pgid)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sum.ProcsLive = procs
+	if err != nil {
+		c.sum.ProcsError = err.Error()
+	}
+}
+
+// groupProcs lists the processes in process group pgid. It uses ps, which
+// accepts these flags on both macOS and Linux.
+func groupProcs(pgid int) ([]Proc, error) {
+	procs := []Proc{}
+	if pgid <= 0 {
+		return procs, nil
+	}
+	out, err := exec.Command("ps", "-A", "-o", "pid=", "-o", "pgid=", "-o", "command=").Output()
+	if err != nil {
+		return procs, fmt.Errorf("ps: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 {
+			continue
+		}
+		pid, err1 := strconv.Atoi(f[0])
+		g, err2 := strconv.Atoi(f[1])
+		if err1 != nil || err2 != nil || g != pgid {
+			continue
+		}
+		cmdline := strings.Join(f[2:], " ")
+		if len(cmdline) > 300 {
+			cmdline = cmdline[:300] + "..."
+		}
+		procs = append(procs, Proc{PID: pid, Cmd: cmdline})
+	}
+	return procs, nil
 }
