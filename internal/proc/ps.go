@@ -15,20 +15,23 @@ import (
 	"strings"
 )
 
-// Proc identifies one process. A PID alone is not an identity, because PIDs
-// are reused: Start and Cmd must also match.
+// Proc identifies one process by its birth identity: PID and start time. A
+// PID alone is not an identity, because PIDs are reused. The command line is
+// for display and logs only: it changes when a process execs.
 type Proc struct {
 	PID   int    `json:"pid"`
 	PPID  int    `json:"ppid"`
 	PGID  int    `json:"pgid"`
+	UID   int    `json:"uid"`
 	Start string `json:"start"` // start time as ps prints it (lstart), one-second resolution
 	Cmd   string `json:"cmd"`   // command line; it holds local paths, so never log it verbatim
 }
 
-// Same reports whether p and q are the same process: same PID, start time and
-// command line.
+// Same reports whether p and q are the same process: same PID and start
+// time. (A PID reused within the same second of ps's one-second resolution
+// would look the same; that is the accepted limit.)
 func (p Proc) Same(q Proc) bool {
-	return p.PID == q.PID && p.Start == q.Start && p.Cmd == q.Cmd
+	return p.PID == q.PID && p.Start == q.Start
 }
 
 // List returns every running process on the machine, by PID. Zombies and,
@@ -39,7 +42,7 @@ func List() (map[int]Proc, error) {
 	// These flags work with both the BSD ps on macOS and procps on Linux. -ww
 	// stops the command line being cut to the terminal width; LC_ALL=C fixes
 	// the lstart format to five fields, such as "Sun Nov 15 15:45:51 2026".
-	cmd := exec.Command("ps", "-A", "-ww", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "stat=",
+	cmd := exec.Command("ps", "-A", "-ww", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "uid=", "-o", "stat=",
 		"-o", "lstart=", "-o", "command=")
 	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	out, err := cmd.Output()
@@ -53,17 +56,18 @@ func parsePS(out string) map[int]Proc {
 	all := map[int]Proc{}
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Fields(line)
-		if len(f) < 10 { // pid ppid pgid stat, five lstart fields, at least one command field
+		if len(f) < 11 { // pid ppid pgid uid stat, five lstart fields, at least one command field
 			continue
 		}
 		pid, err1 := strconv.Atoi(f[0])
 		ppid, err2 := strconv.Atoi(f[1])
 		pgid, err3 := strconv.Atoi(f[2])
-		if err1 != nil || err2 != nil || err3 != nil || strings.HasPrefix(f[3], "Z") || strings.Contains(f[3], "E") {
+		uid, err4 := strconv.Atoi(f[3])
+		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || strings.HasPrefix(f[4], "Z") || strings.Contains(f[4], "E") {
 			continue
 		}
-		all[pid] = Proc{PID: pid, PPID: ppid, PGID: pgid,
-			Start: strings.Join(f[4:9], " "), Cmd: strings.Join(f[9:], " ")}
+		all[pid] = Proc{PID: pid, PPID: ppid, PGID: pgid, UID: uid,
+			Start: strings.Join(f[5:10], " "), Cmd: strings.Join(f[10:], " ")}
 	}
 	return all
 }

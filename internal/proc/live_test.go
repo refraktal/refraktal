@@ -137,3 +137,35 @@ func TestCleanLeftoversWithoutAFolder(t *testing.T) {
 		t.Fatalf("%+v %v", r, err)
 	}
 }
+
+// Dead-run cleanup kills session members by identity: the session poll put
+// a detached member, never tracked by lineage, into the live record.
+func TestDeadRunCleanupKillsSessionMembersByIdentity(t *testing.T) {
+	live := t.TempDir()
+	self, _ := os.Executable()
+	c, err := Start(Spec{Argv: []string{self}, Env: []string{helperEnv + "=escape", "GORACE=atexit_sleep_ms=0"},
+		PollEvery: time.Hour, LiveDir: live, SessionPollEvery: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gc := readPID(t, bufio.NewReader(c.Stdout))
+	defer syscall.Kill(gc, syscall.SIGKILL)
+	files, _ := filepath.Glob(filepath.Join(live, "*.json"))
+	if len(files) != 1 {
+		t.Fatalf("records %v", files)
+	}
+	for deadline := time.Now().Add(5 * time.Second); !slices.Contains(pids(readRecord(t, files[0]).Tracked), gc); time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the session poll did not record the detached member")
+		}
+	}
+	// The owner dies without shutting down: rewrite the record as a dead run's.
+	rec := readRecord(t, files[0])
+	rec.Owner = deadOwner(t)
+	writeRecord(files[0], rec)
+	r, err := CleanLeftovers(live)
+	if err != nil || running(gc) || !slices.Contains(pids(r.Kill.Killed), gc) {
+		t.Fatalf("recorded member %d survived: %+v %v", gc, r, err)
+	}
+	c.Shutdown(time.Second)
+}

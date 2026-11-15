@@ -83,6 +83,7 @@ type Client struct {
 	nextID  int
 	pending map[string]chan message
 	turns   map[string]*turnState // active turn by session ID
+	models  map[string]string     // current model by session ID
 	done    chan struct{}
 }
 
@@ -98,7 +99,7 @@ func New(r io.Reader, w io.Writer, opts Options) *Client {
 	opts.CancelGrace = cmp.Or(opts.CancelGrace, 5*time.Second)
 	opts.ClientName = cmp.Or(opts.ClientName, "refraktal")
 	c := &Client{w: w, opts: opts, pending: map[string]chan message{},
-		turns: map[string]*turnState{}, done: make(chan struct{})}
+		turns: map[string]*turnState{}, models: map[string]string{}, done: make(chan struct{})}
 	go c.readLoop(r)
 	return c
 }
@@ -106,19 +107,64 @@ func New(r io.Reader, w io.Writer, opts Options) *Client {
 // Done is closed when the agent's stdout closes.
 func (c *Client) Done() <-chan struct{} { return c.done }
 
+// writeTimeout bounds every write to the agent: one that stopped reading
+// must not block the client, and above all not a cancel or a shutdown.
+const writeTimeout = 10 * time.Second
+
 func (c *Client) write(m message) error {
+	return c.writeBy(m, time.Now().Add(writeTimeout))
+}
+
+// writeBy writes one message, giving up at deadline. With a writer that
+// supports deadlines (the pipe to a harness does), the write itself is
+// bounded; otherwise the wait for it is, and the write finishes in the
+// background.
+func (c *Client) writeBy(m message, deadline time.Time) error {
 	m.JSONRPC = "2.0"
 	b, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
-	c.wmu.Lock()
-	defer c.wmu.Unlock()
-	_, err = c.w.Write(append(b, '\n'))
-	return err
+	b = append(b, '\n')
+	type deadliner interface{ SetWriteDeadline(time.Time) error }
+	if d, ok := c.w.(deadliner); ok {
+		c.wmu.Lock()
+		defer c.wmu.Unlock()
+		if d.SetWriteDeadline(deadline) == nil {
+			defer d.SetWriteDeadline(time.Time{})
+		}
+		_, err = c.w.Write(b)
+		return err
+	}
+	done := make(chan error, 1)
+	go func() {
+		c.wmu.Lock()
+		defer c.wmu.Unlock()
+		_, err := c.w.Write(b)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(time.Until(deadline)):
+		return fmt.Errorf("acp: write to the agent timed out")
+	}
+}
+
+// deadlineOf is ctx's deadline, capped at writeTimeout from now.
+func deadlineOf(ctx context.Context) time.Time {
+	d := time.Now().Add(writeTimeout)
+	if cd, ok := ctx.Deadline(); ok && cd.Before(d) {
+		return cd
+	}
+	return d
 }
 
 func (c *Client) send(method string, params any) (chan message, string, error) {
+	return c.sendBy(method, params, time.Now().Add(writeTimeout))
+}
+
+func (c *Client) sendBy(method string, params any, deadline time.Time) (chan message, string, error) {
 	p, err := json.Marshal(params)
 	if err != nil {
 		return nil, "", err
@@ -129,7 +175,7 @@ func (c *Client) send(method string, params any) (chan message, string, error) {
 	id := fmt.Sprint(c.nextID)
 	c.pending[id] = ch
 	c.mu.Unlock()
-	if err := c.write(message{ID: json.RawMessage(id), Method: method, Params: p}); err != nil {
+	if err := c.writeBy(message{ID: json.RawMessage(id), Method: method, Params: p}, deadline); err != nil {
 		c.forget(id)
 		return nil, "", fmt.Errorf("%s: %w", method, err)
 	}
@@ -151,7 +197,7 @@ func result(m message) (json.RawMessage, error) {
 
 // call sends a request and waits for its response, the agent exiting, or ctx.
 func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	ch, id, err := c.send(method, params)
+	ch, id, err := c.sendBy(method, params, deadlineOf(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -207,6 +253,16 @@ func (c *Client) notification(m message) {
 	}
 	u := parseUpdate(m.Params)
 	c.mu.Lock()
+	if u.Kind == "config_option_update" {
+		var co struct {
+			ConfigOptions []ConfigOption `json:"configOptions"`
+		}
+		if json.Unmarshal(u.Raw, &co) == nil {
+			if model := modelOf(co.ConfigOptions); model != "" {
+				c.models[u.SessionID] = model
+			}
+		}
+	}
 	if ts := c.turns[u.SessionID]; ts != nil && u.Kind == "usage_update" {
 		if u.Used != nil {
 			ts.turn.LastUsed = u.Used
@@ -300,6 +356,13 @@ func (c *Client) NewSession(ctx context.Context, cwd string, meta json.RawMessag
 	if err := json.Unmarshal(res, &s); err != nil || s.ID == "" {
 		return Session{}, fmt.Errorf("session/new: no session ID in %d-byte result", len(res))
 	}
+	if model := s.Model(); model != "" {
+		c.mu.Lock()
+		if c.models[s.ID] == "" {
+			c.models[s.ID] = model
+		}
+		c.mu.Unlock()
+	}
 	return s, nil
 }
 
@@ -333,11 +396,12 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string) (Turn, erro
 		defer c.mu.Unlock()
 		delete(c.turns, sessionID)
 		ts.turn.Wall = time.Since(start)
+		ts.turn.Model = c.models[sessionID]
 		return ts.turn
 	}
 
-	ch, id, err := c.send("session/prompt", map[string]any{"sessionId": sessionID,
-		"prompt": []map[string]any{{"type": "text", "text": text}}})
+	ch, id, err := c.sendBy("session/prompt", map[string]any{"sessionId": sessionID,
+		"prompt": []map[string]any{{"type": "text", "text": text}}}, deadlineOf(ctx))
 	if err != nil {
 		return finish(), err
 	}
@@ -351,7 +415,8 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string) (Turn, erro
 		ts.turn.Cancelled = true
 		c.mu.Unlock()
 		tcancel() // pending permission requests are answered "cancelled"
-		c.write(message{Method: "session/cancel", Params: mustJSON(map[string]any{"sessionId": sessionID})})
+		// Bounded: a harness that stopped reading must not hold up the cancel.
+		c.writeBy(message{Method: "session/cancel", Params: mustJSON(map[string]any{"sessionId": sessionID})}, time.Now().Add(2*time.Second))
 		select {
 		case m = <-ch:
 		case <-c.done:

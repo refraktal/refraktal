@@ -19,7 +19,10 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// A fake agent is named explicitly (ACPTEST_MODE) and plays the harness,
+	// which carries the helper switch for its shell prefix: check it first.
 	acptest.RunIfAgent()
+	proc.MaybeShellPrefix()
 	os.Exit(m.Run())
 }
 
@@ -27,7 +30,9 @@ func TestMain(m *testing.M) {
 type fake struct {
 	name, agentMode, mcp string
 	prepErr              error
-	prompts              string // file the fake agent appends to on session/prompt
+	prompts              string   // file the fake agent appends to on session/prompt
+	env                  []string // extra environment for the fake agent
+	prefixVar            string   // the shell-prefix variable the fake harness declares
 }
 
 func (f fake) Name() string { return f.name }
@@ -38,7 +43,7 @@ func (f fake) Prepare(_ context.Context, o harness.Options) (harness.Launch, err
 	}
 	argv, env := acptest.Command(f.agentMode)
 	mcp := cmp.Or(f.mcp, o.MCP)
-	return harness.Launch{Argv: argv, Env: append(env, "ACPTEST_PROMPTS="+f.prompts), MCP: mcp,
+	return harness.Launch{Argv: argv, Env: append(append(env, "ACPTEST_PROMPTS="+f.prompts), f.env...), MCP: mcp, ShellPrefixVar: f.prefixVar,
 		Adapter: "fake-acp@1.0.0", Bundled: "1.0.0", Installed: "1.0.1"}, nil
 }
 

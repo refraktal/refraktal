@@ -51,6 +51,10 @@ not a command.
 - **Adapters are installed on first use** into `os.UserCacheDir()` joined with
   `refraktal/adapters/<package>-<version>/`, with `npm install
   --ignore-scripts`. A failed install leaves nothing behind.
+- **Prices:** config overrides win over the table under every key tried;
+  table entries with negative or non-finite prices are skipped; a cache rate
+  of exactly 0 is a real price, and only a missing one falls back to the
+  input rate.
 - **The ACP layer is hand-rolled** JSON-RPC over stdio on the standard library.
   Do not use an ACP SDK. Pin protocol version 1.
 
@@ -58,6 +62,13 @@ not a command.
 
 Four budgets: `--usd`, `--turns`, `--mins`, `--depth`. Each is passed down the
 tree and only ever shrinks. A child is given at most what its parent has left.
+Defaults: `--usd 10`, `--turns 20`, `--mins 30`, `--depth 2`. `--usd` and
+`--mins` must be finite, and `--mins` is at most 1440 (24 hours). A child
+Refraktal will read its grant from `REFRAKTAL_BUDGET` (JSON: usd, turns,
+deadline, depth); `--depth` is how many more levels may nest, and a child gets
+one less. When a budget is spent before a turn can start, `run` sends nothing
+and exits 2 (`budget_exhausted`); when `--mins` runs out during a turn, it
+cancels and exits 2 (`timed_out`).
 
 - **`--mins`** is wall-clock time and the only hard stop inside a turn. When it
   runs out: send `session/cancel`, wait a short grace, shut the child down,
@@ -73,15 +84,24 @@ tree and only ever shrinks. A child is given at most what its parent has left.
     minus the previous one.
   - Codex and Antigravity report tokens only, per turn, on the prompt
     response's `usage`. Refraktal prices them from LiteLLM's
-    `model_prices_and_context_window.json`, cached on disk, with per-model
-    overrides in config.
+    `model_prices_and_context_window.json`, cached at
+    `os.UserCacheDir()/refraktal/prices.json` and fetched again after 24
+    hours (a failed fetch falls back to the stale copy, then to "everything
+    unpriced"), with per-model overrides in config (US dollars per million
+    tokens). The model comes from the session's `model` config option. Keys
+    tried: Codex `<model>`, Antigravity `gemini/<model>`.
+  - Token accounting: `inputTokens` excludes cached tokens; cached reads and
+    writes are priced at their own rates (input rate if the table has none);
+    thought tokens are part of `outputTokens`.
   - Bill from the prompt response's `usage`, never from the mid-turn `used`
     field, which is context fill and under-counts.
 - **Cost sources.** Every figure is tagged `reported`, `computed`, `unpriced`
   or `estimated`. Reported wins. An unpriced model continues with a loud warning
   (stderr, run log, `--json`) and counts as $0 against `--usd`. Dollars are a
   budget unit, not a bill: on subscription logins they are notional.
-- **Cancelled turns.** Usage for model calls that finished before the cancel is
+- **Cancelled turns.** A turn is cancelled if Refraktal sent `session/cancel`
+  or the harness's stop reason is `cancelled` (Codex ends a turn so after a
+  denial). Usage for model calls that finished before the cancel is
   reported as normal; charge it. A call the cancel cut off is never reported.
   For enforcement, a cancelled child keeps its whole reservation. For
   reporting, record an `estimated` amount: the last `used` figure priced as
@@ -192,8 +212,12 @@ process-group kill does not reach them.
 - While a child runs, record its descendants by parent PID, whatever their
   process group. Walk the tree once more just before shutdown, while lineage is
   still visible, then kill every tracked descendant and the harness.
-- **Kill only by tracked PID, after an identity check:** command line and start
-  time must still match what was recorded. The tree includes the user's MCP
+- **Kill only by tracked PID, after an identity check:** a process's identity
+  is its birth identity, PID and start time, everywhere (tracker, live
+  registry, kills, sweeps); the command line is kept for display only, since
+  it changes when a process execs. (A PID reused within the same second of
+  `ps`'s one-second resolution would look the same; that is the accepted
+  limit.) The tree includes the user's MCP
   servers, plugin hooks and helpers from other apps' bundles; never kill by
   name or pattern.
 - **Live registry.** Every live child is registered in a global folder,
@@ -213,17 +237,79 @@ process-group kill does not reach them.
 - Tracking also widens through a process group, but only one whose leader
   (PID == PGID) is tracked. This keeps a tool's backgrounded child after its
   shell exits, without pulling in unrelated members of a shared group.
-- **The detach gap: decided, to build in M4.** A process that detaches and
-  is reparented between two samples, with its group leader never seen,
-  escapes tracking. M3's `ps`-free survival test (`(sleep 30; touch late.txt)
-  &`, then shutdown, then wait 40 s) hit it on Claude: `late.txt` appeared
-  after shutdown, the `sleep` was never in the tracked set, and Claude itself
-  exited cleanly. Codex and Antigravity left nothing.
-  **Decision:** every child gets a unique `REFRAKTAL_RUN` environment
-  variable. At shutdown Refraktal also kills, with the identity check, every
-  process of the current user whose environment carries this run's value,
-  whatever its parent or process group. Environment variables are inherited
-  by a detached process, so the sweep finds what lineage and groups miss.
+- **Session sweep (closes the detach gap).** A process that detaches and is
+  reparented between two samples, with its group leader never seen, escapes
+  parent-PID tracking: M3's survival test hit it on Claude. So each harness
+  starts as the leader of a new session, and at shutdown, after the tree kill
+  and the process-group kill, Refraktal kills, with the identity check, every
+  process of the current user still in that session, whatever its parent or
+  process group. A session ID is inherited through forks, reparenting and new
+  process groups, and survives the leader's exit.
+  - **A session ID is a PID, and can be reused once the session empties.**
+    So: the harness is not reaped until its session has been swept (Refraktal
+    learns of the exit with `waitid(WNOWAIT)`, and the zombie keeps the ID
+    reserved); every session is polled about once a second and dropped for
+    good once it is seen empty (confirmed by a second look), and only
+    sessions never seen empty are swept; a leader is matched on PID and start
+    time, and if its PID now has another start time the session is not
+    swept; a member that started before the leader is skipped. Residual risk:
+    a session that empties and has its ID reused within one poll interval.
+  - **Dead runs are never swept by session ID.** `run` and `doctor` clean up
+    a dead run by killing only the processes its live record names by
+    identity; the session poll keeps the members it sees in that record.
+  - **Known limit:** a process that calls `setsid()` itself, as
+    pseudo-terminal launchers do, leaves the session and escapes.
+  - **Claude's tool commands: recorded sessions.** Claude's Bash tool starts
+    each command's shell as the leader of a new session (seen live: the tool
+    shell's session ID equals its own PID), so a command's background
+    children are outside the harness's session. Claude calls
+    `CLAUDE_CODE_SHELL_PREFIX`, if set, with the whole command string as one
+    argument, from inside that new session. Refraktal sets it per run, in the
+    environment only (never a settings file), to its own binary in a helper
+    mode selected by `REFRAKTAL_HELPER=shell-prefix` (not a command or a
+    flag). The helper appends the session's leader (PID, start time, command
+    line) to the run's sessions file, removes its own variables from the
+    environment, restores the harness's prefix variable for the command (the
+    user's own value, or none, so a nested claude or refraktal is not
+    routed through the helper), and execs the command with bash or zsh, as
+    Claude Code does (or chains to a prefix the user had set, never to the
+    helper itself). Recorded sessions are polled and swept like the
+    harness session. The helper records only the leader's PID and start
+    time, then checks a shutdown marker, then runs the command; if it cannot
+    record, or the marker exists, it says why on stderr and exits 126
+    without running the command. Before its final read of the sessions file
+    Refraktal creates the marker, so every command that ran was recorded in
+    time. The file is read with no line limit, skipping bad lines.
+  - **Rejected review finding: forged session records.** A process that
+    can append to the sessions file runs as the same user, so it can already
+    kill any of the user's processes; a forged record gains it nothing.
+    M4 open test: `late.txt` left nothing on Claude (2 escaped processes
+    swept). The prefix is opt-in: `RunOptions.ShellPrefix` names a binary
+    that calls `proc.MaybeShellPrefix()` first in `main`, and the CLI passes
+    its own path. It is never guessed from `os.Executable()`: in a test or a
+    library host that is another program, which Claude would then run for
+    every tool command (this happened once in M4 review, in a test, and
+    started a cascade of nested runs). Limit: a Claude settings file that
+    sets `CLAUDE_CODE_SHELL_PREFIX` itself would replace Refraktal's.
+  - Hooks also run through the prefix, so their sessions are swept too. A
+    side finding: children load the user's Claude settings (the adapter asks
+    for user, project and local setting sources), so the user's own Claude
+    hooks run inside children. `strictMcpConfig` does not stop hooks.
+  - Why not the environment: the first plan tagged children with
+    `REFRAKTAL_RUN` and swept by environment. On macOS 27 a process can read
+    only its own environment (M4 open test: another process of the same user
+    shows none, through `KERN_PROCARGS2` or `ps -E`), so it cannot work there.
+- Every child carries `REFRAKTAL_RUN=<run id>-<harness>` in its environment,
+  as a tag for logs only.
+- **No real harness in `go test`.** Inside a test binary, the launcher
+  refuses any executable other than the test binary itself (which is how the
+  fake agent and test helpers run) unless `REFRAKTAL_LIVE=1`, which only the
+  live scripts set. In a test, the shell prefix may only be the test binary,
+  whose `TestMain` calls `proc.MaybeShellPrefix` first.
+- **Nesting guard, independent of budgets.** Every child gets
+  `REFRAKTAL_NEST` one higher than its parent; `run` and `doctor` refuse to
+  start past `--depth` + 1 levels, so no recursion can fan out without bound
+  even if budgets are lost.
 - Scrub the child's environment of the parent's session markers
   (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`).
 
@@ -279,11 +365,15 @@ process-group kill does not reach them.
   the run folder as `result.diff`. With `--no-apply` (or when the apply
   fails, or the turn did not end normally) the worktree and branch stay and
   are printed; otherwise they are removed.
-- **Time limit** 30 minutes until `--mins` arrives (M4): `session/cancel`,
-  then shutdown and the tree kill.
+- **Budgets** as in Budgets above; `--mins` covers the whole run, from
+  start-up to the end of the turn: during the turn, `session/cancel`, then
+  shutdown, the tree kill and the session sweep (`timed_out`); during any
+  setup step (price fetch, worktree, starting the harness),
+  `budget_exhausted`. Both exit 2. Writes to a harness are bounded (10 s, the
+  cancel 2 s), so one that stopped reading cannot hold up the stop.
 - **Exit codes:** 0 applied, kept or no changes; 1 the turn failed or the
-  result did not apply; 2 the time limit ran out; 3 the harness could not be
-  started or logged in.
+  result did not apply; 2 a budget ran out (before the turn, or `--mins`
+  during it); 3 the harness could not be started or logged in.
 
 ## Doctor
 

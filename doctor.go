@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"refraktal.dev/refraktal/internal/budget"
 	"refraktal.dev/refraktal/internal/config"
 	"refraktal.dev/refraktal/internal/harness"
 	"refraktal.dev/refraktal/internal/proc"
@@ -54,6 +55,8 @@ type DoctorOptions struct {
 	Timeout time.Duration
 	// ConfigPath is the config file. Default os.UserConfigDir()/refraktal/config.json.
 	ConfigPath string
+	// ShellPrefix: as RunOptions.ShellPrefix.
+	ShellPrefix string
 	// Neutral is where each handshake gets an empty session folder, outside
 	// any repository, so a repository's own harness settings and hooks never
 	// run during doctor. Default os.UserCacheDir()/refraktal/doctor.
@@ -118,6 +121,9 @@ type CleanupCheck struct {
 // shutdown. No prompt is ever sent.
 func Doctor(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 	var rep DoctorReport
+	if n := proc.Nest(); n > budget.Defaults.Depth+1 {
+		return rep, fmt.Errorf("refusing to start: nested %d levels deep (%s)", n, proc.NestEnv)
+	}
 	if err := o.defaults(); err != nil {
 		return rep, err
 	}
@@ -239,7 +245,8 @@ func checkHarness(ctx context.Context, h harness.Harness, hcfg config.Harness, o
 
 	start := time.Now()
 	s, err := openSession(ctx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, cwd: cwd, tmpDir: filepath.Join(scratch, "tmp"),
-		liveDir: o.LiveDir, labels: map[string]string{"run": run.ID, "harness": h.Name()}, log: log, timeout: o.Timeout})
+		liveDir: o.LiveDir, labels: map[string]string{"run": run.ID, "harness": h.Name()}, log: log, timeout: o.Timeout,
+		env: []string{"REFRAKTAL_RUN=" + run.ID + "-" + h.Name()}, prefixExe: o.ShellPrefix})
 	l := s.launch
 	c.Adapter, c.AdapterInstalled, c.Bundled, c.Installed = l.Adapter, l.AdapterInstalled, l.Bundled, l.Installed
 	if l.MCP != "" {

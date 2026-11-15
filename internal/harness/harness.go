@@ -51,6 +51,9 @@ type Launch struct {
 	Env  []string
 	Meta json.RawMessage // sent as _meta on session/new
 	MCP  string          // the isolation state in effect: isolated or inherit
+	// ShellPrefixVar names the variable the harness calls to wrap each shell
+	// command (Claude: CLAUDE_CODE_SHELL_PREFIX), or "" if it has none.
+	ShellPrefixVar string
 
 	Adapter          string // pinned adapter package@version, or "" for a native ACP harness
 	AdapterInstalled bool   // the adapter was installed into the cache just now
@@ -133,6 +136,7 @@ func (a *adapted) Prepare(ctx context.Context, o Options) (Launch, error) {
 // strictMcpConfig option. Project settings (CLAUDE.md, .claude/settings.json)
 // still load: the adapter asks for user, project and local setting sources.
 func isolateClaude(_ context.Context, o Options, _ string, l *Launch) error {
+	l.ShellPrefixVar = "CLAUDE_CODE_SHELL_PREFIX"
 	if !o.inherit() {
 		l.Meta = json.RawMessage(`{"claudeCode":{"options":{"strictMcpConfig":true}}}`)
 	}
@@ -306,4 +310,23 @@ func ParseVersion(s string) string {
 		return v
 	}
 	return "unknown"
+}
+
+// PriceKeys are the price-table keys to try, in order, for a harness's model.
+// LiteLLM lists OpenAI models without a prefix and Gemini models under
+// "gemini/". Claude reports its own cost, so its key matters only for
+// estimates.
+func PriceKeys(harness, model string) []string {
+	if model == "" {
+		return nil
+	}
+	switch harness {
+	case "agy":
+		return []string{"gemini/" + model, model}
+	case "codex":
+		return []string{model, "openai/" + model}
+	case "claude":
+		return []string{model, "anthropic/" + model}
+	}
+	return []string{model}
 }

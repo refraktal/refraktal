@@ -25,7 +25,31 @@ type Session struct {
 			Name string `json:"name"`
 		} `json:"availableModes"`
 	} `json:"modes,omitempty"`
+	ConfigOptions []ConfigOption `json:"configOptions,omitempty"`
 }
+
+// ConfigOption is one of a session's settings, such as its model.
+type ConfigOption struct {
+	ID           string          `json:"id"`
+	Category     string          `json:"category"`
+	CurrentValue json.RawMessage `json:"currentValue"`
+}
+
+// modelOf returns the current model among config options, or "".
+func modelOf(opts []ConfigOption) string {
+	for _, o := range opts {
+		if o.ID == "model" || o.Category == "model" {
+			var v string
+			if json.Unmarshal(o.CurrentValue, &v) == nil {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+// Model is the session's model as session/new reported it, or "".
+func (s Session) Model() string { return modelOf(s.ConfigOptions) }
 
 // Cost is a cost the harness reports. Claude's is cumulative for the session.
 type Cost struct {
@@ -114,6 +138,7 @@ type Turn struct {
 	Usage       *Usage        // from the prompt response; nil if the harness sent none
 	LastUsed    *int64        // last usage_update "used" during the turn: context fill, never bill from it
 	Cost        *Cost         // last cost reported during the turn
+	Model       string        // the session's model when the turn ended, if the harness reports it
 	Permissions int           // permission requests received during the turn
 	Wall        time.Duration // prompt sent to response
 }

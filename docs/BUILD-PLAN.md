@@ -105,10 +105,13 @@ script, with the run folder redacted.
   on `--mins`; reservation accounting (single child for now).
 - Exit code 2 on exhaustion.
 
-- Close the detach gap (`DESIGN.md`, Processes): give every child a unique
-  `REFRAKTAL_RUN` environment variable, and at shutdown also kill, with the
-  identity check, every process of the current user whose environment
-  carries this run's value, whatever its parent or process group.
+- Close the detach gap (`DESIGN.md`, Processes): each harness starts as the
+  leader of a new session, and at shutdown Refraktal also kills, with the
+  identity check, every process of the current user still in that session.
+  Children keep `REFRAKTAL_RUN` in their environment as a tag for logs only.
+- Claude's tool commands run in sessions of their own: route them through
+  `CLAUDE_CODE_SHELL_PREFIX` set to Refraktal's shell-prefix helper, which
+  records each session for the sweep (decided after the M4 `late.txt` test).
 
 **Done when:** fake-agent tests cover each budget and the cancelled-turn
 accounting rule (and a detached child found only by the sweep), and a live
@@ -116,8 +119,7 @@ script shows `--mins` stopping a long tool turn on each harness with no
 surviving process.
 
 **Open tests at the end:**
-- macOS and Linux let a user read the environment of their own processes,
-  including ones that were reparented, with the method the sweep uses.
+- The session sweep works on macOS and Linux.
 - The `late.txt` survival test from M3 (`(sleep 30; touch late.txt) &`, then
   shutdown, wait 40 s) leaves nothing behind on all three harnesses.
 

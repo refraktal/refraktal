@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 	"time"
 
 	"refraktal.dev/refraktal/internal/acp"
@@ -26,8 +27,14 @@ type sessionSpec struct {
 	tmpDir  string // a private TMPDIR, used by Codex
 	liveDir string
 	labels  map[string]string
-	log     *runlog.Log
-	timeout time.Duration // for initialize, session/new and set_mode
+	env     []string // extra variables for the child, such as REFRAKTAL_RUN
+	// prefixExe is a binary that calls proc.MaybeShellPrefix first in main,
+	// used as the harness's shell prefix; "" means none. It is never guessed
+	// from os.Executable(): in a test or a library host that is a different
+	// program, and Claude would run it for every tool command.
+	prefixExe string
+	log       *runlog.Log
+	timeout   time.Duration // for initialize, session/new and set_mode
 
 	onPermission func(context.Context, acp.PermissionRequest) string
 	onUpdate     func(acp.Update)
@@ -40,6 +47,7 @@ type session struct {
 	client *acp.Client
 	id     string
 	agent  string // name and version from initialize
+	model  string // the model session/new reported, if any
 }
 
 // openError says how far opening got: status is one of the Status constants.
@@ -66,8 +74,25 @@ func openSession(ctx context.Context, sp sessionSpec) (*session, error) {
 		return s, &openError{StatusError, err}
 	}
 	defer stderr.Close() // the child holds its own copy of the descriptor
-	s.child, err = proc.Start(proc.Spec{Argv: s.launch.Argv, Env: s.launch.Env, Dir: sp.cwd, Stderr: stderr,
-		LiveDir: sp.liveDir, Labels: sp.labels})
+	env := append(append([]string{}, s.launch.Env...), sp.env...)
+	var sessions string
+	if v := s.launch.ShellPrefixVar; v != "" && sp.prefixExe != "" {
+		if err := checkShellPrefix(sp.prefixExe); err != nil {
+			return s, &openError{StatusUnavailable, err}
+		}
+		// The harness's tool commands run in sessions of their own. Route each
+		// one through the shell-prefix helper, which records the session for
+		// the shutdown sweep. Environment only: no settings file is touched. A
+		// prefix the user already set is chained, unless it is the helper.
+		sessions = filepath.Join(sp.scratch, "sessions")
+		env = append(env, v+"="+sp.prefixExe, proc.HelperEnv+"=shell-prefix", proc.SessionsEnv+"="+sessions,
+			proc.PrefixVarEnv+"="+v)
+		if orig := os.Getenv(v); orig != "" && !proc.SameFile(orig, sp.prefixExe) {
+			env = append(env, proc.NextEnv+"="+orig)
+		}
+	}
+	s.child, err = proc.Start(proc.Spec{Argv: s.launch.Argv, Env: env, Dir: sp.cwd, Stderr: stderr,
+		LiveDir: sp.liveDir, Labels: sp.labels, SessionsFile: sessions})
 	if err != nil {
 		return s, &openError{StatusUnavailable, err}
 	}
@@ -98,7 +123,7 @@ func openSession(ctx context.Context, sp sessionSpec) (*session, error) {
 		}
 		return s, &openError{StatusError, err}
 	}
-	s.id = ses.ID
+	s.id, s.model = ses.ID, ses.Model()
 	if err := s.client.SetMode(hctx, s.id, sp.h.Mode()); err != nil {
 		return s, &openError{StatusError, fmt.Errorf("mode %s: %w", sp.h.Mode(), err)}
 	}
@@ -125,3 +150,19 @@ func statusOf(err error) string {
 }
 
 func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
+
+// checkShellPrefix makes sure the shell prefix is an executable file and,
+// inside a test binary, the test binary itself: its TestMain must call
+// proc.MaybeShellPrefix first. Any other program would be run by the harness
+// for every tool command.
+func checkShellPrefix(exe string) error {
+	if fi, err := os.Stat(exe); err != nil || fi.IsDir() || fi.Mode()&0o111 == 0 || !filepath.IsAbs(exe) {
+		return fmt.Errorf("shell prefix %q is not an absolute path to an executable", exe)
+	}
+	if testing.Testing() {
+		if self, err := os.Executable(); err != nil || !proc.SameFile(exe, self) {
+			return fmt.Errorf("shell prefix %q refused inside a test: only the test binary, whose TestMain calls proc.MaybeShellPrefix, may be used", exe)
+		}
+	}
+	return nil
+}

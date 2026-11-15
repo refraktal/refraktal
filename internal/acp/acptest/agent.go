@@ -18,10 +18,18 @@
 //	noauth    session/new fails with -32000 Authentication required
 //	oldproto  initialize answers with protocol version 2
 //	auth      as turn, and first sends an auth/status_update carrying an email
+//	slowstart answers initialize only after 3 s
+//	selfcancel ends the turn with stop reason cancelled on its own
+//	noread    stops reading stdin when a prompt arrives
 //	tools     asks permission for three tool calls, shaped as Claude sends
 //	          them, and performs each only if allowed: write hello.txt in the
 //	          cwd, write ../outside.txt, and run git push (simulated: it writes
 //	          pushed.txt in the cwd); then end_turn
+//
+// session/new reports the model in ACPTEST_MODEL (default fake-model). With
+// ACPTEST_NOCOST set, the turn reports tokens but no cost, as Codex and
+// Antigravity do. In hang mode the cancelled response carries usage for a
+// model call that finished before the cancel.
 //
 // If ACPTEST_PROMPTS names a file, every session/prompt appends a line to it,
 // so a test can prove that no prompt was sent, and every session/new appends
@@ -154,6 +162,13 @@ func (a *agent) handle(m message, line string) {
 			ch <- line
 		}
 	case "initialize":
+		if a.mode == "slowstart" { // answers initialize only after 3 s
+			go func(id json.RawMessage) {
+				time.Sleep(3 * time.Second)
+				a.send(message{ID: id, Result: obj{"protocolVersion": 1, "agentInfo": obj{"name": "acptest", "version": "1.0.0"}, "agentCapabilities": obj{}}})
+			}(m.ID)
+			return
+		}
 		version := 1
 		if a.mode == "oldproto" {
 			version = 2
@@ -170,19 +185,31 @@ func (a *agent) handle(m message, line string) {
 		}
 		json.Unmarshal(m.Params, &p)
 		a.cwd = p.Cwd
+		if f := os.Getenv("ACPTEST_PROMPTS"); f != "" { // the shell-prefix variables this agent was given, for tests
+			os.WriteFile(f+".env", []byte("prefix="+os.Getenv("CLAUDE_CODE_SHELL_PREFIX")+" helper="+os.Getenv("REFRAKTAL_HELPER")+
+				" nest="+os.Getenv("REFRAKTAL_NEST")+"\n"), 0o600)
+		}
 		if f := os.Getenv("ACPTEST_PROMPTS"); f != "" { // also record each session folder, for tests
 			if fh, err := os.OpenFile(f+".cwd", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err == nil {
 				fh.WriteString(p.Cwd + "\n")
 				fh.Close()
 			}
 		}
+		model := os.Getenv("ACPTEST_MODEL")
+		if model == "" {
+			model = "fake-model"
+		}
 		a.send(message{ID: m.ID, Result: obj{"sessionId": "fake-1",
-			"modes": obj{"currentModeId": "default", "availableModes": []obj{{"id": "default", "name": "Default"}}}}})
+			"modes":         obj{"currentModeId": "default", "availableModes": []obj{{"id": "default", "name": "Default"}}},
+			"configOptions": []obj{{"id": "model", "category": "model", "currentValue": model}}}})
 		a.update(obj{"sessionUpdate": "available_commands_update", "availableCommands": []obj{{"name": "review", "description": "Review"}}})
 	case "session/set_mode":
 		a.send(message{ID: m.ID, Result: obj{}})
 		a.update(obj{"sessionUpdate": "current_mode_update", "currentModeId": "default"})
 	case "session/prompt":
+		if a.mode == "noread" { // stops reading stdin for good: the client's writes back up
+			time.Sleep(time.Hour)
+		}
 		if f := os.Getenv("ACPTEST_PROMPTS"); f != "" {
 			if fh, err := os.OpenFile(f, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err == nil {
 				fh.WriteString("prompt\n")
@@ -207,10 +234,17 @@ func (a *agent) handle(m message, line string) {
 
 func (a *agent) prompt(id json.RawMessage) {
 	switch a.mode {
+	case "selfcancel": // ends the turn as cancelled on its own, as Codex does after a denial
+		a.update(obj{"sessionUpdate": "usage_update", "used": 4000, "size": 200000})
+		a.send(message{ID: id, Result: obj{"stopReason": "cancelled", "usage": obj{"totalTokens": 300, "inputTokens": 200, "outputTokens": 100}}})
+		return
 	case "hang":
 		a.chunk("working")
+		a.update(obj{"sessionUpdate": "usage_update", "used": 5000, "size": 200000})
 		<-a.cancel
-		a.send(message{ID: id, Result: obj{"stopReason": "cancelled"}})
+		// A model call finished before the cancel; the one in flight is not reported.
+		a.send(message{ID: id, Result: obj{"stopReason": "cancelled",
+			"usage": obj{"totalTokens": 300, "inputTokens": 200, "outputTokens": 100}}})
 		return
 	case "deaf":
 		a.chunk("working")
@@ -264,7 +298,11 @@ func (a *agent) prompt(id json.RawMessage) {
 	a.chunk(" permission=" + a.permission())
 	a.chunk(" fs=" + a.ask("fs/read_text_file", obj{"path": filepath.Join(a.cwd, "note.txt")}))
 	a.update(obj{"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"})
-	a.update(obj{"sessionUpdate": "usage_update", "used": 1500, "size": 200000, "cost": obj{"amount": 0.0123, "currency": "USD"}})
+	if os.Getenv("ACPTEST_NOCOST") != "" { // like Codex and Antigravity: tokens only
+		a.update(obj{"sessionUpdate": "usage_update", "used": 1500, "size": 200000})
+	} else {
+		a.update(obj{"sessionUpdate": "usage_update", "used": 1500, "size": 200000, "cost": obj{"amount": 0.0123, "currency": "USD"}})
+	}
 	a.send(message{ID: id, Result: obj{"stopReason": "end_turn",
 		"usage": obj{"totalTokens": 1500, "inputTokens": 1400, "outputTokens": 100, "cachedReadTokens": 1000}}})
 }
