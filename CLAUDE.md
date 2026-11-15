@@ -47,5 +47,6 @@ The spikes are separate modules: run the same commands inside `spikes/acp` and
 - **Publishing:** `.github/workflows/publish-npm.yml` and `publish-pypi.yml`
   are pinned by the npm and PyPI trusted-publisher configs. Do not rename or
   edit them, or `npm/` and `python/` packaging, without asking.
-- **Commits** are authored as `Adhish Thite <hello@refraktal.dev>`. Show the
-  diff before pushing; never push to `main` directly, use a branch and PR.
+- **Commits** are authored as `Adhish Thite <hello@refraktal.dev>`. Never
+  push to `main` directly: push a branch and open a PR, which is where the diff
+  is reviewed.

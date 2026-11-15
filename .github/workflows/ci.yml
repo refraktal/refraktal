@@ -14,11 +14,12 @@ concurrency:
 
 jobs:
   go:
-    name: go (${{ matrix.module }})
-    runs-on: ubuntu-latest
+    name: go (${{ matrix.os }}, ${{ matrix.module }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest] # the process code must work on both
         module: [., spikes/acp, spikes/routing]
     defaults:
       run:
