@@ -234,6 +234,7 @@ func TestDoctorDeciderCheck(t *testing.T) {
 	if d := checkDecider(context.Background(), opts); d.Kind != "fallback" || !strings.Contains(d.Reason, "not set") {
 		t.Fatalf("no key: %+v", d)
 	}
+	exec.Command("git", "-C", r.root, "init", "-q").Run() // .env counts only in a git work tree, untracked
 	os.WriteFile(filepath.Join(r.root, ".env"), []byte("GEMINI_API_KEY=from-dotenv\n"), 0o600)
 	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "down", 503) }))
 	defer down.Close()

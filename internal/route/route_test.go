@@ -151,6 +151,9 @@ func TestKeyOnlyInTheHeader(t *testing.T) {
 
 func TestLoadKey(t *testing.T) {
 	dir := t.TempDir()
+	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
 	if k, src := LoadKey(dir, func(string) string { return "" }); k != "" || src != "" {
 		t.Fatalf("no key: %q %q", k, src)
 	}
@@ -295,5 +298,32 @@ func TestTrackedDotEnvIsIgnored(t *testing.T) {
 	git("commit", "-q", "-m", "x")
 	if k, src := LoadKey(dir, func(string) string { return "" }); k != "" {
 		t.Fatalf("a tracked .env supplied the key (%s)", src)
+	}
+}
+
+// The .env check fails closed: outside a git work tree, or when a tracked
+// path matches .env in any case (as .ENV opens as .env on macOS), the .env
+// is not a key source.
+func TestDotEnvCheckFailsClosed(t *testing.T) {
+	plain := t.TempDir() // not a git repository: git errors, so no key
+	os.WriteFile(filepath.Join(plain, ".env"), []byte("GEMINI_API_KEY=k\n"), 0o600)
+	if k, _ := LoadKey(plain, func(string) string { return "" }); k != "" {
+		t.Fatal("read a .env outside a git work tree")
+	}
+	dir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v %s", err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "core.ignorecase", "false")
+	os.WriteFile(filepath.Join(dir, ".ENV"), []byte("GEMINI_API_KEY=attackers-key\n"), 0o600)
+	run("add", "-f", ".ENV")
+	run("commit", "-q", "-m", "x")
+	if k, _ := LoadKey(dir, func(string) string { return "" }); k != "" {
+		t.Fatal("a tracked .ENV supplied the key")
 	}
 }

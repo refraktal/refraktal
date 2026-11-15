@@ -456,7 +456,8 @@ A System 1 decision model chooses; harnesses are System 2.
   refused until M6. `--dry` routes and plans only (exit 0): no worktree, no
   harness.
 - The key comes from `GEMINI_API_KEY` in the environment, else the
-  repository's `.env` only if git does not track it (a committed `.env` in a
+  repository's `.env` only if git confirms a work tree and tracks no path
+  matching `.env` in any case (any git error means no) (a committed `.env` in a
   repository someone else wrote could carry their key, and task text would go
   to their project); a notice says when it came from `.env`. It goes only in
   the `x-goog-api-key` header, never in a URL, log or output. The decision

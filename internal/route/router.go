@@ -39,8 +39,8 @@ func LoadKey(root string, getenv func(string) string) (key, source string) {
 	if k := strings.TrimSpace(getenv(KeyEnv)); k != "" {
 		return k, "environment"
 	}
-	if exec.Command("git", "-C", root, "ls-files", "--error-unmatch", ".env").Run() == nil {
-		return "", "" // tracked by git: not a key source
+	if !untrackedDotEnv(root) {
+		return "", ""
 	}
 	f, err := os.Open(filepath.Join(root, ".env"))
 	if err != nil {
@@ -64,6 +64,27 @@ func LoadKey(root string, getenv func(string) string) (key, source string) {
 		}
 	}
 	return "", ""
+}
+
+// untrackedDotEnv reports whether root's .env may supply the key: git must
+// confirm root is a work tree, and no tracked path may match .env in any case
+// (.ENV opens as .env on a case-insensitive filesystem). Any git error means
+// no: the check fails closed.
+func untrackedDotEnv(root string) bool {
+	out, err := exec.Command("git", "-C", root, "rev-parse", "--is-inside-work-tree").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "true" {
+		return false
+	}
+	tracked, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
+	if err != nil {
+		return false
+	}
+	for _, p := range strings.Split(string(tracked), "\x00") {
+		if strings.EqualFold(p, ".env") {
+			return false
+		}
+	}
+	return true
 }
 
 // Options configure a Router.
