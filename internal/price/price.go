@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -56,12 +57,19 @@ func (p Price) Cost(u acp.Usage) float64 {
 
 // Table holds prices by model key.
 type Table struct {
-	prices map[string]Price
-	Source string // "cache", "fetched", "stale cache" or "none"
+	prices    map[string]Price
+	overrides map[string]Price // from the config; checked for every key before the table
+	Source    string           // "cache", "fetched", "stale cache" or "none"
 }
 
-// Lookup returns the price for the first key that has one, and that key.
+// Lookup returns the price for the first key that has one, and that key. An
+// override for any of the keys wins over the table for all of them.
 func (t Table) Lookup(keys ...string) (Price, string, bool) {
+	for _, k := range keys {
+		if p, ok := t.overrides[k]; ok {
+			return p, k, true
+		}
+	}
 	for _, k := range keys {
 		if p, ok := t.prices[k]; ok {
 			return p, k, true
@@ -70,12 +78,12 @@ func (t Table) Lookup(keys ...string) (Price, string, bool) {
 	return Price{}, "", false
 }
 
-// Override sets the price for a model, replacing the table's.
+// Override sets the price for a model; it wins over the table under any key.
 func (t *Table) Override(model string, p Price) {
-	if t.prices == nil {
-		t.prices = map[string]Price{}
+	if t.overrides == nil {
+		t.overrides = map[string]Price{}
 	}
-	t.prices[model] = p
+	t.overrides[model] = p
 }
 
 // Parse reads LiteLLM's JSON. Entries without an input and an output price
@@ -93,7 +101,7 @@ func Parse(b []byte) (Table, error) {
 			CacheRead  *float64 `json:"cache_read_input_token_cost"`
 			CacheWrite *float64 `json:"cache_creation_input_token_cost"`
 		}
-		if json.Unmarshal(v, &e) != nil || e.Input == nil || e.Output == nil {
+		if json.Unmarshal(v, &e) != nil || e.Input == nil || e.Output == nil || !valid(e.Input, e.Output, e.CacheRead, e.CacheWrite) {
 			continue
 		}
 		p := Price{Input: *e.Input, Output: *e.Output}
@@ -204,4 +212,14 @@ func writeCache(path string, b []byte) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// valid reports whether every price present is finite and not negative.
+func valid(prices ...*float64) bool {
+	for _, p := range prices {
+		if p != nil && (*p < 0 || math.IsNaN(*p) || math.IsInf(*p, 0)) {
+			return false
+		}
+	}
+	return true
 }

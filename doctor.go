@@ -54,6 +54,8 @@ type DoctorOptions struct {
 	Timeout time.Duration
 	// ConfigPath is the config file. Default os.UserConfigDir()/refraktal/config.json.
 	ConfigPath string
+	// ShellPrefix: as RunOptions.ShellPrefix.
+	ShellPrefix string
 	// Neutral is where each handshake gets an empty session folder, outside
 	// any repository, so a repository's own harness settings and hooks never
 	// run during doctor. Default os.UserCacheDir()/refraktal/doctor.
@@ -240,7 +242,7 @@ func checkHarness(ctx context.Context, h harness.Harness, hcfg config.Harness, o
 	start := time.Now()
 	s, err := openSession(ctx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, cwd: cwd, tmpDir: filepath.Join(scratch, "tmp"),
 		liveDir: o.LiveDir, labels: map[string]string{"run": run.ID, "harness": h.Name()}, log: log, timeout: o.Timeout,
-		env: []string{"REFRAKTAL_RUN=" + run.ID + "-" + h.Name()}})
+		env: []string{"REFRAKTAL_RUN=" + run.ID + "-" + h.Name()}, prefixExe: o.ShellPrefix})
 	l := s.launch
 	c.Adapter, c.AdapterInstalled, c.Bundled, c.Installed = l.Adapter, l.AdapterInstalled, l.Bundled, l.Installed
 	if l.MCP != "" {

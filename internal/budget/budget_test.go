@@ -132,3 +132,16 @@ func TestUnpricedCountsAsZero(t *testing.T) {
 		t.Fatalf("summary %+v", sum)
 	}
 }
+
+// 5. NaN and Inf are not budgets, and --mins has a ceiling.
+func TestNonFiniteAndHugeBudgetsAreRejected(t *testing.T) {
+	for _, l := range []Limits{
+		{USD: math.NaN(), Turns: 1, Wall: time.Minute},
+		{USD: math.Inf(1), Turns: 1, Wall: time.Minute},
+		{USD: 1, Turns: 1, Wall: MaxWall + time.Minute},
+	} {
+		if _, err := New(l, nil); err == nil {
+			t.Errorf("%+v accepted", l)
+		}
+	}
+}

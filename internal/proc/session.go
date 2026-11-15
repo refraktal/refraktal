@@ -13,17 +13,24 @@ import (
 // user still in the harness's session are the harness's leftovers, including
 // any that detached and escaped the parent-PID tracking.
 
+// membersOf lists a session's members; a variable so tests can simulate a
+// session whose ID is reused.
+var membersOf = sessionMembers
+
 // ErrSessionReused means the session leader's PID now belongs to another
 // process, so the session ID may name a different session: nothing is swept.
 var ErrSessionReused = errors.New("proc: the session leader's PID is now another process; session not swept")
 
 // sessionMembers returns this user's processes in session sid, except this
 // process, each listed the same before and after the session lookup (so a PID
-// reused during the lookup is left out).
-func sessionMembers(sid int) ([]Proc, error) {
+// reused during the lookup is left out). occupied reports whether any process
+// held the session ID at all: a process that execs between the two listings
+// is left out of members but still counts, so a live session never looks
+// empty.
+func sessionMembers(sid int) (members []Proc, occupied bool, err error) {
 	before, err := List()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	uid, self := os.Getuid(), os.Getpid()
 	var cand []int
@@ -36,11 +43,11 @@ func sessionMembers(sid int) ([]Proc, error) {
 		}
 	}
 	if len(cand) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 	after, err := List()
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
 	var out []Proc
 	for _, pid := range cand {
@@ -48,14 +55,20 @@ func sessionMembers(sid int) ([]Proc, error) {
 			out = append(out, a)
 		}
 	}
-	return out, nil
+	return out, true, nil
 }
 
 // SweepSession kills, with the identity check, every process of this user
 // still in the session that leader started. leader is the session leader as
-// recorded when it started. If its PID now belongs to another process, the
-// ID may name a new session and nothing is killed. (While any member of the
-// original session is alive, the ID cannot be handed out again.)
+// recorded; it is matched on PID and start time only, since its command line
+// may change when it execs. If its PID now belongs to a process with another
+// start time, the ID may name a new session and nothing is killed. A member
+// that started before the leader cannot be in the leader's session and is
+// skipped.
+//
+// SweepSession cannot tell a session that emptied, and whose ID was then
+// reused, from the original: callers sweep only sessions they have never seen
+// empty (Child polls them while it runs).
 func SweepSession(leader Proc) (KillReport, error) {
 	r := KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}}
 	if leader.PID <= 1 {
@@ -66,10 +79,10 @@ func SweepSession(leader Proc) (KillReport, error) {
 		if err != nil {
 			return r, err
 		}
-		if now, ok := all[leader.PID]; ok && !now.Same(leader) {
+		if now, ok := all[leader.PID]; ok && now.Start != leader.Start {
 			return r, ErrSessionReused
 		}
-		members, err := sessionMembers(leader.PID)
+		members, _, err := sessionOf(leader)
 		if err != nil {
 			return r, err
 		}
@@ -87,4 +100,31 @@ func SweepSession(leader Proc) (KillReport, error) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return r, nil
+}
+
+// sessionOf lists the members of leader's session that started no earlier
+// than the leader, and whether the session ID is held by any process.
+func sessionOf(leader Proc) ([]Proc, bool, error) {
+	members, occupied, err := membersOf(leader.PID)
+	if err != nil {
+		return nil, occupied, err
+	}
+	since, ok := startTime(leader.Start)
+	if !ok {
+		return members, occupied, nil
+	}
+	out := members[:0]
+	for _, m := range members {
+		if t, ok := startTime(m.Start); ok && t.Before(since) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out, occupied, nil
+}
+
+// startTime parses a start time as ps prints it (lstart).
+func startTime(s string) (time.Time, bool) {
+	t, err := time.ParseInLocation("Mon Jan 2 15:04:05 2006", s, time.Local)
+	return t, err == nil
 }

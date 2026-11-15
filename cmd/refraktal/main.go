@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"strings"
@@ -69,7 +70,7 @@ func doctor(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return refraktal.ExitNothingUsable
 	}
-	rep, err := refraktal.Doctor(ctx, refraktal.DoctorOptions{})
+	rep, err := refraktal.Doctor(ctx, refraktal.DoctorOptions{ShellPrefix: selfPath()})
 	if err != nil {
 		fmt.Fprintf(stderr, "refraktal doctor: %v\n", err)
 		return refraktal.ExitNothingUsable
@@ -114,6 +115,12 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 	case *fan != 0, *dry:
 		fmt.Fprintln(stderr, "refraktal run: --fan and --dry are not implemented yet")
 		return refraktal.ExitNothingUsable
+	case math.IsNaN(*usd) || math.IsInf(*usd, 0) || math.IsNaN(*mins) || math.IsInf(*mins, 0):
+		fmt.Fprintln(stderr, "refraktal run: --usd and --mins must be finite numbers")
+		return refraktal.ExitNothingUsable
+	case *mins > budget.MaxWall.Minutes():
+		fmt.Fprintf(stderr, "refraktal run: --mins must be at most %.0f\n", budget.MaxWall.Minutes())
+		return refraktal.ExitNothingUsable
 	case *usd < 0 || *turns < 0 || *mins <= 0:
 		fmt.Fprintln(stderr, "refraktal run: --usd and --turns must not be negative, and --mins must be more than 0")
 		return refraktal.ExitNothingUsable
@@ -132,6 +139,7 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 	enc := json.NewEncoder(stdout)
 	lim := budget.Limits{USD: *usd, Turns: *turns, Wall: time.Duration(*mins * float64(time.Minute)), Depth: *depth}
 	res, err := refraktal.Run(ctx, refraktal.RunOptions{Task: task, Harness: *harnessName, NoApply: *noApply, Budget: &lim,
+		ShellPrefix: selfPath(),
 		OnNotice: func(n string) {
 			if *asJSON {
 				enc.Encode(map[string]string{"type": "notice", "text": n})
@@ -199,4 +207,14 @@ func readTask(words []string, stdin *os.File) (string, error) {
 		task = strings.TrimSpace(task + "\n\n" + in)
 	}
 	return task, nil
+}
+
+// selfPath is this binary, which handles the shell-prefix helper mode in
+// main; "" if it cannot be found.
+func selfPath() string {
+	p, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return p
 }

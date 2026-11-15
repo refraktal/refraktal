@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"syscall"
 )
@@ -25,6 +26,7 @@ const (
 	HelperEnv    = "REFRAKTAL_HELPER"      // "shell-prefix" selects the helper
 	SessionsEnv  = "REFRAKTAL_SESSIONS"    // the file the helper appends session leaders to
 	NextEnv      = "REFRAKTAL_PREFIX_NEXT" // a prefix the user had set, to chain to
+	PrefixVarEnv = "REFRAKTAL_PREFIX_VAR"  // the harness's prefix variable, restored for the command
 	helperPrefix = "shell-prefix"
 )
 
@@ -50,31 +52,62 @@ func shellPrefix(args []string) error {
 	if err := recordSession(os.Getenv(SessionsEnv)); err != nil {
 		fmt.Fprintln(os.Stderr, "refraktal shell prefix: session not recorded:", err)
 	}
-	next := os.Getenv(NextEnv)
+	next, prefixVar := os.Getenv(NextEnv), os.Getenv(PrefixVarEnv)
+	if self, err := os.Executable(); err == nil && next != "" && SameFile(next, self) {
+		next = "" // chaining to the helper itself would loop
+	}
+	// The command and its children must not become helpers, and must see the
+	// harness's prefix variable as the user had it (or not at all): a nested
+	// claude or refraktal would otherwise route every command through us.
 	env := make([]string, 0, len(os.Environ()))
-	for _, kv := range os.Environ() { // the command and its children must not become helpers
-		if name, _, _ := cutEq(kv); name != HelperEnv && name != SessionsEnv && name != NextEnv {
-			env = append(env, kv)
+	for _, kv := range os.Environ() {
+		name, _, _ := cutEq(kv)
+		if name == HelperEnv || name == SessionsEnv || name == NextEnv || name == PrefixVarEnv || (prefixVar != "" && name == prefixVar) {
+			continue
 		}
+		env = append(env, kv)
+	}
+	if prefixVar != "" && next != "" {
+		env = append(env, prefixVar+"="+next)
 	}
 	var argv []string
 	if next != "" {
 		argv = append([]string{next}, args...)
 	} else {
-		sh := os.Getenv("CLAUDE_CODE_SHELL")
-		if sh == "" {
-			sh = os.Getenv("SHELL")
-		}
-		if sh == "" {
-			sh = "/bin/sh"
-		}
-		argv = append([]string{sh, "-c"}, args...)
+		argv = append([]string{commandShell(), "-c"}, args...)
 	}
 	path, err := exec.LookPath(argv[0])
 	if err != nil {
 		return err
 	}
 	return syscall.Exec(path, argv, env)
+}
+
+// commandShell picks the shell Claude Code runs commands with: the user's
+// shell if it is bash or zsh, otherwise bash from PATH.
+func commandShell() string {
+	for _, v := range []string{"CLAUDE_CODE_SHELL", "SHELL"} {
+		sh := os.Getenv(v)
+		if b := filepath.Base(sh); (b == "bash" || b == "zsh") && executable(sh) {
+			return sh
+		}
+	}
+	if p, err := exec.LookPath("bash"); err == nil {
+		return p
+	}
+	return "/bin/sh"
+}
+
+func executable(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0
+}
+
+// SameFile reports whether two paths name the same file, after symlinks.
+func SameFile(a, b string) bool {
+	fa, err1 := os.Stat(a)
+	fb, err2 := os.Stat(b)
+	return err1 == nil && err2 == nil && os.SameFile(fa, fb)
 }
 
 func cutEq(kv string) (string, string, bool) {
@@ -157,23 +190,6 @@ func RecordedSessions(path string) ([]Proc, error) {
 	return out, sc.Err()
 }
 
-// sweepRecorded sweeps every session recorded in path. A session whose
-// leader's PID now belongs to another process is skipped.
-func sweepRecorded(path string) (KillReport, error) {
-	r := KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}}
-	leaders, err := RecordedSessions(path)
-	if err != nil {
-		return r, err
-	}
-	for _, l := range leaders {
-		kr, err := SweepSession(l)
-		if err != nil && !errors.Is(err, ErrSessionReused) {
-			return r, err
-		}
-		r.Killed = append(r.Killed, kr.Killed...)
-		r.Gone = append(r.Gone, kr.Gone...)
-		r.Changed = append(r.Changed, kr.Changed...)
-		r.Alive = append(r.Alive, kr.Alive...)
-	}
-	return r, nil
-}
+// betweenRecordedReads runs between the two reads of the sessions file at
+// shutdown; a variable so tests can append a record in that window.
+var betweenRecordedReads = func() {}

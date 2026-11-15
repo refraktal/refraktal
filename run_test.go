@@ -263,3 +263,29 @@ func TestRunReportsAnOverrun(t *testing.T) {
 		t.Fatalf("%+v notices %v", res.Settlement, res.Notices)
 	}
 }
+
+// 9. --mins running out while the harness starts is a spent budget (exit 2),
+// not an unusable harness, and the budget summary is filled in.
+func TestRunStartupDeadlineIsBudgetExhausted(t *testing.T) {
+	r := newRunRig(t)
+	res := r.run(t, fake{name: "claude", agentMode: "slowstart"}, func(o *RunOptions) { o.Budget.Wall = time.Second })
+	if res.Outcome != RunExhausted || res.ExitCode() != ExitBudget || res.Budget.Limits.USD != 5 {
+		t.Fatalf("%+v", res)
+	}
+}
+
+// The shell prefix is never guessed from os.Executable(): in a test or a
+// library host that is a different program, and Claude would run it for
+// every tool command. Without RunOptions.ShellPrefix there is no prefix.
+func TestShellPrefixIsOptIn(t *testing.T) {
+	r := newRunRig(t)
+	h := fake{name: "claude", agentMode: "turn", prefixVar: "CLAUDE_CODE_SHELL_PREFIX"}
+	r.run(t, h, nil)
+	if b, _ := os.ReadFile(r.prompts + ".env"); strings.TrimSpace(string(b)) != "prefix= helper=" {
+		t.Fatalf("without ShellPrefix the harness got %q", b)
+	}
+	r.run(t, h, func(o *RunOptions) { o.ShellPrefix = "/opt/refraktal" })
+	if b, _ := os.ReadFile(r.prompts + ".env"); strings.TrimSpace(string(b)) != "prefix=/opt/refraktal helper=shell-prefix" {
+		t.Fatalf("with ShellPrefix the harness got %q", b)
+	}
+}

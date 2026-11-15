@@ -98,3 +98,29 @@ func TestLoadCachesAndFallsBack(t *testing.T) {
 		t.Fatal("empty table priced a model")
 	}
 }
+
+// 3. An override wins for every key, including when the table has the model
+// under a prefixed key.
+func TestOverrideWinsOverAPrefixedTableKey(t *testing.T) {
+	tb, _ := Parse([]byte(sample))
+	tb.Override("gemini-4-carbon", Price{Input: 9e-6, Output: 9e-6})
+	p, key, ok := tb.Lookup("gemini/gemini-4-carbon", "gemini-4-carbon")
+	if !ok || p.Input != 9e-6 || key != "gemini-4-carbon" {
+		t.Fatalf("got %+v from %q, want the override", p, key)
+	}
+}
+
+// 8. Negative or non-finite prices are skipped.
+func TestParseSkipsNegativePrices(t *testing.T) {
+	tb, err := Parse([]byte(`{"ok": {"input_cost_per_token": 1e-6, "output_cost_per_token": 2e-6},
+		"neg": {"input_cost_per_token": -1e-6, "output_cost_per_token": 2e-6},
+		"negcache": {"input_cost_per_token": 1e-6, "output_cost_per_token": 2e-6, "cache_read_input_token_cost": -1}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"neg", "negcache"} {
+		if _, _, ok := tb.Lookup(k); ok {
+			t.Errorf("%s kept", k)
+		}
+	}
+}

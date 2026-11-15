@@ -17,12 +17,10 @@ import (
 
 // Record is the content of a live record.
 type Record struct {
-	Owner        Proc              `json:"owner"`                   // the Refraktal process that started the child
-	Child        Proc              `json:"child"`                   // the harness process itself
-	Session      bool              `json:"session"`                 // the child led a session of its own: sweep it
-	SessionsFile string            `json:"sessions_file,omitempty"` // sessions its tool commands ran in (shell-prefix helper)
-	Tracked      []Proc            `json:"tracked"`                 // its descendants seen so far
-	Labels       map[string]string `json:"labels,omitempty"`
+	Owner   Proc              `json:"owner"`   // the Refraktal process that started the child
+	Child   Proc              `json:"child"`   // the harness process itself
+	Tracked []Proc            `json:"tracked"` // its descendants and session members seen so far
+	Labels  map[string]string `json:"labels,omitempty"`
 }
 
 // DefaultLiveDir is os.UserConfigDir()/refraktal/live.
@@ -57,7 +55,9 @@ type CleanupReport struct {
 
 // CleanLeftovers kills the processes listed in records whose owner is no
 // longer running, then removes those records. Each process is killed only if
-// it still matches its record (PID, start time and command line).
+// it still matches its record (PID, start time and command line). It never
+// sweeps by session ID: a dead run's sessions may have emptied and their IDs
+// been reused. Session members a run saw are in its record by identity.
 func CleanLeftovers(dir string) (CleanupReport, error) {
 	r := CleanupReport{Kill: KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}}, Errors: []string{}}
 	entries, err := os.ReadDir(dir)
@@ -100,24 +100,6 @@ func CleanLeftovers(dir string) (CleanupReport, error) {
 		r.Kill.Gone = append(r.Kill.Gone, kr.Gone...)
 		r.Kill.Changed = append(r.Kill.Changed, kr.Changed...)
 		r.Kill.Alive = append(r.Kill.Alive, kr.Alive...)
-		if rec.Session {
-			sr, err := SweepSession(rec.Child)
-			if err != nil && !errors.Is(err, ErrSessionReused) {
-				r.Errors = append(r.Errors, fmt.Sprintf("%s: %v", e.Name(), err))
-			}
-			r.Kill.Killed = append(r.Kill.Killed, sr.Killed...)
-			r.Kill.Alive = append(r.Kill.Alive, sr.Alive...)
-			kr.Alive = append(kr.Alive, sr.Alive...)
-		}
-		if rec.SessionsFile != "" {
-			sr, err := sweepRecorded(rec.SessionsFile)
-			if err != nil {
-				r.Errors = append(r.Errors, fmt.Sprintf("%s: %v", e.Name(), err))
-			}
-			r.Kill.Killed = append(r.Kill.Killed, sr.Killed...)
-			r.Kill.Alive = append(r.Kill.Alive, sr.Alive...)
-			kr.Alive = append(kr.Alive, sr.Alive...)
-		}
 		if len(kr.Alive) == 0 {
 			os.Remove(path)
 		}

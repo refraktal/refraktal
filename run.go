@@ -55,6 +55,11 @@ type RunOptions struct {
 	LiveDir, ConfigPath, WorktreeDir string
 	// Harnesses to choose from. Default harness.Defaults.
 	Harnesses []harness.Harness
+	// ShellPrefix is a binary that calls proc.MaybeShellPrefix first in its
+	// main. It is set as Claude's shell prefix so the sessions its tool
+	// commands run in are recorded and swept. The CLI passes its own path.
+	// Empty means none: those sessions are then not swept.
+	ShellPrefix string
 	// OnNotice receives each notice as it is made, such as hooks in the
 	// repository or an inherited MCP setup. Optional.
 	OnNotice func(string)
@@ -248,7 +253,8 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		// REFRAKTAL_RUN tags the child's processes for logs only (the session
 		// sweep finds leftovers). REFRAKTAL_BUDGET is what a child Refraktal
 		// may use.
-		env: []string{"REFRAKTAL_RUN=" + run.ID + "-" + h.Name(), "REFRAKTAL_BUDGET=" + string(childBudget)},
+		env:       []string{"REFRAKTAL_RUN=" + run.ID + "-" + h.Name(), "REFRAKTAL_BUDGET=" + string(childBudget)},
+		prefixExe: o.ShellPrefix,
 		onPermission: func(_ context.Context, req acp.PermissionRequest) string {
 			d := pol.Decide(req)
 			mu.Lock()
@@ -275,8 +281,14 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	if err != nil {
 		s.close(log, h.Name(), 5*time.Second)
 		res.Error = fmt.Sprintf("%s: %v", statusOf(err), err)
+		if errors.Is(openCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			// --mins ran out while the harness was starting: a spent budget.
+			res.Outcome, res.Error = RunExhausted, "budget exhausted: --mins ran out while starting the harness ("+res.Error+")"
+		}
+		st := ledger.Settle(grant, false)
+		res.Settlement, res.Budget = &st, ledger.Summary()
 		wt.Remove(context.Background())
-		log.Event("run_end", map[string]any{"outcome": res.Outcome, "error": res.Error})
+		log.Event("run_end", map[string]any{"outcome": res.Outcome, "error": res.Error, "budget": res.Budget})
 		return res, nil
 	}
 

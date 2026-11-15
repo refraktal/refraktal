@@ -44,6 +44,9 @@ type Spec struct {
 	// SessionsFile, if set, is where the shell-prefix helper records the
 	// sessions the child's tool commands run in; Shutdown sweeps them too.
 	SessionsFile string
+	// SessionPollEvery is how often recorded sessions are checked for being
+	// empty; default 1 s.
+	SessionPollEvery time.Duration
 }
 
 // Child is a running harness process in a process group of its own, with its
@@ -54,9 +57,16 @@ type Child struct {
 
 	cmd     *exec.Cmd
 	tracker *Tracker
-	exited  chan struct{}
+	exited  chan struct{} // closed when the child has exited (it may not be reaped yet)
+	reaped  chan struct{} // closed when the child has been reaped: its PID is free
+	reapOne sync.Once
 	stop    chan struct{}
 	polling chan struct{}
+	spoll   chan struct{} // closed when the session poller has stopped
+
+	smu     sync.Mutex
+	dropped map[string]bool // sessions (by leader PID and start) seen empty: never swept
+	members map[int]Proc    // session members seen by the poller, kept in the live record
 
 	once   sync.Once
 	report ShutdownReport
@@ -99,12 +109,21 @@ func Start(s Spec) (*Child, error) {
 		outR.Close()
 		return nil, err
 	}
-	c := &Child{Stdin: inW, Stdout: outR, cmd: cmd, exited: make(chan struct{}),
-		stop: make(chan struct{}), polling: make(chan struct{})}
-	go func() { cmd.Wait(); close(c.exited) }()
+	c := &Child{Stdin: inW, Stdout: outR, cmd: cmd, exited: make(chan struct{}), reaped: make(chan struct{}),
+		stop: make(chan struct{}), polling: make(chan struct{}), spoll: make(chan struct{}),
+		dropped: map[string]bool{}, members: map[int]Proc{}}
+	// Learn of the exit without reaping: an exited, unreaped child keeps its
+	// PID, and so its session ID, reserved until Shutdown has swept it. Where
+	// that is not possible, fall back to reaping at once.
+	go func() {
+		if err := waitExited(cmd.Process.Pid); err != nil {
+			c.reap()
+		}
+		close(c.exited)
+	}()
 	c.tracker = NewTracker(cmd.Process.Pid, func() bool {
 		select {
-		case <-c.exited:
+		case <-c.reaped:
 			return false
 		default:
 			return true
@@ -118,6 +137,7 @@ func Start(s Spec) (*Child, error) {
 	if s.LiveDir != "" {
 		c.startRecord(s.LiveDir, s.Labels)
 	}
+	go c.pollSessions(cmp.Or(s.SessionPollEvery, time.Second))
 	every := cmp.Or(s.PollEvery, 200*time.Millisecond)
 	go func() {
 		defer close(c.polling)
@@ -152,7 +172,7 @@ func (c *Child) startRecord(dir string, labels map[string]string) {
 		return
 	}
 	self := os.Getpid()
-	c.recordBase = Record{Owner: all[self], Child: c.leader, Session: true, SessionsFile: c.sessions, Labels: labels}
+	c.recordBase = Record{Owner: all[self], Child: c.leader, Labels: labels}
 	c.record = filepath.Join(dir, fmt.Sprintf("%d-%d.json", self, c.PID()))
 	c.writeRecord()
 }
@@ -160,15 +180,131 @@ func (c *Child) startRecord(dir string, labels map[string]string) {
 func (c *Child) writeRecord() {
 	r := c.recordBase
 	r.Tracked = c.tracker.Tracked()
+	c.smu.Lock()
+	for pid, p := range c.members {
+		if !slices.ContainsFunc(r.Tracked, func(q Proc) bool { return q.PID == pid }) {
+			r.Tracked = append(r.Tracked, p)
+		}
+	}
+	c.smu.Unlock()
 	if err := writeRecord(c.record, r); err != nil {
 		c.recordErr = err
 	}
 }
 
+// reap waits for the child and frees its PID. It runs once.
+func (c *Child) reap() {
+	c.reapOne.Do(func() { c.cmd.Wait(); close(c.reaped) })
+}
+
+func sessionKey(leader Proc) string { return fmt.Sprintf("%d|%s", leader.PID, leader.Start) }
+
+// pollSessions checks the child's session and every recorded session about
+// once a second. A session seen empty is dropped for good: its ID may be
+// reused, and a later process with that session ID is a stranger. Members
+// seen are kept in the live record, so cleanup after a dead run can kill
+// them by identity.
+func (c *Child) pollSessions(every time.Duration) {
+	defer close(c.spoll)
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-c.stop:
+			return
+		case <-t.C:
+		}
+		c.checkSessions()
+	}
+}
+
+func (c *Child) sessionLeaders() []Proc {
+	leaders := []Proc{c.leader}
+	if c.sessions != "" {
+		recorded, _ := RecordedSessions(c.sessions)
+		leaders = append(leaders, recorded...)
+	}
+	return leaders
+}
+
+func (c *Child) checkSessions() {
+	grew := false
+	for _, l := range c.sessionLeaders() {
+		c.smu.Lock()
+		dropped := c.dropped[sessionKey(l)]
+		c.smu.Unlock()
+		if dropped {
+			continue
+		}
+		members, occupied, err := sessionOf(l)
+		if err == nil && !occupied {
+			// Confirm with a fresh look: one check lists processes, then asks
+			// each for its session, and a fork followed by an exit between the
+			// two can make a live session look empty for a moment.
+			time.Sleep(50 * time.Millisecond)
+			members, occupied, err = sessionOf(l)
+		}
+		if err != nil {
+			continue
+		}
+		c.smu.Lock()
+		if !occupied {
+			c.dropped[sessionKey(l)] = true
+		}
+		for _, m := range members {
+			if _, ok := c.members[m.PID]; !ok {
+				c.members[m.PID] = m
+				grew = true
+			}
+		}
+		c.smu.Unlock()
+	}
+	if grew && c.record != "" {
+		c.writeRecord()
+	}
+}
+
+// sweepSessions sweeps the child's session and every recorded session never
+// seen empty. The sessions file is read twice, the second time after a short
+// delay, so a record a tool command appended late is not missed.
+func (c *Child) sweepSessions() (KillReport, error) {
+	r := KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}}
+	done := map[string]bool{}
+	var firstErr error
+	pass := func() {
+		for _, l := range c.sessionLeaders() {
+			k := sessionKey(l)
+			c.smu.Lock()
+			skip := c.dropped[k] || done[k]
+			c.smu.Unlock()
+			if skip {
+				continue
+			}
+			done[k] = true
+			kr, err := SweepSession(l)
+			if err != nil && !errors.Is(err, ErrSessionReused) && firstErr == nil {
+				firstErr = err
+			}
+			r.Killed = append(r.Killed, kr.Killed...)
+			r.Gone = append(r.Gone, kr.Gone...)
+			r.Changed = append(r.Changed, kr.Changed...)
+			r.Alive = append(r.Alive, kr.Alive...)
+		}
+	}
+	pass()
+	if c.sessions != "" {
+		betweenRecordedReads()
+		time.Sleep(300 * time.Millisecond)
+		pass()
+	}
+	return r, firstErr
+}
+
 // PID is the child's process ID, which is also its process group ID.
 func (c *Child) PID() int { return c.cmd.Process.Pid }
 
-// Exited is closed once the child has exited and been reaped.
+// Exited is closed once the child has exited. Its PID stays reserved until
+// Shutdown reaps it, so always call Shutdown.
 func (c *Child) Exited() <-chan struct{} { return c.exited }
 
 // Tracked returns every descendant seen so far.
@@ -196,6 +332,7 @@ func (c *Child) Shutdown(grace time.Duration) ShutdownReport {
 func (c *Child) shutdown(grace time.Duration) ShutdownReport {
 	close(c.stop)
 	<-c.polling
+	<-c.spoll
 	c.tracker.Poll()
 	rootRec, rootErr := c.rootRecord()
 
@@ -221,22 +358,19 @@ func (c *Child) shutdown(grace time.Duration) ShutdownReport {
 	if err == nil {
 		err = c.tracker.Err()
 	}
-	swept, serr := SweepSession(c.leader)
+	// The child is not reaped yet, so its session ID cannot have been reused.
+	swept, serr := c.sweepSessions()
 	if err == nil {
 		err = serr
 	}
-	if c.sessions != "" {
-		more, merr := sweepRecorded(c.sessions)
-		swept.Killed = append(swept.Killed, more.Killed...)
-		swept.Gone = append(swept.Gone, more.Gone...)
-		swept.Changed = append(swept.Changed, more.Changed...)
-		swept.Alive = append(swept.Alive, more.Alive...)
-		if err == nil {
-			err = merr
-		}
-	}
 	select {
 	case <-c.exited:
+	case <-time.After(5 * time.Second):
+	}
+	reaped := make(chan struct{})
+	go func() { c.reap(); close(reaped) }()
+	select {
+	case <-reaped:
 	case <-time.After(5 * time.Second):
 	}
 	c.Stdout.Close()

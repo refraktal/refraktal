@@ -138,39 +138,34 @@ func TestCleanLeftoversWithoutAFolder(t *testing.T) {
 	}
 }
 
-// A dead run's session is swept too: a member that left the parent-PID tree
-// is killed with the leader.
-func TestCleanLeftoversSweepsTheSession(t *testing.T) {
-	dir := t.TempDir()
-	lead := exec.Command("sh", "-c", "sleep 30 & echo $!; exec sleep 31")
-	lead.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	out, _ := lead.StdoutPipe()
-	if err := lead.Start(); err != nil {
+// Dead-run cleanup kills session members by identity: the session poll put
+// a detached member, never tracked by lineage, into the live record.
+func TestDeadRunCleanupKillsSessionMembersByIdentity(t *testing.T) {
+	live := t.TempDir()
+	self, _ := os.Executable()
+	c, err := Start(Spec{Argv: []string{self}, Env: []string{helperEnv + "=escape", "GORACE=atexit_sleep_ms=0"},
+		PollEvery: time.Hour, LiveDir: live, SessionPollEvery: 50 * time.Millisecond})
+	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { lead.Process.Kill(); lead.Wait() }()
-	member := readPID(t, bufio.NewReader(out))
-	defer syscall.Kill(member, syscall.SIGKILL)
-	var leader Proc
-	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(20 * time.Millisecond) {
-		if leader = listed(t, lead.Process.Pid); leader.Cmd == "sleep 31" {
-			break // the exec has happened
-		}
+	gc := readPID(t, bufio.NewReader(c.Stdout))
+	defer syscall.Kill(gc, syscall.SIGKILL)
+	files, _ := filepath.Glob(filepath.Join(live, "*.json"))
+	if len(files) != 1 {
+		t.Fatalf("records %v", files)
+	}
+	for deadline := time.Now().Add(5 * time.Second); !slices.Contains(pids(readRecord(t, files[0]).Tracked), gc); time.Sleep(50 * time.Millisecond) {
 		if time.Now().After(deadline) {
-			t.Fatalf("leader is %q", leader.Cmd)
+			t.Fatal("the session poll did not record the detached member")
 		}
 	}
-	if err := writeRecord(filepath.Join(dir, "dead.json"), Record{Owner: deadOwner(t), Child: leader, Session: true}); err != nil {
-		t.Fatal(err)
+	// The owner dies without shutting down: rewrite the record as a dead run's.
+	rec := readRecord(t, files[0])
+	rec.Owner = deadOwner(t)
+	writeRecord(files[0], rec)
+	r, err := CleanLeftovers(live)
+	if err != nil || running(gc) || !slices.Contains(pids(r.Kill.Killed), gc) {
+		t.Fatalf("recorded member %d survived: %+v %v", gc, r, err)
 	}
-	r, err := CleanLeftovers(dir)
-	if err != nil || r.Dead != 1 {
-		t.Fatalf("%+v %v", r, err)
-	}
-	if running(lead.Process.Pid) || running(member) {
-		t.Fatalf("leader or session member survived: %+v", r.Kill)
-	}
-	if !slices.Contains(pids(r.Kill.Killed), member) {
-		t.Fatalf("member %d not in killed %v", member, pids(r.Kill.Killed))
-	}
+	c.Shutdown(time.Second)
 }

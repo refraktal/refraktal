@@ -27,8 +27,13 @@ type sessionSpec struct {
 	liveDir string
 	labels  map[string]string
 	env     []string // extra variables for the child, such as REFRAKTAL_RUN
-	log     *runlog.Log
-	timeout time.Duration // for initialize, session/new and set_mode
+	// prefixExe is a binary that calls proc.MaybeShellPrefix first in main,
+	// used as the harness's shell prefix; "" means none. It is never guessed
+	// from os.Executable(): in a test or a library host that is a different
+	// program, and Claude would run it for every tool command.
+	prefixExe string
+	log       *runlog.Log
+	timeout   time.Duration // for initialize, session/new and set_mode
 
 	onPermission func(context.Context, acp.PermissionRequest) string
 	onUpdate     func(acp.Update)
@@ -70,17 +75,16 @@ func openSession(ctx context.Context, sp sessionSpec) (*session, error) {
 	defer stderr.Close() // the child holds its own copy of the descriptor
 	env := append(append([]string{}, s.launch.Env...), sp.env...)
 	var sessions string
-	if v := s.launch.ShellPrefixVar; v != "" {
+	if v := s.launch.ShellPrefixVar; v != "" && sp.prefixExe != "" {
 		// The harness's tool commands run in sessions of their own. Route each
-		// one through this binary's shell-prefix helper, which records the
-		// session for the shutdown sweep. Environment only: no settings file
-		// is touched. A prefix the user already set is chained.
-		if exe, err := os.Executable(); err == nil {
-			sessions = filepath.Join(sp.scratch, "sessions")
-			env = append(env, v+"="+exe, proc.HelperEnv+"=shell-prefix", proc.SessionsEnv+"="+sessions)
-			if orig := os.Getenv(v); orig != "" {
-				env = append(env, proc.NextEnv+"="+orig)
-			}
+		// one through the shell-prefix helper, which records the session for
+		// the shutdown sweep. Environment only: no settings file is touched. A
+		// prefix the user already set is chained, unless it is the helper.
+		sessions = filepath.Join(sp.scratch, "sessions")
+		env = append(env, v+"="+sp.prefixExe, proc.HelperEnv+"=shell-prefix", proc.SessionsEnv+"="+sessions,
+			proc.PrefixVarEnv+"="+v)
+		if orig := os.Getenv(v); orig != "" && !proc.SameFile(orig, sp.prefixExe) {
+			env = append(env, proc.NextEnv+"="+orig)
 		}
 	}
 	s.child, err = proc.Start(proc.Spec{Argv: s.launch.Argv, Env: env, Dir: sp.cwd, Stderr: stderr,

@@ -5,13 +5,24 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"refraktal.dev/refraktal/internal/proc"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
 
+// TestMain makes the test binary safe if it is ever started as a shell
+// prefix: it then acts as the helper instead of running the tests.
+func TestMain(m *testing.M) {
+	proc.MaybeShellPrefix()
+	os.Exit(m.Run())
+}
+
 func TestCommands(t *testing.T) {
+	// Outside any git repository: a case that wrongly reached refraktal.Run
+	// fails at once instead of starting a real harness.
+	t.Chdir(t.TempDir())
 	for _, tc := range []struct {
 		args []string
 		code int
@@ -24,6 +35,9 @@ func TestCommands(t *testing.T) {
 		{[]string{"run", "--dry", "--harness", "claude", "x"}, 3, "not implemented yet"},
 		{[]string{"run", "--mins", "0", "--harness", "claude", "x"}, 3, "--mins must be more than 0"},
 		{[]string{"run", "--usd", "-1", "--harness", "claude", "x"}, 3, "must not be negative"},
+		{[]string{"run", "--usd", "NaN", "--harness", "claude", "x"}, 3, "finite"},
+		{[]string{"run", "--usd", "Inf", "--harness", "claude", "x"}, 3, "finite"},
+		{[]string{"run", "--mins", "1e12", "--harness", "claude", "x"}, 3, "at most"},
 		{[]string{"show"}, 3, "not implemented yet"},
 		{[]string{"bogus"}, 3, `unknown command "bogus"`},
 		{[]string{"doctor", "--bogus"}, 3, "flag provided but not defined"},

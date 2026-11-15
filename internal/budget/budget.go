@@ -14,6 +14,7 @@ package budget
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
@@ -25,6 +26,9 @@ type Limits struct {
 	Wall  time.Duration `json:"-"`
 	Depth int           `json:"depth"`
 }
+
+// MaxWall is the longest --mins accepted.
+const MaxWall = 24 * time.Hour
 
 // Defaults: --mins always has one and is never unlimited.
 var Defaults = Limits{USD: 10, Turns: 20, Wall: 30 * time.Minute, Depth: 2}
@@ -94,6 +98,10 @@ func New(l Limits, now func() time.Time) (*Ledger, error) {
 		now = time.Now
 	}
 	switch {
+	case math.IsNaN(l.USD) || math.IsInf(l.USD, 0):
+		return nil, fmt.Errorf("--usd must be a finite number")
+	case l.Wall > MaxWall:
+		return nil, fmt.Errorf("--mins must be at most %.0f (%s)", MaxWall.Minutes(), MaxWall)
 	case l.USD < 0 || l.Turns < 0 || l.Wall < 0:
 		return nil, fmt.Errorf("budgets must not be negative")
 	case l.Wall == 0:

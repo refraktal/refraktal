@@ -18,6 +18,7 @@
 //	noauth    session/new fails with -32000 Authentication required
 //	oldproto  initialize answers with protocol version 2
 //	auth      as turn, and first sends an auth/status_update carrying an email
+//	slowstart answers initialize only after 3 s
 //	tools     asks permission for three tool calls, shaped as Claude sends
 //	          them, and performs each only if allowed: write hello.txt in the
 //	          cwd, write ../outside.txt, and run git push (simulated: it writes
@@ -159,6 +160,13 @@ func (a *agent) handle(m message, line string) {
 			ch <- line
 		}
 	case "initialize":
+		if a.mode == "slowstart" { // answers initialize only after 3 s
+			go func(id json.RawMessage) {
+				time.Sleep(3 * time.Second)
+				a.send(message{ID: id, Result: obj{"protocolVersion": 1, "agentInfo": obj{"name": "acptest", "version": "1.0.0"}, "agentCapabilities": obj{}}})
+			}(m.ID)
+			return
+		}
 		version := 1
 		if a.mode == "oldproto" {
 			version = 2
@@ -175,6 +183,9 @@ func (a *agent) handle(m message, line string) {
 		}
 		json.Unmarshal(m.Params, &p)
 		a.cwd = p.Cwd
+		if f := os.Getenv("ACPTEST_PROMPTS"); f != "" { // the shell-prefix variables this agent was given, for tests
+			os.WriteFile(f+".env", []byte("prefix="+os.Getenv("CLAUDE_CODE_SHELL_PREFIX")+" helper="+os.Getenv("REFRAKTAL_HELPER")+"\n"), 0o600)
+		}
 		if f := os.Getenv("ACPTEST_PROMPTS"); f != "" { // also record each session folder, for tests
 			if fh, err := os.OpenFile(f+".cwd", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err == nil {
 				fh.WriteString(p.Cwd + "\n")

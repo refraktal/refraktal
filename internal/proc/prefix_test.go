@@ -53,7 +53,7 @@ func TestShellPrefixRecordsTheSessionAndRunsTheCommand(t *testing.T) {
 		t.Fatalf("background child in session %d, want %d", sid, sh.Process.Pid)
 	}
 	stranger := startSleep(t, &syscall.SysProcAttr{Setsid: true})
-	kr, err := sweepRecorded(sessions)
+	kr, err := SweepSession(leaders[0])
 	if err != nil || !slices.Contains(pids(kr.Killed), bg) || running(bg) {
 		t.Fatalf("background child %d not swept: %+v %v", bg, kr, err)
 	}
@@ -104,28 +104,5 @@ func TestShutdownSweepsRecordedSessions(t *testing.T) {
 	}
 	if !slices.Contains(pids(r.Swept.Killed), bg) || running(bg) || r.Err != "" {
 		t.Fatalf("background child %d of a recorded session survived: %+v", bg, r)
-	}
-}
-
-func TestCleanLeftoversSweepsRecordedSessions(t *testing.T) {
-	dir := t.TempDir()
-	sessions := filepath.Join(dir, "sessions")
-	sh := exec.Command("sh", "-c", `"$PREFIX" 'sleep 30 >/dev/null 2>&1 & echo $!'`)
-	sh.Env = prefixEnv(t, sessions)
-	sh.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	out, err := sh.Output() // the leader shell exits; its background child stays in the session
-	if err != nil {
-		t.Fatal(err)
-	}
-	bg := readPID(t, bufio.NewReader(strings.NewReader(string(out))))
-	defer syscall.Kill(bg, syscall.SIGKILL)
-	live := filepath.Join(dir, "live")
-	os.MkdirAll(live, 0o700)
-	if err := writeRecord(filepath.Join(live, "dead.json"), Record{Owner: deadOwner(t), Child: Proc{PID: 1}, SessionsFile: sessions}); err != nil {
-		t.Fatal(err)
-	}
-	r, err := CleanLeftovers(live)
-	if err != nil || running(bg) || !slices.Contains(pids(r.Kill.Killed), bg) {
-		t.Fatalf("background child %d of a dead run survived: %+v %v", bg, r, err)
 	}
 }
