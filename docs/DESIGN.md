@@ -94,7 +94,7 @@ requests that reach it by policy. Never use `auto`, `acceptEdits`, `agent`,
 
 | Harness | Mode | Behaviour observed |
 |---|---|---|
-| Claude | `default` | Sends shell commands to the client |
+| Claude | `default` | A partial gate: asked before `touch`, but ran `echo` and `sleep` unasked |
 | Codex | `workspace-write` | Writes freely in the session folder, `$TMPDIR` and `/tmp`; asks outside them |
 | Antigravity | `default` | Asks before writes and shell commands; reads run unasked |
 
@@ -110,6 +110,9 @@ not a sandbox: Refraktal sees a command's text, not everything it touches.
 - **Never put worktrees or run folders under `$TMPDIR` or `/tmp`.**
 - **Open:** the reject path (`reject_once`) has not been exercised on any
   harness. The deny-list depends on it.
+- **Open:** whether Claude in `default` asks before deny-list commands such
+  as `git push`. It decides by its own rules which commands need approval, so
+  a command it runs unasked never reaches the policy.
 - No harness uses the client's `fs/*` methods: do not implement a client-side
   file policy.
 
@@ -142,9 +145,15 @@ process-group kill does not reach them.
 - Record tracked processes in the run folder; `run` and `doctor` clean up
   leftovers from dead runs, which also covers Refraktal itself being killed.
 - Keep a process-group kill as well; it is free.
-- **Open:** the kill path has been proven only against a fake agent; live tools
-  had always ended first. Known gap: a process that detaches and is reparented
-  between two samples escapes.
+- The kill path is proven against real processes in tests (a child that
+  leaves the harness's group, a reparented background child, a reused PID
+  left alone). Live, it has not been needed so far: every harness tool ended
+  on its own first.
+- Tracking also widens through a process group, but only one whose leader
+  (PID == PGID) is tracked. This keeps a tool's backgrounded child after its
+  shell exits, without pulling in unrelated members of a shared group.
+- **Open:** the detach gap. A process that detaches and is reparented
+  between two samples, with its group leader never seen, escapes tracking.
 - Scrub the child's environment of the parent's session markers
   (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`).
 

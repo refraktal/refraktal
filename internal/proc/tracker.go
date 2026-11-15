@@ -12,11 +12,18 @@ import (
 // process group.
 //
 // A process is tracked when its parent is the root or a tracked process that
-// is still alive, or when it is in the process group of a tracked process that
-// is still alive. The second rule catches a tool's background child that was
-// reparented to PID 1 after its shell exited, provided some member of its
-// group was seen first. A process that detaches and is reparented between two
-// polls, with no tracked member left in its group, escapes.
+// is still alive, or when it is in a process group whose leader (the process
+// with PID == PGID) is the root or is tracked. The second rule catches a tool's
+// background child that was reparented to PID 1 after its shell exited,
+// provided the shell, as group leader, was seen first. Membership alone never
+// widens tracking: a tracked process in someone else's group does not pull in
+// that group's other members.
+//
+// A leader's group counts while the leader is still running as recorded, or
+// after it has exited and its PID is unused. If its PID now runs a different
+// process, the ID may name a new group, so it does not count. A process that
+// detaches and is reparented between two polls, with its group leader never
+// seen, escapes.
 type Tracker struct {
 	root    int
 	rootUp  func() bool // reports whether the root has not yet been reaped (its PID cannot be reused until then)
@@ -54,14 +61,14 @@ func (t *Tracker) add(all map[int]Proc) {
 	}
 	for changed := true; changed; {
 		changed = false
-		groups := map[int]bool{}
+		groups := map[int]bool{} // groups led by the root or a tracked process
 		for pid, p := range t.seen {
-			if alive(pid) && p.PGID != t.ownPGID {
-				groups[p.PGID] = true
+			if now, running := all[pid]; p.PGID == pid && pid != t.ownPGID && (!running || now.Same(p)) {
+				groups[pid] = true
 			}
 		}
-		if q, ok := all[t.root]; ok && rootUp && q.PGID != t.ownPGID {
-			groups[q.PGID] = true
+		if q, ok := all[t.root]; ok && rootUp && q.PGID == t.root && q.PGID != t.ownPGID {
+			groups[t.root] = true
 		}
 		for pid, p := range all {
 			if _, ok := t.seen[pid]; ok || pid == t.root {
