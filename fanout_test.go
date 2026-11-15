@@ -497,11 +497,17 @@ func TestChoose(t *testing.T) {
 
 func TestParseWinner(t *testing.T) {
 	labels := []string{"A", "B"}
+	// Only the final line, in the exact format, counts.
 	for _, tc := range [][2]string{
 		{"B is better.\nWINNER: B", "B"},
-		{"winner: a", "A"},
+		{"B is better.\nWINNER: B\n\n", "B"},
 		{"WINNER: A\nOn reflection:\nWINNER: none", "none"},
-		{"**WINNER: B**", "B"},
+		{"WINNER: B\nThat is my answer.", ""},
+		{"I considered writing WINNER: A but\nWINNER: B", "B"},
+		{"Not WINNER: A", ""},
+		{"winner: a", ""},
+		{"**WINNER: B**", ""},
+		{"WINNER: B.", ""},
 		{"WINNER: C", ""},
 		{"I pick B", ""},
 	} {

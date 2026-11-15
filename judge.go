@@ -339,26 +339,27 @@ func judgePrompt(task string, cands []*Candidate) string {
 		}
 		fmt.Fprintf(&b, "Candidate %s%s:\n```diff\n%s\n```\n\n", c.Label, note, strings.ToValidUTF8(string(d), ""))
 	}
-	b.WriteString("Which candidate carries out the task best and correctly? End your reply with one line, exactly `WINNER: <letter>`, or `WINNER: none` if no candidate correctly carries out the task.")
+	b.WriteString("Which candidate carries out the task best and correctly? The last line of your reply must be exactly WINNER: followed by one space and the candidate's capital letter, or WINNER: none if no candidate correctly carries out the task, with nothing else on that line (no quotes, formatting or punctuation) and nothing after it.")
 	return b.String()
 }
 
-var winnerLine = regexp.MustCompile(`(?mi)^\W*WINNER:\s*([A-Z]|none)\W*$`)
+var winnerLine = regexp.MustCompile(`^WINNER: ([A-Z]|none)$`)
 
-// parseWinner reads the judge's last WINNER line: a letter, "none", or ""
-// when there is no valid answer.
+// parseWinner reads the judge's answer from its final non-empty line, which
+// must be exactly "WINNER: <letter>" or "WINNER: none": a letter, "none", or
+// "" when there is no valid answer. A match anywhere else never counts.
 func parseWinner(reply string, labels []string) string {
-	m := winnerLine.FindAllStringSubmatch(reply, -1)
-	if len(m) == 0 {
+	lines := strings.Split(strings.TrimRight(reply, " \t\r\n"), "\n")
+	m := winnerLine.FindStringSubmatch(strings.TrimSpace(lines[len(lines)-1]))
+	if m == nil {
 		return ""
 	}
-	w := strings.ToUpper(m[len(m)-1][1])
-	if w == "NONE" {
+	if m[1] == "none" {
 		return "none"
 	}
 	for _, l := range labels {
-		if l == w {
-			return w
+		if l == m[1] {
+			return m[1]
 		}
 	}
 	return ""
