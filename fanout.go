@@ -783,22 +783,22 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 	switch {
 	case e.o.NoApply:
 		finish(RunKept, "", true)
-		res.Branch, res.Worktree = winner.wtKept(res.Candidates)
+		res.Branch, res.Worktree = winner.Branch, winner.Worktree
 	default:
 		n, err := e.apply(winner)
 		if errors.Is(err, errMinsExpired) {
 			finish(RunTimedOut, err.Error(), true)
-			res.Branch, res.Worktree = winner.wtKept(res.Candidates)
+			res.Branch, res.Worktree = winner.Branch, winner.Worktree
 			return
 		}
 		if errors.Is(err, errCancelled) {
 			finish(RunFailed, err.Error(), true)
-			res.Branch, res.Worktree = winner.wtKept(res.Candidates)
+			res.Branch, res.Worktree = winner.Branch, winner.Worktree
 			return
 		}
 		if err != nil {
 			finish(RunApplyFailed, err.Error(), true)
-			res.Branch, res.Worktree = winner.wtKept(res.Candidates)
+			res.Branch, res.Worktree = winner.Branch, winner.Worktree
 			return
 		}
 		if n != "" {
@@ -806,16 +806,6 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 		}
 		finish(RunApplied, "", false)
 	}
-}
-
-// wtKept returns the winner's kept branch and worktree from the final list.
-func (c *Candidate) wtKept(all []Candidate) (string, string) {
-	for _, k := range all {
-		if k.Harness == c.Harness {
-			return k.Branch, k.Worktree
-		}
-	}
-	return "", ""
 }
 
 // judgeOrder is the order judges are tried in: harnesses outside the close
