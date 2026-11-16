@@ -94,9 +94,11 @@ being used to make an unrelated mutation appear effective.
 
 ## Faithful findings and production reproductions
 
-No product code was changed. Each finding was first reproduced as a failing Go
-test against production functions. The intentionally failing reproductions now
-require `REFRAKTAL_VERIFY_FINDINGS=1`; ordinary CI skips only those reproductions.
+No product code was changed by the pull request that added this package. Each
+finding was first reproduced as a failing Go test against production
+functions. A reproduction whose finding is not fixed yet requires
+`REFRAKTAL_VERIFY_FINDINGS=1`, and ordinary CI skips it; once a fix lands, its
+reproduction loses the opt-in and CI enforces it (findings 3 and 4 below).
 The model tests always explore and assert the known counterexamples. A green
 test run therefore does **not** mean all requested safety invariants hold.
 
@@ -120,14 +122,26 @@ test run therefore does **not** mean all requested safety invariants hold.
    a limit of four. This establishes a report trust limitation, not that an
    honest nested execution overspends its grant. Clamping the report would not
    undo any prompts that already ran.
+   **Fixed in caab87e** ("Validate child reports; forfeit the grant on an
+   untrusted one"): `AddTurns` refuses a report outside 0..the grant's
+   remaining allowance and charges the child its whole grant instead, and
+   `runEnv.child` validates every child report (turns, cost, retained) the
+   same way. The reproduction no longer needs the opt-in: CI enforces it.
 4. **Partial apply on filesystem error.** `Worktree.Apply` checks the patch, then
    runs `git apply --binary` without rollback. The production reproduction
    `internal/worktree/verify_apply_atomicity_test.go:TestVerifyApplyAtomicityFilesystemError`
    passes `CheckApply`, changes `a.txt` from `one` to `two`, then fails to create
    `z/b.txt` under an unwritable directory. The earlier change remains. It needs
    normal user filesystem permissions and skips root, which can bypass them.
+   **Fixed in 9ef7651** ("Never leave the tree half-applied: snapshot and roll
+   back"): `Apply` snapshots every touched path into the run folder and
+   restores them on any failure. The reproduction no longer needs the opt-in:
+   CI enforces it (it still skips as root);
+   `TestFailedApplyIsRolledBackViaSeam` injects the failure through a seam so
+   the same invariant is checked as root and on CI.
 
-Reproduce all four failures without any harness or network access:
+Reproduce the findings without any harness or network access (3 and 4 now
+pass: they are fixed):
 
 ```sh
 REFRAKTAL_VERIFY_FINDINGS=1 GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
@@ -171,5 +185,6 @@ Verified on the pull request that added this package:
 - **CI**: all seven checks passed (Go on ubuntu-latest and macos-latest for the
   root module and both spike modules, and the release dry-run build).
 
-The four findings remain unfixed until their fix pull requests land; each one
+Findings 3 and 4 are fixed and their reproductions are enforced by CI.
+Findings 1 and 2 remain unfixed until their fix pull requests land; each one
 removes the opt-in for its own reproduction, so CI then enforces it.
