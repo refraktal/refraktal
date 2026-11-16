@@ -44,6 +44,20 @@ func writeRecord(path string, r Record) error {
 	return os.Rename(tmp, path) // readers never see a half-written record
 }
 
+// loadRecord keeps decoding separate from process lookup and cleanup. A bad
+// record never exposes a partially decoded process list to the caller.
+func loadRecord(path string) (Record, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return Record{}, err
+	}
+	var r Record
+	if err := json.Unmarshal(b, &r); err != nil {
+		return Record{}, err
+	}
+	return r, nil
+}
+
 // CleanupReport says what CleanLeftovers found and did.
 type CleanupReport struct {
 	Records int        `json:"records"` // live records found
@@ -77,11 +91,7 @@ func CleanLeftovers(dir string) (CleanupReport, error) {
 		}
 		path := filepath.Join(dir, e.Name())
 		r.Records++
-		var rec Record
-		b, err := os.ReadFile(path)
-		if err == nil {
-			err = json.Unmarshal(b, &rec)
-		}
+		rec, err := loadRecord(path)
 		if err != nil {
 			r.Errors = append(r.Errors, fmt.Sprintf("%s: %v", e.Name(), err))
 			continue

@@ -301,6 +301,9 @@ func (c *Client) notification(m message) {
 		return
 	}
 	u := parseUpdate(m.Params)
+	if u.Kind == "" {
+		return // no sessionUpdate kind: not an update at all
+	}
 	c.mu.Lock()
 	if u.Kind == "config_option_update" {
 		var co struct {

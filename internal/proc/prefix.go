@@ -172,17 +172,33 @@ func listPID(pid int) (Proc, error) {
 		"-o", "lstart=", "-o", "command=", "-p", strconv.Itoa(pid))
 	cmd.Env = append(ScrubEnv(os.Environ()), "LC_ALL=C")
 	out, err := cmd.Output()
-	if err != nil {
+	r := psResult{out: out, err: err, contextErr: ctx.Err(), exitCode: -1}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		r.exitCode, r.stderr = exitErr.ExitCode(), exitErr.Stderr
+	}
+	return parsePIDOutput(pid, r)
+}
+
+type psResult struct {
+	out, stderr     []byte
+	err, contextErr error
+	exitCode        int // -1 when no exit status is available
+}
+
+// parsePIDOutput interprets ps without running it. Only confirmed absence is
+// ErrProcessGone; malformed output and execution failures remain unknown.
+func parsePIDOutput(pid int, r psResult) (Proc, error) {
+	if r.err != nil {
 		// Both macOS BSD ps and Linux procps exit 1 when no PID matches.
 		// With headings disabled they write nothing to stdout or stderr.
 		// A start failure, signal, timeout, other status or diagnostic is not absence.
-		var exitErr *exec.ExitError
-		if ctx.Err() == nil && errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && len(out) == 0 && len(exitErr.Stderr) == 0 {
+		if r.contextErr == nil && r.exitCode == 1 && len(r.out) == 0 && len(r.stderr) == 0 {
 			return Proc{}, fmt.Errorf("process %d: %w", pid, ErrProcessGone)
 		}
-		return Proc{}, fmt.Errorf("ps -p %d: %w", pid, err)
+		return Proc{}, fmt.Errorf("ps -p %d: %w", pid, r.err)
 	}
-	all, err := parsePS(string(out))
+	all, err := parsePS(string(r.out))
 	if err != nil {
 		return Proc{}, err
 	}
@@ -204,9 +220,13 @@ func RecordedSessions(path string) ([]Proc, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return readSessions(f)
+}
+
+func readSessions(r io.Reader) ([]Proc, error) {
 	seen := map[string]bool{}
 	var out []Proc
-	br := bufio.NewReader(f) // no line limit: a bad or very long line is skipped, not fatal
+	br := bufio.NewReader(r) // no line limit: a bad or very long line is skipped, not fatal
 	for {
 		line, err := br.ReadBytes('\n')
 		var p Proc
@@ -220,7 +240,7 @@ func RecordedSessions(path string) ([]Proc, error) {
 			return out, nil
 		}
 		if err != nil {
-			return out, err
+			return nil, err
 		}
 	}
 }

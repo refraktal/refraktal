@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"answers\":{\"harness\":{\"type\":\"choice\",\"choice\":\"codex\",\"confidence\":1,\"probabilities\":{\"claude-code\":1}}}}")
