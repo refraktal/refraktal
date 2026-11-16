@@ -15,6 +15,7 @@ package budget
 import (
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"time"
 )
@@ -186,6 +187,11 @@ func (l *Ledger) BeginTurn(g Grant) error {
 func (l *Ledger) Charge(g Grant, c Charge) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if math.IsNaN(c.USD) || math.IsInf(c.USD, 0) || c.USD < 0 {
+		// Never lower or poison spend: a bad figure counts as $0, flagged.
+		c.Note = strings.TrimPrefix(c.Note+"; invalid amount counted as $0", "; ")
+		c.USD = 0
+	}
 	l.charges = append(l.charges, c)
 	if st := l.grants[g.ID]; st != nil && c.Source != Estimated {
 		st.spent += c.USD

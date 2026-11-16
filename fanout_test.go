@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -622,5 +623,39 @@ func TestFailedJudgeTurnFallsBackToTheChecksRanking(t *testing.T) {
 			!strings.Contains(strings.Join(res.Notices, "\n"), "judge did not finish") {
 			t.Errorf("%q: %+v verdict %+v notices %v", judge, res.Outcome, res.Verdict, res.Notices)
 		}
+	}
+}
+
+// Review (9): negative or non-finite usage and cost are rejected: a bad cost
+// falls back to the tokens, bad tokens are not priced, and the ledger never
+// lowers spend.
+func TestInvalidUsageAndCostAreRejected(t *testing.T) {
+	tb := price.Table{}
+	tb.Override("m", price.Price{Input: 1e-6, Output: 2e-6})
+	good := &acp.Usage{InputTokens: 1000, OutputTokens: 100}
+	for _, amount := range []float64{-5, math.NaN(), math.Inf(1)} {
+		cs := charges("claude", "m", acp.Turn{Cost: &acp.Cost{Amount: amount, Currency: "USD"}, Usage: good}, tb)
+		if len(cs) != 1 || cs[0].Source != budget.Computed || !near(cs[0].USD, 1000e-6+100*2e-6) {
+			t.Errorf("cost %v: %+v", amount, cs)
+		}
+	}
+	neg := int64(-7)
+	for _, u := range []*acp.Usage{{InputTokens: -1000, OutputTokens: 100}, {InputTokens: 10, CachedReadTokens: &neg}} {
+		cs := charges("codex", "m", acp.Turn{Usage: u}, tb)
+		if len(cs) != 1 || cs[0].Source != budget.Unpriced || cs[0].USD != 0 || !strings.Contains(cs[0].Note, "invalid") {
+			t.Errorf("usage %+v: %+v", u, cs)
+		}
+	}
+	if cs := charges("codex", "m", acp.Turn{Cancelled: true, LastUsed: &neg}, tb); len(cs) != 0 {
+		t.Errorf("a negative last context fill was estimated: %+v", cs)
+	}
+	l, _ := budget.New(budget.Limits{USD: 1, Turns: 3, Wall: time.Minute}, nil)
+	g, _ := l.Reserve()
+	l.BeginTurn(g)
+	l.Charge(g, budget.Charge{USD: 0.5, Source: budget.Reported})
+	l.Charge(g, budget.Charge{USD: -0.4, Source: budget.Reported})
+	l.Charge(g, budget.Charge{USD: math.NaN(), Source: budget.Computed})
+	if s := l.Settle(g, false); !near(s.Spent, 0.5) {
+		t.Fatalf("spend lowered or poisoned: %+v", s)
 	}
 }

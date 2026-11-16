@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -495,16 +496,18 @@ func charges(harnessName, model string, t acp.Turn, prices price.Table) []budget
 	var out []budget.Charge
 	p, key, priced := prices.Lookup(harness.PriceKeys(harnessName, model)...)
 	switch {
-	case t.Cost != nil && strings.EqualFold(t.Cost.Currency, "USD"):
+	case validCost(t.Cost):
 		// Claude's cost is cumulative for the session; Run sends one prompt
 		// per session, so the previous figure is 0.
 		out = append(out, budget.Charge{USD: t.Cost.Amount, Source: budget.Reported, Model: model})
+	case t.Usage != nil && !validUsage(t.Usage):
+		out = append(out, budget.Charge{Source: budget.Unpriced, Model: model, Note: "invalid usage reported (a negative token count): not priced"})
 	case t.Usage != nil && priced:
 		out = append(out, budget.Charge{USD: p.Cost(*t.Usage), Source: budget.Computed, Model: model, Note: "priced as " + key})
 	case t.Usage != nil:
 		out = append(out, budget.Charge{Source: budget.Unpriced, Model: model})
 	}
-	if t.Cancelled && t.LastUsed != nil {
+	if t.Cancelled && t.LastUsed != nil && *t.LastUsed >= 0 {
 		c := budget.Charge{Source: budget.Estimated, Model: model, Note: "last context fill priced as input"}
 		if priced {
 			c.USD = float64(*t.LastUsed) * p.Input
@@ -514,6 +517,22 @@ func charges(harnessName, model string, t acp.Turn, prices price.Table) []budget
 		out = append(out, c)
 	}
 	return out
+}
+
+// validCost reports whether a harness's reported cost can be charged: US
+// dollars, finite and not negative. Otherwise the tokens are priced.
+func validCost(c *acp.Cost) bool {
+	return c != nil && strings.EqualFold(c.Currency, "USD") && !math.IsNaN(c.Amount) && !math.IsInf(c.Amount, 0) && c.Amount >= 0
+}
+
+// validUsage reports whether every token count is non-negative.
+func validUsage(u *acp.Usage) bool {
+	for _, p := range []*int64{u.ThoughtTokens, u.CachedReadTokens, u.CachedWriteTokens} {
+		if p != nil && *p < 0 {
+			return false
+		}
+	}
+	return u.TotalTokens >= 0 && u.InputTokens >= 0 && u.OutputTokens >= 0
 }
 
 func cmpOr(a, b string) string {
