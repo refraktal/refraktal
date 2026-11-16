@@ -102,6 +102,8 @@ cancels and exits 2 (`timed_out`).
   or `estimated`. Reported wins. An unpriced model continues with a loud warning
   (stderr, run log, `--json`) and counts as $0 against `--usd`. Dollars are a
   budget unit, not a bill: on subscription logins they are notional.
+  A reported cost must contain a finite, non-negative numeric amount; a
+  malformed usage update leaves the previous accounting unchanged.
 - **Cancelled turns.** A turn is cancelled if Refraktal sent `session/cancel`
   or the harness's stop reason is `cancelled` (Codex ends a turn so after a
   denial). Usage for model calls that finished before the cancel is
@@ -245,7 +247,9 @@ process-group kill does not reach them.
   `os.UserConfigDir()` joined with `refraktal/live/`, one file per child. The
   file names the owning Refraktal process (PID, start time, command line), the
   child and every descendant tracked so far, and is rewritten as tracking
-  grows. It is removed on a clean shutdown. `doctor` and `run` clean up the
+  grows or a verified descendant's birth identity changes. Record updates
+  are serialized per child and atomically replaced through unique temporary
+  files. It is removed on a clean shutdown. `doctor` and `run` clean up the
   entries of dead runs (owner no longer running as recorded): they kill the
   listed processes with the identity check, then remove the file. A failed
   lookup is `unknown`, never proof that a process is gone: it is not signalled,
@@ -258,8 +262,11 @@ process-group kill does not reach them.
   left alone). Live, it has not been needed so far: every harness tool ended
   on its own first.
 - Tracking also widens through a process group, but only one whose leader
-  (PID == PGID) is tracked. This keeps a tool's backgrounded child after its
-  shell exits, without pulling in unrelated members of a shared group.
+  (PID == PGID) was verified as tracked. After the leader exits, an already
+  tracked member must still verify the group's continuity; a group seen empty
+  or with a changed leader identity is retired permanently. This keeps a
+  tool's backgrounded child after its shell exits, without pulling in
+  unrelated members of a shared or reused group.
 - **Signals and PID reuse.** Every individual kill re-checks the target's
   birth identity immediately before its signal. The harness, a process-group
   and session leader, stays unreaped until its group and session have been
@@ -461,7 +468,8 @@ process-group kill does not reach them.
   shutdown, the tree kill and the session sweep (`timed_out`); during any
   setup step (price fetch, worktree, starting the harness),
   `budget_exhausted`. Both exit 2. Writes to a harness are bounded (10 s, the
-  cancel 2 s), so one that stopped reading cannot hold up the stop.
+  cancel 2 s), including waiting for the writer lock, so one that stopped
+  reading cannot hold up the stop.
 - **Exit codes:** 0 applied, kept or no changes; 1 the turn failed or the
   result did not apply; 2 a budget ran out (before the turn, or `--mins`
   during it); 3 the harness could not be started or logged in.
@@ -599,6 +607,8 @@ client, including a parent Refraktal, can drive it.
 
 - `initialize`, `session/new` (an absolute folder), `session/set_mode` (only
   `default`), `session/prompt`, `session/cancel`. No `loadSession`.
+  Parameter decode errors are rejected before session state changes or work
+  starts.
 - Each prompt is one Refraktal run in the session's folder, with the result
   applied there (a parent gives its child the child's worktree, so the
   parent collects the child's result like any harness's). A session whose
@@ -608,7 +618,8 @@ client, including a parent Refraktal, can drive it.
   detection off, so a move lists both paths) is refused, at collect and
   again before apply.
 - Progress and notices arrive as message chunks, then a summary: the
-  outcome, the harness and the files. Notices cross only in a safe form:
+  outcome, the harness and the files; raw child replies are never forwarded.
+  Notices cross only in a safe form:
   one that can carry a raw OS error, URL or path (the price table, the
   decision log, the pre-score, LFS pointers) arrives as fixed wording.
   Error text never crosses, only "the error is in the child's run log": a

@@ -85,7 +85,8 @@ type Client struct {
 	w    io.Writer
 	opts Options
 
-	wmu     sync.Mutex
+	wonce   sync.Once
+	wgate   chan struct{} // one writer owns the token, including its deadline changes
 	mu      sync.Mutex
 	nextID  int
 	pending map[string]chan message
@@ -126,7 +127,8 @@ func (c *Client) write(m message) error {
 // writeBy writes one message, giving up at deadline. With a writer that
 // supports deadlines (the pipe to a harness does), the write itself is
 // bounded; otherwise the wait for it is, and the write finishes in the
-// background.
+// background. Waiting for writer ownership uses the same deadline, and an
+// expired queued message is never written later.
 func (c *Client) writeBy(m message, deadline time.Time) error {
 	m.JSONRPC = "2.0"
 	b, err := json.Marshal(m)
@@ -134,28 +136,40 @@ func (c *Client) writeBy(m message, deadline time.Time) error {
 		return err
 	}
 	b = append(b, '\n')
+	c.wonce.Do(func() { c.wgate = make(chan struct{}, 1) })
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	timedOut := errors.New("acp: write to the agent timed out")
+	select {
+	case c.wgate <- struct{}{}:
+		if !time.Now().Before(deadline) {
+			<-c.wgate
+			return timedOut
+		}
+	case <-timer.C:
+		return timedOut
+	}
+	unlock := func() { <-c.wgate }
 	type deadliner interface{ SetWriteDeadline(time.Time) error }
 	if d, ok := c.w.(deadliner); ok {
-		c.wmu.Lock()
-		defer c.wmu.Unlock()
 		if d.SetWriteDeadline(deadline) == nil {
+			defer unlock()
 			defer d.SetWriteDeadline(time.Time{})
+			_, err = c.w.Write(b)
+			return err
 		}
-		_, err = c.w.Write(b)
-		return err
 	}
 	done := make(chan error, 1)
 	go func() {
-		c.wmu.Lock()
-		defer c.wmu.Unlock()
+		defer unlock()
 		_, err := c.w.Write(b)
 		done <- err
 	}()
 	select {
 	case err := <-done:
 		return err
-	case <-time.After(time.Until(deadline)):
-		return fmt.Errorf("acp: write to the agent timed out")
+	case <-timer.C:
+		return timedOut
 	}
 }
 

@@ -149,7 +149,7 @@ const usageSeed = `{"sessionId":"s","update":{"sessionUpdate":"usage_update","us
 
 func FuzzUsageUpdate(f *testing.F) {
 	acpHostile(f)
-	for _, s := range []string{usageSeed, `{"sessionId":"s","update":{"sessionUpdate":"usage_update","used":1200,"size":200000}}`, `{"sessionId":"s","update":{"sessionUpdate":"usage_update","used":5,"cost":{"amount":"NaN"}}}`, `{"sessionId":"s","update":{"sessionUpdate":"usage_update","used":-1}}`} {
+	for _, s := range []string{usageSeed, `{"sessionId":"s","update":{"sessionUpdate":"usage_update","used":1200,"size":200000}}`, `{"sessionId":"s","update":{"sessionUpdate":"usage_update","used":5,"cost":{"amount":"NaN"}}}`, `{"sessionId":"s","update":{"sessionUpdate":"usage_update","used":-1}}`, `{"sessionId":"s","update":{"sessionUpdate":"usage_update","used":5,"cost":{"currency":"USD"}}}`, `{"sessionId":"s","update":{"sessionUpdate":"usage_update","used":5,"cost":{"amount":null,"currency":"USD"}}}`} {
 		f.Add([]byte(s))
 	}
 	f.Fuzz(checkUsageUpdate)
@@ -347,8 +347,19 @@ func fuzzUpdate(b []byte) (string, json.RawMessage, fuzzUpdateFields, bool) {
 	if json.Unmarshal(b, &envelope) != nil || json.Unmarshal(envelope.Update, &u) != nil {
 		return "", nil, u, false
 	}
+	// Cost.Amount's zero value cannot distinguish an explicit zero from a
+	// missing or null amount. Check its raw JSON independently of Cost.
+	var presence struct {
+		Cost *struct {
+			Amount json.RawMessage `json:"amount"`
+		} `json:"cost"`
+	}
+	if json.Unmarshal(envelope.Update, &presence) != nil {
+		return "", nil, u, false
+	}
 	valid := (u.Used == nil || *u.Used >= 0) && (u.Size == nil || *u.Size >= 0) &&
-		(u.Cost == nil || (u.Cost.Amount >= 0 && !math.IsNaN(u.Cost.Amount) && !math.IsInf(u.Cost.Amount, 0)))
+		(u.Cost == nil || (presence.Cost != nil && len(presence.Cost.Amount) != 0 && !bytes.Equal(presence.Cost.Amount, []byte("null")) &&
+			u.Cost.Amount >= 0 && !math.IsNaN(u.Cost.Amount) && !math.IsInf(u.Cost.Amount, 0)))
 	return envelope.SessionID, envelope.Update, u, valid
 }
 

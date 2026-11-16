@@ -100,14 +100,20 @@ func parseUpdate(params json.RawMessage) Update {
 	var a struct {
 		Used *int64 `json:"used"`
 		Size *int64 `json:"size"`
-		Cost *Cost  `json:"cost"`
+		Cost *struct {
+			Amount   *float64 `json:"amount"`
+			Currency string   `json:"currency"`
+		} `json:"cost"`
 	}
 	if json.Unmarshal(p.Update, &a) != nil ||
 		(a.Used != nil && *a.Used < 0) || (a.Size != nil && *a.Size < 0) ||
-		(a.Cost != nil && (a.Cost.Amount < 0 || math.IsNaN(a.Cost.Amount) || math.IsInf(a.Cost.Amount, 0))) {
+		(a.Cost != nil && (a.Cost.Amount == nil || *a.Cost.Amount < 0 || math.IsNaN(*a.Cost.Amount) || math.IsInf(*a.Cost.Amount, 0))) {
 		return out
 	}
-	out.Used, out.Size, out.Cost = a.Used, a.Size, a.Cost
+	out.Used, out.Size = a.Used, a.Size
+	if a.Cost != nil {
+		out.Cost = &Cost{Amount: *a.Cost.Amount, Currency: a.Cost.Currency}
+	}
 	return out
 }
 
