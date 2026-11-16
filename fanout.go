@@ -368,6 +368,26 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 		}
 		e.log.Event("child_run", ev)
 	}
+	// A refraktal child that sent no valid report, for any reason, may have
+	// spent its whole grant on its own harnesses without telling us: its
+	// whole grant (dollars and turns) is kept, as for a cancelled child. A
+	// turn that otherwise ended normally makes the missing report untrusted;
+	// a failed or cancelled turn keeps its outcome.
+	noReport := ""
+	if h.Name() == "refraktal" && turn.Child == nil && untrusted == "" {
+		if turn.StopReason == "end_turn" && !turn.Cancelled {
+			untrusted = "no report"
+		} else {
+			noReport = cmp.Or(errString(perr), "stop reason "+cmp.Or(turn.StopReason, "none"))
+		}
+		e.log.Event("child_run", map[string]any{"harness": name, "untrusted": untrusted, "no_report": noReport})
+	}
+	if noReport != "" {
+		charged += e.ledger.Forfeit(grant, "a child Refraktal ended without a report: its whole grant kept")
+		e.account(0, 0, max(0, grant.Turns-1)) // its whole allowance
+		e.notice(fmt.Sprintf("%s: the turn ended without a report (%s): its whole grant kept ($%.4f, %d turns)",
+			name, noReport, grant.USD, grant.Turns))
+	}
 	if untrusted != "" {
 		// AddTurns may already have forfeited; Forfeit returns the amount
 		// either way.

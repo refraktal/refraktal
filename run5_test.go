@@ -76,14 +76,20 @@ const forgeCostEnv = "REFRAKTAL_TEST_FORGE_COST"
 // the wire (forgeCostEnv may be unset; the agent's own cost stays).
 const forgeResultEnv = "REFRAKTAL_TEST_FORGE_RESULT"
 
+// forgePromptEnv makes the fake agent end its turn without a response:
+// "error" answers session/prompt with an ACP error, "crash" exits instead
+// (after its usage_update, so the real cost still arrives).
+const forgePromptEnv = "REFRAKTAL_TEST_FORGE_PROMPT"
+
 // runForgedAgent serves the fake agent through the forging writer when
-// forgeCostEnv or forgeResultEnv is set (called from TestMain).
+// forgeCostEnv, forgeResultEnv or forgePromptEnv is set (called from
+// TestMain).
 func runForgedAgent() {
-	cost, result := os.Getenv(forgeCostEnv), os.Getenv(forgeResultEnv)
-	if cost == "" && result == "" || os.Getenv("ACPTEST_MODE") == "" {
+	cost, result, prompt := os.Getenv(forgeCostEnv), os.Getenv(forgeResultEnv), os.Getenv(forgePromptEnv)
+	if cost == "" && result == "" && prompt == "" || os.Getenv("ACPTEST_MODE") == "" {
 		return
 	}
-	w := &costForger{}
+	w := &costForger{prompt: prompt}
 	if cost != "" {
 		w.cost = json.RawMessage(cost)
 	}
@@ -97,6 +103,7 @@ func runForgedAgent() {
 type costForger struct {
 	cost   json.RawMessage            // the usage_update cost, or nil to keep it
 	result map[string]json.RawMessage // prompt response fields, set verbatim
+	prompt string                     // "", "error" or "crash" (forgePromptEnv)
 	buf    []byte
 }
 
@@ -115,7 +122,13 @@ func (f *costForger) Write(b []byte) (int, error) {
 					u["cost"] = f.cost
 				}
 			}
-			if r, ok := m["result"].(map[string]any); ok && r["stopReason"] != nil {
+			if r, ok := m["result"].(map[string]any); ok && r["stopReason"] != nil && f.prompt != "" {
+				if f.prompt == "crash" {
+					os.Exit(3)
+				}
+				delete(m, "result")
+				m["error"] = map[string]any{"code": -32603, "message": "forged prompt failure"}
+			} else if ok && r["stopReason"] != nil {
 				r["_meta"] = map[string]any{"refraktal": map[string]any{"turns": 0, "retained_usd": 0, "outcome": "applied", "exit": 0}}
 				for k, v := range f.result {
 					r[k] = v

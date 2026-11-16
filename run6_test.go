@@ -71,3 +71,76 @@ func TestChildResponseControls(t *testing.T) {
 		t.Errorf("a negative token count beside a valid cost: outcome %s (%s), want applied", res.Outcome, res.Error)
 	}
 }
+
+// keptWhole reports whether the run kept a child's whole grant: a forfeited
+// charge, every dollar of the $5 grant and every one of its 5 turns.
+func keptWhole(res RunResult) bool {
+	forfeited := false
+	for _, ch := range res.Budget.Charges {
+		forfeited = forfeited || ch.Source == budget.Forfeited
+	}
+	return forfeited && res.Budget.Spent >= 5 && res.Budget.Turns == 5
+}
+
+// A refraktal child whose turn ends without a valid report may have spent
+// its whole grant on its own harnesses without telling us: the parent keeps
+// that grant, dollars and turns, whatever the reason. A turn that otherwise
+// ended normally (end_turn) makes the missing report untrusted: forfeit,
+// exhausted, exit 2, nothing applied.
+func TestRefraktalChildWithoutReportForfeits(t *testing.T) {
+	for _, result := range []string{
+		`{"_meta":5}`,                     // _meta present, not an object
+		`{"_meta":null}`,                  // no _meta
+		`{"_meta":{}}`,                    // no _meta.refraktal
+		`{"_meta":{"refraktal":null}}`,    // a null report
+		`{"_meta":{"other":{"turns":0}}}`, // someone else's metadata only
+	} {
+		t.Run(result, func(t *testing.T) {
+			r := newRunRig(t)
+			res := r.run(t, writer("refraktal", "out.txt=work", forgeResultEnv+"="+result), nil)
+			if res.Outcome != RunExhausted || res.ExitCode() != ExitBudget || exists(filepath.Join(r.repo, "out.txt")) {
+				t.Errorf("outcome %s exit %d applied %t (%s), want %s exit %d, nothing applied",
+					res.Outcome, res.ExitCode(), exists(filepath.Join(r.repo, "out.txt")), res.Error, RunExhausted, ExitBudget)
+			}
+			if !keptWhole(res) || res.Branch == "" {
+				t.Errorf("the grant was not kept whole, or the work not kept: spent %.4f turns %d branch %q", res.Budget.Spent, res.Budget.Turns, res.Branch)
+			}
+			if !strings.Contains(strings.Join(res.Notices, " "), "untrusted report (no report)") {
+				t.Errorf("no untrusted-report notice: %q", res.Notices)
+			}
+		})
+	}
+}
+
+// A refraktal child whose turn failed (an ACP error, a crash) stays failed,
+// but its whole grant is still kept, with a notice.
+func TestFailedRefraktalChildKeepsItsGrant(t *testing.T) {
+	for _, mode := range []string{"error", "crash"} {
+		t.Run(mode, func(t *testing.T) {
+			r := newRunRig(t)
+			res := r.run(t, writer("refraktal", "out.txt=work", forgePromptEnv+"="+mode), nil)
+			if res.Outcome != RunFailed || res.ExitCode() != ExitNoCandidate || exists(filepath.Join(r.repo, "out.txt")) {
+				t.Errorf("outcome %s exit %d applied %t (%s), want %s exit %d", res.Outcome, res.ExitCode(), exists(filepath.Join(r.repo, "out.txt")), res.Error, RunFailed, ExitNoCandidate)
+			}
+			if !keptWhole(res) {
+				t.Errorf("the grant was not kept whole: spent %.4f turns %d charges %+v", res.Budget.Spent, res.Budget.Turns, res.Budget.Charges)
+			}
+			if !strings.Contains(strings.Join(res.Notices, " "), "ended without a report") {
+				t.Errorf("no kept-grant notice: %q", res.Notices)
+			}
+		})
+	}
+	// An ordinary harness is unchanged: a failed turn returns its unused
+	// grant, and a missing report is no report at all.
+	for _, mode := range []string{"error", "crash"} {
+		r := newRunRig(t)
+		res := r.run(t, writer("claude", "out.txt=work", forgePromptEnv+"="+mode), nil)
+		if res.Outcome != RunFailed || res.Budget.Spent >= 5 || strings.Contains(strings.Join(res.Notices, " "), "without a report") {
+			t.Errorf("claude %s: outcome %s spent %.4f notices %q, want failed with the unused grant returned", mode, res.Outcome, res.Budget.Spent, res.Notices)
+		}
+	}
+	r := newRunRig(t)
+	if res := r.run(t, writer("claude", "out.txt=work", forgeResultEnv+`={"_meta":{}}`), nil); res.Outcome != RunApplied {
+		t.Errorf("claude without a report: outcome %s (%s), want applied", res.Outcome, res.Error)
+	}
+}
