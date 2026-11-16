@@ -136,18 +136,13 @@ REFRAKTAL_VERIFY_FINDINGS=1 GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
   -count=1 -v
 ```
 
-Five subagents implemented the shared checker and one model each, in two waves
-under the concurrency limit. The integrating agent read the mirrored code,
-reviewed every model and reproduction, requested corrections to uncovered
-assumptions, and ran the combined validation. No commits, pushes or external
-publication are part of this change.
-
 ## Observed validation
 
-On Go 1.27.4, darwin/arm64, the complete `go test -race ./verify -count=1 -v
--timeout=60s` run passed in **15.470 s**, including all models, findings, 14
-mutation checks, checker tests and production dependency isolation. This is a
-local measurement; CI was not run here. The 60-second limit comes from `-timeout=60s` in that command.
+The state table below comes from one run of `go test -race ./verify -count=1
+-v -timeout=60s` on macOS (Go 1.27.4, darwin/arm64), which passed in 15.47 s,
+including all models, the 14 mutation checks, the checker tests and the
+production dependency check. The 60-second limit comes from `-timeout=60s` in
+that command.
 
 | Exploration | States | Maximum depth | Search elapsed with race detection |
 | --- | ---: | ---: | ---: |
@@ -164,9 +159,17 @@ kill empty-session guard 4; budget reservation 2, turns 5, cancellation 4,
 settlement 4, cumulative delta 5; lifecycle cancel 9, deadline 9, wait barrier 4,
 retention 8, failed checks 12, interruptible apply 11; nesting ceiling 5.
 
-Formatting, `go vet ./...`, and compilation of all test packages passed with
-downloads disabled. The full `go test -race ./...` run did **not** pass in this
-restricted environment: loopback socket binding and `/bin/ps` execution were
-denied, and process-runtime tests failed. The four production finding
-reproductions were separately run with their gate enabled and all failed at
-their intended assertions. Their failures remain unfixed.
+Verified on the pull request that added this package:
+
+- **macOS** (Go 1.27.4, darwin/arm64, under CPU load: 16 busy loops on 8 CPUs):
+  `gofmt` and `go vet ./...` clean; `go test -race ./verify/...` in 16 s; the
+  full `go test -race ./...` passed three consecutive times; with
+  `REFRAKTAL_VERIFY_FINDINGS=1`, all four reproductions fail at their intended
+  assertions.
+- **Linux** (Go 1.24.7, as root): verify suite 18.4 s; full race suite 3/3;
+  three reproductions fail with the flag, the apply one skips as root.
+- **CI**: all seven checks passed (Go on ubuntu-latest and macos-latest for the
+  root module and both spike modules, and the release dry-run build).
+
+The four findings remain unfixed until their fix pull requests land; each one
+removes the opt-in for its own reproduction, so CI then enforces it.
