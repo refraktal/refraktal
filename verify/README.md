@@ -1,6 +1,7 @@
 # Bounded model checks for the fixed code
 
-These test-only models describe the fixed production code on main at `7ab1b1d`.
+These test-only models describe the fixed production code on main at `7ab1b1d`,
+plus the run-5 fixes for findings 5–7 below.
 Every FAITHFUL exploration must exhaust its reachable graph without an invariant
 violation. Old failures are mutation tests: each must find its counterexample.
 The separate no-pidfd exploration must find the documented platform limit.
@@ -65,6 +66,10 @@ overruns. A separate report-boundary exploration checks child-report validation
 and forfeiture without multiplying the concurrent ledger graph by every wire
 input. Invalid turns, cost or retained amounts must consume the grant's unused
 dollars and turns; genuine costs are charged first and an overrun is not capped.
+The exploration includes the wire forms `acp.parseUpdate`
+(`internal/acp/types.go`) sees: a cost that is present but not a number, not an
+object or negative must reach validation as invalid (`CostInvalid`), never as
+absent. An absent cost is valid and priced from tokens.
 The mapping is `Ledger` in `internal/budget/budget.go` and `runEnv.child` in
 `fanout.go`; report values correspond to `server.prompt`/`finish` in
 `acpserver.go`. Repeated ACP prompts sharing an inherited ledger are not
@@ -85,9 +90,14 @@ judging, cancel/deadline admission, no-apply and candidate retention in `Run`
 from a failed turn that nevertheless changed files. Failed candidates with work
 survive even when another candidate wins; if no applicable winner exists while
 failed work remains, the run fails rather than reporting no changes or no winner.
+A candidate whose turn ended for budget or `--mins` keeps that outcome through a
+failed collect: the run exits 2, applies nothing and keeps the work (the outcome
+precedence table in `docs/DESIGN.md`).
 
 `Worktree.Apply` (`internal/worktree/worktree.go`) snapshots touched paths before
-writes. A modeled write failure restores the snapshot before returning. Parent
+writes. A modeled write failure restores the snapshot before returning, and so
+does a failure of the post-apply LFS attribute check: the snapshot is held until
+that check passes. Parent
 cancellation cannot interrupt an admitted operation (`runEnv.opCtx` in
 `fanout.go`). Atomicity means the tree at operation return; intermediate Git
 writes can be partial. Snapshot refusal leaves the original tree unchanged.
@@ -107,8 +117,8 @@ intersects flags with grants. Lost grants cannot bypass the ceiling.
 | Kill exit/reuse | Three PID slots: pinned harness, recorded tool leader, member; two distinct births per reusable PID; reusable session/group IDs; empty count saturated at two | Exit/reuse around handle acquisition, recheck and signal; session replacement leader can fork and exit; unknown record retention; occupied versus empty. |
 | Kill snapshot provenance | Three rows: absent leader, parent outside session, child in session; current and recorded births 1..2; child record absent/1/2; parent presence and PPID link independent | Stale parent identity, child older than replacement parent, direct historical identity and ancestry. |
 | Concurrent ledger | Two candidates plus later judge; four USD units/four turns; turn costs `{0,1,3}` | Overlapping reservations, returned shares, cumulative reports, duplicate settlement, cancellation and per-grant final-turn crossing of at most two units. |
-| Child-report boundary | USD/turn grants 1..4; report turns -1..5; costs `{0,1,3,6}` or negative/NaN/infinite/non-USD classes; retained `{0,1,3,5}` or negative/NaN/infinite classes; cancelled or normal | Every validation branch, grant forfeiture and idempotence, valid retained charges, real costs above the grant. Invalid-cost token pricing uses the zero-cost fallback. |
-| Lifecycle | One/two candidates; optional judge; one collect/check result each; two touched files; monotonic cancel/deadline | Failed turn with work versus failed collect, snapshot refusal, sequential writes, later write error, rollback and post-apply LFS error. |
+| Child-report boundary | USD/turn grants 1..4; report turns -1..5; costs `{0,1,3,6}` or negative/NaN/infinite/non-USD classes; retained `{0,1,3,5}` or negative/NaN/infinite classes; non-numeric and absent wire costs; cancelled or normal | Every validation branch, a malformed wire cost, grant forfeiture and idempotence, valid retained charges, real costs above the grant. Invalid-cost token pricing uses the zero-cost fallback. |
+| Lifecycle | One/two candidates, each optionally stopped for budget or `--mins`; optional judge; one collect/check result each; two touched files; monotonic cancel/deadline | Failed turn with work versus failed collect, a budget stop with a failed collect, snapshot refusal, sequential writes, later write error, rollback, and a post-apply LFS error that rolls back. |
 | Nesting | Nest invalid/negative/0..3; depth/child flags 0..3; ceilings absent/malformed/-1..4; shrinking/lost/malformed grants | Equality/refusal, ceiling lowering and grant loss; at most four admitted runs per chain. |
 
 The bounds exercise the races and guards listed below. They establish no
@@ -156,6 +166,7 @@ unresolved live records may remain indefinitely.
 | Budget | Settle grant twice | Duplicate settlement | 4 |
 | Budget | Charge cumulative total rather than delta | Charge differs from actual cost | 5 |
 | Budget | Accept unvalidated child report | Five turns accepted against limit four | 4 |
+| Budget | Parser drops a malformed cost as absent | Malformed nested cost accepted | 3 |
 | Lifecycle | Remove cancel guard | Invalid apply admission | 9 |
 | Lifecycle | Remove deadline guard | Invalid apply admission | 9 |
 | Lifecycle | Remove all-children barrier | Collection before every shutdown returned | 4 |
@@ -165,9 +176,11 @@ unresolved live records may remain indefinitely.
 | Lifecycle | Apply without rollback | Partial tree at apply return | 12 |
 | Lifecycle | Delete failed turn's changes | Failed sibling's work deleted after winner applies | 17 |
 | Lifecycle | Suppress unused-failed-work outcome | Failed/clean fan-out incorrectly reports no changes | 11 |
+| Lifecycle | Collect failure erases budget exhaustion | Budget-stopped run ends failed (exit 1), not exit 2 | 8 |
+| Lifecycle | Clear snapshot before the post-apply check | Failure reported over a changed tree | 12 |
 | Nesting | Remove inherited-ceiling refusal | Ceiling exceeded after grant loss/reset flags | 5 |
 
-All 22 checks reproduce the stated counterexample. Trace lengths count
+All 25 checks reproduce the stated counterexample. Trace lengths count
 transitions, excluding the initial state. The legacy retirement fixture retains
 the original mutation under explicitly restricted pre-fix membership selection;
 its guarded baseline passes only that fixture and is not a FAITHFUL claim about
@@ -180,9 +193,9 @@ The no-pidfd limit is reported separately from mutation results.
 
 ## Findings and production reproductions
 
-Findings 1–4 are fixed on main. Their former faithful counterexamples now live
-in mutations, while updated FAITHFUL models must pass exhaustive exploration.
-No production code is changed by this update.
+Findings 1–4 are fixed on main and findings 5–7 on this branch. Their former
+faithful counterexamples now live in mutations, while updated FAITHFUL models
+must pass exhaustive exploration.
 
 1. **PID reuse after recheck:** fixed on Linux with pidfd acquisition before
    recheck (`32ddb68`). The PID-signal mutation reproduces the old unrelated
@@ -203,10 +216,28 @@ No production code is changed by this update.
    `internal/worktree/verify_apply_atomicity_test.go` contains the filesystem
    reproduction (skips root); `TestFailedApplyIsRolledBackViaSeam` also checks
    the fix without relying on filesystem permissions.
+5. **A collect failure erased budget exhaustion** (Astra run 5 #3): fixed by
+   keeping a budget-stopped candidate's outcome through a failed collect
+   (`7a1fda7`). The collect-erases-budget mutation reproduces the old exit 1.
+   `TestCollectFailureNeverOverridesExhaustion` (root package) is enforced.
+6. **A malformed nested cost was priced from tokens** (Astra run 5 #4): fixed
+   by marking a present but unusable cost and forfeiting the grant
+   (`572e64c`). The parser-drop mutation reproduces the acceptance.
+   `TestMalformedNestedCostForfeitsTheGrant` (root package) sends the
+   malformed cost over the wire; `TestCostInvalidMarksAPresentUnusableCost`
+   (`internal/acp`) covers the parser. Both are enforced.
+7. **The snapshot was cleared before the post-apply check** (Astra run 5 #5):
+   fixed by clearing it only after that check passes (`3f729d1`). The
+   clear-before-check mutation reproduces the changed tree.
+   `TestPostApplyFailureIsRolledBack` (`internal/worktree`) is enforced and
+   runs as root.
 
-No new counterexample was found against an updated FAITHFUL model. No new
-production reproduction test was needed. The no-pidfd counterexample is the
-already documented platform limit.
+Findings 5–7 were missed by the previous FAITHFUL models, and each model now
+covers its case. The lifecycle model had no per-candidate budget stop, and it
+accepted a post-apply failure over a fully applied tree as correct. The budget
+report model assumed a negative cost reached validation, but the parser dropped
+it as absent. The no-pidfd counterexample is the already documented platform
+limit.
 
 Process-level reproductions were not run in this sandbox, which blocks
 `/bin/ps`; the orchestrator can run them. Existing reproduction commands:
@@ -214,7 +245,11 @@ Process-level reproductions were not run in this sandbox, which blocks
 ```sh
 GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
   go test ./internal/proc ./internal/worktree ./verify \
-  -run '^(TestVerifyFinding.*|TestVerifyApplyAtomicityFilesystemError|TestFailedApplyIsRolledBackViaSeam|TestBudgetUntrustedTurnsFindingReproduction)$' \
+  -run '^(TestVerifyFinding.*|TestVerifyApplyAtomicityFilesystemError|TestFailedApplyIsRolledBackViaSeam|TestBudgetUntrustedTurnsFindingReproduction|TestPostApplyFailureIsRolledBack)$' \
+  -count=1 -v
+GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
+  go test . ./internal/acp \
+  -run '^(TestCollectFailureNeverOverridesExhaustion|TestMalformedNestedCostForfeitsTheGrant|TestCostInvalidMarksAPresentUnusableCost)$' \
   -count=1 -v
 ```
 
@@ -222,7 +257,10 @@ GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
 
 Measured on macOS, Go 1.27.4, darwin/arm64, using the command above with
 `GOCACHE=~/Projects/.refraktal-gocache`. The complete suite passed in **34.387 s**
-(package time), **34.58 s wall time**, below one minute. Timings are observations,
+(package time), **34.58 s wall time**, below one minute. The budget report and
+lifecycle rows were measured again after findings 5–7 (default cache, same
+machine): the complete suite then passed in **36.427 s** (package time),
+**36.93 s wall time**. Timings are observations,
 not performance guarantees. Every faithful row below exhausted the full graph;
 the platform-limit row stopped at its expected counterexample.
 
@@ -232,14 +270,14 @@ the platform-limit row stopped at its expected counterexample.
 | Kill, FAITHFUL snapshot provenance | 193 | 2 | 0.007 s | Exhaustive, no violation |
 | Kill, fixed retirement fixture | 8 | 3 | 0.00036 s | Exhaustive, no violation |
 | Budget, FAITHFUL concurrent ledger | 185,881 | 24 | 12.577 s | Exhaustive, no violation |
-| Budget, FAITHFUL report validation | 87,809 | 6 | 0.994 s | Exhaustive, no violation |
-| Lifecycle, FAITHFUL control flow | 4,055 | 23 | 0.135 s | Exhaustive, no violation |
-| Lifecycle, FAITHFUL filesystem errors | 4,403 | 24 | 0.143 s | Exhaustive, no violation |
+| Budget, FAITHFUL report validation | 109,761 | 6 | 1.332 s | Exhaustive, no violation |
+| Lifecycle, FAITHFUL control flow | 5,675 | 24 | 0.220 s | Exhaustive, no violation |
+| Lifecycle, FAITHFUL filesystem errors | 5,791 | 24 | 0.249 s | Exhaustive, no violation |
 | Nesting, FAITHFUL | 1,654 | 10 | 0.030 s | Exhaustive, no violation |
 | Kill, no pidfd platform limit | 21,941 | 12 | 1.991 s | Expected unrelated-signal counterexample |
 | Restricted legacy retirement fixture, guard retained | 8 | 3 | 0.00035 s | Exhaustive only for this pre-fix fixture |
 
-All 22 mutation checks passed by reproducing their intended violations; their
+All 25 mutation checks passed by reproducing their intended violations; their
 trace lengths are in the mutation table. The real ledger witnesses and the
 production dependency isolation check passed in the complete suite. The real
 `TestVerifyNestingSourceWitness` also passed separately with race detection.
