@@ -473,9 +473,11 @@ Git's worktree-list commands (`worktree add`, `worktree remove`, `branch
 another's half-written administrative folder and fail.
 
 **Budgets across children.** Each child reserves what is left divided by the
-children still to start, so parallel children split `--usd`. `--turns` and
-`--mins` belong to the whole run: every prompt counts against one `--turns`,
-and every child, check and the judge stop at the run's one deadline. The
+children still to start, so parallel children split `--usd`, and `--turns`
+the same way: each holds a turn allowance (at least one) no other child can
+use, and a child Refraktal's own prompts draw on it; unused dollars and
+turns return at settlement. `--mins` belongs to the whole run: every child,
+check and the judge stop at the run's one deadline. The
 judge reserves what is left after the candidates settle, and its cost counts.
 Claude's reported cost is cumulative for a session: when a session gets more
 than one prompt, each turn is charged the difference from the previous report.
@@ -569,7 +571,9 @@ changes. In order:
 **Outcome.** The winner is applied (checked with `git apply --check` first)
 and every worktree is removed. Nothing is ever applied once `--mins` has
 expired, for one candidate or a fan-out winner: the run is `timed_out` and
-the result stays on its branch. With `--no-apply` every candidate with
+the result stays on its branch. The deadline is checked just before the
+apply starts; the apply itself is never cut halfway, so a deadline reached
+during it ends `applied` (exit 0). With `--no-apply` every candidate with
 changes stays in its worktree and the branches are printed, the winner
 marked. No winner (every candidate failed, or the judge said none or could
 not answer) exits 1 with the candidates kept. `--mins` running out during
@@ -586,22 +590,43 @@ client, including a parent Refraktal, can drive it.
   `default`), `session/prompt`, `session/cancel`. No `loadSession`.
 - Each prompt is one Refraktal run in the session's folder, with the result
   applied there (a parent gives its child the child's worktree, so the
-  parent collects the child's result like any harness's). Progress and
-  notices arrive as message chunks, then a summary: the outcome, the
-  harness and the files. Error text never crosses, only "the error is in
-  the child's run log": a harness's errors can carry account details. Nor
-  do a harness's auth notifications or permission requests: the run
-  answers those itself under its own policy.
-- The run's cost goes out as a `usage_update` with a US-dollar `cost`,
-  cumulative for the session (as Claude reports it, so the parent charges
-  the difference: `reported`). The prompt response's stop reason is
-  `end_turn` (exit 0), `max_turn_requests` (a budget ran out), `refusal`
-  (nothing usable) or `cancelled`, and `_meta.refraktal` carries the run's
-  outcome, exit code, run folder and the prompts it sent to its own
-  harnesses.
+  parent collects the child's result like any harness's). A session whose
+  folder is a subfolder of the repository stays in it: each harness works
+  in that subfolder of its worktree, its edits are allowed only there, and
+  a result that changes any file outside it (collected with rename
+  detection off, so a move lists both paths) is refused, at collect and
+  again before apply.
+- Progress and notices arrive as message chunks, then a summary: the
+  outcome, the harness and the files. Notices cross only in a safe form:
+  one that can carry a raw OS error, URL or path (the price table, the
+  decision log, the pre-score, LFS pointers) arrives as fixed wording.
+  Error text never crosses, only "the error is in the child's run log": a
+  harness's errors can carry account details. Nor do a harness's auth
+  notifications or permission requests: the run answers those itself
+  under its own policy.
+- **Transport:** one writer drains a queue; a write that takes longer than
+  10 s (a client that stopped reading), or a full queue, fails the
+  transport, which cancels every run (their harnesses are shut down as on
+  any cancel) and ends the server with an error. The read loop never holds
+  the server: Ctrl-C ends it at once, even idle. A prompt ends with the
+  cost in its own small frame, then the summary in chunks of at most
+  256 KiB of text, then the response, so no frame nears the 16 MiB limit.
+- The run's actual cost (what it charged, reported and computed) goes out
+  as a `usage_update` with a US-dollar `cost`, cumulative for the session
+  (as Claude reports it, so the parent charges the difference:
+  `reported`). The prompt response's stop reason is `end_turn` (exit 0),
+  `max_turn_requests` (a budget ran out), `refusal` (nothing usable) or
+  `cancelled`, and `_meta.refraktal` carries the run's outcome, exit code,
+  run folder, the prompts it sent to its own harnesses, and
+  `retained_usd`: what its cancelled children keep reserved beyond their
+  cost. The parent holds that as a `retained` charge: counted against
+  `--usd`, not reported as spent.
 - **Budgets:** the `acp` flags (`--usd --turns --mins --depth`), shrunk to
   the parent's `REFRAKTAL_BUDGET` (each the smaller; a deadline already
-  past refuses the prompt). A parent's grant counts the prompt it is
+  past refuses the prompt). With a grant, the server keeps one ledger made
+  from it on the first prompt, shared by every prompt and session, so the
+  grant never resets; without one (a standalone server, an editor's), each
+  prompt gets the flags afresh. A parent's grant counts the prompt it is
   sending, so the child gets the turns left after it; the child's reported
   prompts are added to the parent's `--turns`, so `--turns` covers the
   whole tree. `--depth` shrinks by one per level (a grant of depth 0 lets
@@ -611,7 +636,8 @@ client, including a parent Refraktal, can drive it.
 - **Nested run folders:** every child is given `REFRAKTAL_PARENT_RUN`, its
   scratch folder in the parent's run folder; a child Refraktal makes its
   run folder there (`<parent run>/refraktal/runs/<id>`), through pinned
-  directory handles, refusing a symlink.
+  directory handles, refusing a symlink, and checks that the folder it
+  opened is the one it inspected (a swap between the two is refused).
 - **The `refraktal` harness** (`refraktal acp`, the CLI's own binary) runs
   only when `--harness` names it. It has no read-only mode, so it never
   judges. A harness that is not installed, or a refused child, is a failed
@@ -626,11 +652,16 @@ result's harness, files and branch, then each nested child run, indented.
 `--json` prints the same as one object with nested runs inside.
 
 - Run logs are untrusted (a child process wrote the nested ones): show
-  follows nested runs only under the `refraktal` scratch folder, never
-  through a symlink (nor a symlinked run folder or log), at most eight
-  levels deep, and drops from every value it prints the control
-  characters (terminal escapes and newlines, so a value cannot forge a
-  line) and the bidi and format characters.
+  walks the tree through pinned handles, opening each folder and log only
+  if it is a real directory or regular file (never a symlink, at any
+  component, `.refraktal` included) and the same one it inspected. It
+  follows nested runs only under the `refraktal` scratch folder. One
+  budget covers the whole walk: 64 MiB of log, 200,000 events, 10,000
+  folder entries and eight levels; past one, the run is marked truncated
+  and show says so. It drops from every value it prints, and from the run
+  names in its errors, the control characters (terminal escapes and
+  newlines, so a value cannot forge a line) and the bidi and format
+  characters.
 
 ## Doctor
 
