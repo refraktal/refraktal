@@ -548,8 +548,9 @@ changes. In order:
    sandbox; Codex asked to run the command and was denied); Antigravity
    `plan` (it took no action; its plan file goes to its own state folder in
    the run's scratch); Claude `default` with `disallowedTools` (`Bash`,
-   `Edit`, `MultiEdit`, `Write`, `NotebookEdit`) in the session's SDK
-   options, so no allow rule in the user's or the repository's settings can
+   `BashOutput`, `KillShell`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`,
+   `Task`, `Agent`, `SlashCommand`) and `strictMcpConfig` (no MCP tools,
+   even with `mcp: inherit`) in the session's SDK options, so no allow rule in the user's or the repository's settings can
    run a writing tool unasked (live, Claude then attempted no tool at all;
    without them it asked for the edit and the command, both denied).
    Claude's `plan` mode is not used: it writes a plan file into

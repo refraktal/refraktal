@@ -149,14 +149,14 @@ func (a *adapted) Prepare(ctx context.Context, o Options) (Launch, error) {
 func isolateClaude(_ context.Context, o Options, _ string, l *Launch) error {
 	l.ShellPrefixVar = "CLAUDE_CODE_SHELL_PREFIX"
 	opts := map[string]any{}
-	if !o.inherit() {
-		opts["strictMcpConfig"] = true
+	if !o.inherit() || o.ReadOnly {
+		opts["strictMcpConfig"] = true // a judge never has MCP tools, even with mcp: inherit
 	}
 	if o.ReadOnly {
-		// A judge: no writing tool at all, so an allow rule in the user's or
-		// the repository's settings cannot run one without asking (which the
-		// read-only policy would deny).
-		opts["disallowedTools"] = claudeWritingTools
+		// A judge: no tool that writes, runs commands or delegates, so an
+		// allow rule in the user's or the repository's settings cannot run
+		// one without asking (which the read-only policy would deny anyway).
+		opts["disallowedTools"] = claudeActingTools
 	}
 	if len(opts) > 0 {
 		b, err := json.Marshal(map[string]any{"claudeCode": map[string]any{"options": opts}})
@@ -168,8 +168,11 @@ func isolateClaude(_ context.Context, o Options, _ string, l *Launch) error {
 	return nil
 }
 
-// claudeWritingTools are Claude Code's tools that change files or run commands.
-var claudeWritingTools = []string{"Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"}
+// claudeActingTools are Claude Code's tools that change files, run or control
+// commands, or delegate to a subagent or slash command (which could use the
+// others).
+var claudeActingTools = []string{"Bash", "BashOutput", "KillShell", "Edit", "MultiEdit", "Write", "NotebookEdit",
+	"Task", "Agent", "SlashCommand"}
 
 // configureCodex sets the child's private TMPDIR, which Codex uses as its
 // writable temp root instead of the user's, and builds CODEX_CONFIG, which

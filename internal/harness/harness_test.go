@@ -269,8 +269,8 @@ func TestReadOnlyModes(t *testing.T) {
 
 // A Claude judge's session disallows every writing tool in the SDK options,
 // so an allow rule in the user's or the repository's settings cannot run one
-// without reaching the read-only policy. MCP isolation is kept, and inherit
-// mode gets the same disallowed tools.
+// without reaching the read-only policy, and has no MCP tools even when the
+// config inherits the user's MCP servers.
 func TestClaudeJudgeDisallowsWritingTools(t *testing.T) {
 	for _, mcp := range []string{MCPIsolated, MCPInherit} {
 		var l Launch
@@ -289,7 +289,8 @@ func TestClaudeJudgeDisallowsWritingTools(t *testing.T) {
 			t.Fatalf("%s: meta %s: %v", mcp, l.Meta, err)
 		}
 		o := m.ClaudeCode.Options
-		if strings.Join(o.Disallowed, ",") != "Bash,Edit,MultiEdit,Write,NotebookEdit" || o.Strict != (mcp == MCPIsolated) {
+		// A judge never has MCP tools, whatever the mcp setting: strict always.
+		if strings.Join(o.Disallowed, ",") != "Bash,BashOutput,KillShell,Edit,MultiEdit,Write,NotebookEdit,Task,Agent,SlashCommand" || !o.Strict {
 			t.Errorf("%s: options %+v", mcp, o)
 		}
 	}
