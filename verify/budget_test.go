@@ -2,6 +2,7 @@ package verify
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,9 +15,9 @@ import (
 // others report per-turn cost. Each scalar represents an exact integer, avoiding
 // floating-point key ambiguity. This is a bounded check, not a proof for arbitrary
 // fan-out, arbitrary costs or floating-point rounding. The main exploration
-// assumes truthful child reports within the passed turn allowance. A separate
-// faithful finding exploration admits an oversized ChildReport.Turns, which
-// acp.Client.Prompt (internal/acp/client.go) accepts without a grant-bound check.
+// models reports admitted by runEnv.child (fanout.go). A separate exhaustive
+// report-boundary model explores valid and invalid inputs before admission,
+// including Ledger.AddTurns/Forfeit (internal/budget/budget.go).
 // Claude reports are assumed cumulative and nondecreasing; decreasing reports
 // reset sessionCost.prev in fanout.go and are outside this provider contract.
 //
@@ -54,7 +55,7 @@ const (
 	ledgerNoCancelRetention
 	ledgerNoSettlementGuard
 	ledgerNoCumulativeDelta
-	ledgerUntrustedReport // faithful input accepted by the ACP parser, not a mutation
+	ledgerUntrustedReport // pre-fix: accept a report without validating the allowance
 )
 
 func ledgerModel(mutation ledgerMutation) model[ledgerState] {
@@ -148,9 +149,9 @@ func ledgerModel(mutation ledgerMutation) model[ledgerState] {
 					add(fmt.Sprintf("count nested prompt child %d", i), n)
 				}
 				if mutation == ledgerUntrustedReport && c.Phase == 1 && c.Turns > 0 {
-					// Client.Prompt (internal/acp/client.go) accepts ChildReport.Turns
-					// without checking the grant. runEnv.child (fanout.go) passes it
-					// to Ledger.AddTurns (internal/budget/budget.go), even past limits.
+					// MUTATION of runEnv.child (fanout.go) and Ledger.AddTurns
+					// (internal/budget/budget.go): accept the pre-fix oversized
+					// report instead of rejecting it and forfeiting the grant.
 					n := s
 					n.Children[i].Turns += ledgerTurns
 					n.Turns += ledgerTurns
@@ -188,6 +189,11 @@ func ledgerModel(mutation ledgerMutation) model[ledgerState] {
 			return out
 		},
 		Invariant: func(s ledgerState) error {
+			for i, c := range s.Children {
+				if c.Settlements > 1 || c.Phase == 4 && c.Settlements != 1 {
+					return fmt.Errorf("child %d grant settled %d times", i, c.Settlements)
+				}
+			}
 			if s.Turns > ledgerTurns || s.Held < 0 || s.Turns+s.Held > ledgerTurns {
 				return fmt.Errorf("turn budget violated: used=%d held=%d limit=%d", s.Turns, s.Held, ledgerTurns)
 			}
@@ -198,9 +204,6 @@ func ledgerModel(mutation ledgerMutation) model[ledgerState] {
 				}
 				if c.Turns > c.Allowance {
 					return fmt.Errorf("child %d exceeded its turn grant", i)
-				}
-				if c.Settlements > 1 || c.Phase == 4 && c.Settlements != 1 {
-					return fmt.Errorf("child %d grant settled %d times", i, c.Settlements)
 				}
 				if c.Cancelled && c.Phase == 4 && c.Enforced < c.USD {
 					return fmt.Errorf("cancelled child %d returned part of grant %d", i, c.USD)
@@ -266,32 +269,24 @@ func TestBudgetLedger(t *testing.T) {
 	}
 }
 
-// This does not classify a real oversized report as a guard-removal mutation.
-// It preserves the faithful counterexample alongside the honest-child bounds.
-func TestBudgetUntrustedTurnsFinding(t *testing.T) {
-	r := check(ledgerModel(ledgerUntrustedReport))
-	t.Log(r.String())
-	if r.Violation == nil {
-		t.Fatal("known accepted-input finding no longer has a counterexample")
-	}
-}
-
 func TestBudgetLedgerMutations(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		kind ledgerMutation
+		want string
 	}{
-		{"ignore-held-dollars", ledgerNoReservation},
-		{"remove-turn-guards", ledgerNoTurnGuard},
-		{"return-cancelled-reservation", ledgerNoCancelRetention},
-		{"settle-twice", ledgerNoSettlementGuard},
-		{"charge-cumulative-total", ledgerNoCumulativeDelta},
+		{"ignore-held-dollars", ledgerNoReservation, "USD reservation/exposure"},
+		{"remove-turn-guards", ledgerNoTurnGuard, "turn budget violated"},
+		{"return-cancelled-reservation", ledgerNoCancelRetention, "cancelled child"},
+		{"settle-twice", ledgerNoSettlementGuard, "grant settled 2 times"},
+		{"charge-cumulative-total", ledgerNoCumulativeDelta, "cumulative cost charged"},
+		{"unvalidated-child-report", ledgerUntrustedReport, "turn budget violated: used=5 held=0 limit=4"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := check(ledgerModel(tc.kind))
 			t.Log(r.String())
-			if r.Violation == nil {
-				t.Fatal("mutation produced no counterexample")
+			if r.Violation == nil || !strings.Contains(r.Violation.Error(), tc.want) {
+				t.Fatalf("mutation did not reproduce %q: %s", tc.want, r.String())
 			}
 		})
 	}
@@ -342,25 +337,232 @@ func TestBudgetLedgerRealWitness(t *testing.T) {
 	}
 }
 
-// The parser accepts ChildReport.Turns without checking its grant; runEnv.child
-// (fanout.go) forwards it to Ledger.AddTurns (internal/budget/budget.go), which
-// now refuses a report outside 0..the grant's remaining allowance and forfeits
+// runEnv.child (fanout.go) forwards validated ChildReport.Turns to
+// Ledger.AddTurns (internal/budget/budget.go), which independently refuses a
+// report outside 0..the grant's remaining allowance and forfeits
 // the whole grant instead. This reproduction is enforced: --turns can no longer
 // be exceeded by a report.
 func TestBudgetUntrustedTurnsFindingReproduction(t *testing.T) {
-	l, err := budget.New(budget.Limits{USD: ledgerUSD, Turns: ledgerTurns, Wall: time.Minute}, nil)
-	if err != nil {
-		t.Fatal(err)
+	for _, turns := range []int{-1, ledgerTurns} {
+		for _, cost := range []float64{1, 3} {
+			l, err := budget.New(budget.Limits{USD: ledgerUSD, Turns: ledgerTurns, Wall: time.Minute}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			g, err := l.ReserveShare(2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := l.BeginTurn(g); err != nil {
+				t.Fatal(err)
+			}
+			l.Charge(g, budget.Charge{USD: cost, Source: budget.Reported})
+			if err := l.AddTurns(g, turns); err == nil {
+				t.Fatalf("accepted untrusted nested turn count %d", turns)
+			}
+			wantForfeited := max(0, g.USD-cost)
+			for range 2 {
+				if got := l.Forfeit(g, "untrusted nested report"); got != wantForfeited {
+					t.Fatalf("forfeit=%v want=%v", got, wantForfeited)
+				}
+			}
+			if err := l.BeginTurn(g); err == nil {
+				t.Fatal("forfeited grant began another turn")
+			}
+			if st := l.Settle(g, false); st.Spent != max(g.USD, cost) || st.Returned != 0 {
+				t.Fatalf("untrusted report did not retain full grant and real cost: %+v", st)
+			}
+			if s := l.Summary(); s.Turns != g.Turns || s.Reported != max(g.USD, cost) {
+				t.Fatalf("forfeiture failed: summary=%+v allowance=%d", s, g.Turns)
+			}
+		}
 	}
-	g, err := l.ReserveShare(2)
-	if err != nil {
-		t.Fatal(err)
+}
+
+// The response boundary is explored separately from concurrent reservations:
+// USD and turn grants 1..4, report turns -1..5, finite costs {0,1,3,6},
+// retained amounts {0,1,3,5}, and negative/NaN/infinite/non-USD cost classes.
+// A child gets allowance-1 turns after the parent's prompt (runEnv.child,
+// fanout.go; childLimits and server.prompt/finish, acpserver.go). Costs larger
+// than the grant remain valid: final-turn overrun is never clamped. Classes
+// encode invalid floating-point values without NaN state-key ambiguity.
+// This is a bounded response-boundary check, not arbitrary wire/protocol input.
+type reportState struct {
+	Phase                                    uint8
+	USD, Allowance, ReportTurns              int
+	CostClass, RetainedClass                 int
+	Turns, Held, Charged, Retained           int
+	ForfeitedUSD, Spent, Reserved            int
+	Cancelled, Untrusted, Exhausted, Retried bool
+}
+
+func reportCost(class int) (int, bool) {
+	switch class {
+	case 0, 1, 2, 3:
+		return [...]int{0, 1, 3, 6}[class], true
+	default: // negative, NaN, infinity, wrong currency
+		return 0, false
 	}
-	if err := l.BeginTurn(g); err != nil {
-		t.Fatal(err)
+}
+
+func reportRetained(class int) (int, bool) {
+	switch class {
+	case 0, 1, 2, 3:
+		return [...]int{0, 1, 3, 5}[class], true
+	default: // negative, NaN, infinity
+		return 0, false
 	}
-	l.AddTurns(g, ledgerTurns)
-	if s := l.Summary(); s.Turns > ledgerTurns {
-		t.Fatalf("accepted nested report exceeded --turns: used=%d limit=%d child allowance=%d", s.Turns, ledgerTurns, g.Turns-1)
+}
+
+func reportModel() model[reportState] {
+	return model[reportState]{
+		Name: "budget child-report validation",
+		Key:  func(s reportState) string { return fmt.Sprintf("%v", s) },
+		Next: func(s reportState) []transition[reportState] {
+			var out []transition[reportState]
+			add := func(action string, n reportState) {
+				out = append(out, transition[reportState]{Action: action, State: n})
+			}
+			switch s.Phase {
+			case 0:
+				// Ledger.ReserveShare/BeginTurn (internal/budget/budget.go),
+				// runEnv.child (fanout.go), server.prompt/finish (acpserver.go):
+				// select a response after one parent prompt consumed a turn.
+				for usd := 1; usd <= ledgerUSD; usd++ {
+					for allowance := 1; allowance <= ledgerTurns; allowance++ {
+						for turns := -1; turns <= ledgerTurns+1; turns++ {
+							for costClass := 0; costClass < 8; costClass++ {
+								for retainedClass := 0; retainedClass < 7; retainedClass++ {
+									for _, cancelled := range []bool{false, true} {
+										n := reportState{Phase: 1, USD: usd, Allowance: allowance,
+											ReportTurns: turns, CostClass: costClass, RetainedClass: retainedClass,
+											Cancelled: cancelled, Turns: 1, Held: allowance - 1, Reserved: usd}
+										add("reserve, begin prompt and receive child response", n)
+									}
+								}
+							}
+						}
+					}
+				}
+			case 1:
+				// sessionCost.charges (fanout.go), charges/validCost (run.go),
+				// Ledger.Charge (internal/budget/budget.go): real charges precede
+				// forfeiture and keep the entire overrun. Invalid cost uses the
+				// modeled unpriced fallback ($0); token pricing is abstracted.
+				n := s
+				n.Phase = 2
+				n.Charged, _ = reportCost(s.CostClass)
+				add("charge valid cost in full before validating report", n)
+			case 2:
+				// runEnv.child (fanout.go), validCost (run.go), Ledger.AddTurns
+				// and Ledger.forfeit (internal/budget/budget.go): validate first,
+				// including the whole remaining turn allowance; bad counts
+				// forfeit immediately without incrementing by the invalid value.
+				n := s
+				n.Phase = 3
+				_, validCost := reportCost(s.CostClass)
+				retained, validRetained := reportRetained(s.RetainedClass)
+				n.Untrusted = !validCost || !validRetained || retained > s.USD || s.ReportTurns < 0 || s.ReportTurns > s.Allowance-s.Turns
+				if !n.Untrusted {
+					n.Turns += s.ReportTurns
+					n.Held -= s.ReportTurns
+					n.Retained = retained
+					n.Charged += retained
+				} else if validCost && validRetained && retained <= s.USD {
+					// Ledger.AddTurns invokes forfeit on an invalid count;
+					// the later runEnv.child Forfeit must be idempotent.
+					n.ForfeitedUSD = max(0, s.USD-s.Charged)
+					n.Charged += n.ForfeitedUSD
+					n.Turns, n.Held = s.Allowance, 0
+				}
+				add("validate child cost, retained amount and turn count", n)
+			case 3:
+				// runEnv.child (fanout.go) and Ledger.Forfeit/forfeit
+				// (internal/budget/budget.go): every untrusted report consumes
+				// the unused grant, marks exhaustion, and charges only once.
+				n := s
+				n.Phase = 4
+				if s.Untrusted {
+					n.ForfeitedUSD += max(0, s.USD-s.Charged)
+					n.Charged = max(s.USD, s.Charged)
+					n.Turns, n.Held, n.Exhausted = s.Allowance, 0, true
+				}
+				add("forfeit untrusted report and mark budget exhausted", n)
+			case 4:
+				// Ledger.Forfeit/forfeit (internal/budget/budget.go): a duplicate
+				// call returns the prior forfeiture without charging it again.
+				if !s.Retried {
+					n := s
+					n.Retried = true
+					add("retry forfeiture without changing accounting", n)
+				}
+				// Ledger.Settle (internal/budget/budget.go), runEnv.child
+				// (fanout.go): settle exactly once, retaining cancelled grants.
+				n := s
+				n.Phase, n.Reserved, n.Held = 5, 0, 0
+				n.Spent = s.Charged
+				if s.Cancelled {
+					n.Spent = max(s.USD, s.Charged)
+				}
+				add("settle report after validation or forfeiture", n)
+			}
+			return out
+		},
+		Invariant: func(s reportState) error {
+			if s.Phase == 0 {
+				return nil
+			}
+			if s.Turns < 1 || s.Turns > s.Allowance || s.Held < 0 || s.Phase < 5 && s.Turns+s.Held != s.Allowance {
+				return fmt.Errorf("reported turns escaped grant: turns=%d held=%d allowance=%d", s.Turns, s.Held, s.Allowance)
+			}
+			cost, _ := reportCost(s.CostClass)
+			if s.Phase >= 2 && s.Charged != cost+s.Retained+s.ForfeitedUSD {
+				return fmt.Errorf("cost, retained and forfeiture accounting disagree")
+			}
+			if s.Phase >= 4 && s.Untrusted && (!s.Exhausted || s.Charged != max(s.USD, cost) || s.ForfeitedUSD != max(0, s.USD-cost) || s.Turns != s.Allowance || s.Retained != 0) {
+				return fmt.Errorf("untrusted report did not forfeit its whole grant")
+			}
+			retained, _ := reportRetained(s.RetainedClass)
+			if s.Phase >= 3 && !s.Untrusted && (s.Turns != 1+s.ReportTurns || s.ForfeitedUSD != 0 || s.Retained != retained) {
+				return fmt.Errorf("valid report was not counted exactly")
+			}
+			if s.Phase == 5 {
+				want := s.Charged
+				if s.Cancelled {
+					want = max(s.USD, want)
+				}
+				if s.Spent != want || s.Reserved != 0 {
+					return fmt.Errorf("settlement lost real costs, forfeiture or cancellation retention")
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func TestBudgetChildReportValidation(t *testing.T) {
+	m := reportModel()
+	next := m.Next
+	var valid, invalidTurns, invalidCost, invalidRetained, overrunForfeited, retained bool
+	m.Next = func(s reportState) []transition[reportState] {
+		if s.Phase == 5 {
+			_, costOK := reportCost(s.CostClass)
+			r, retainedOK := reportRetained(s.RetainedClass)
+			valid = valid || !s.Untrusted
+			invalidTurns = invalidTurns || s.Untrusted && (s.ReportTurns < 0 || s.ReportTurns >= s.Allowance)
+			invalidCost = invalidCost || s.Untrusted && !costOK
+			invalidRetained = invalidRetained || s.Untrusted && (!retainedOK || r > s.USD)
+			overrunForfeited = overrunForfeited || s.Untrusted && s.Charged > s.USD && s.ForfeitedUSD == 0
+			retained = retained || !s.Untrusted && s.Retained > 0
+		}
+		return next(s)
+	}
+	r := check(m)
+	t.Log(r.String())
+	if r.Violation != nil {
+		t.Fatal(r.String())
+	}
+	if !valid || !invalidTurns || !invalidCost || !invalidRetained || !overrunForfeited || !retained {
+		t.Fatalf("missing report witness: valid=%v invalidTurns=%v invalidCost=%v invalidRetained=%v overrunForfeited=%v retained=%v", valid, invalidTurns, invalidCost, invalidRetained, overrunForfeited, retained)
 	}
 }
