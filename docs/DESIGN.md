@@ -42,7 +42,7 @@ not a command.
 | Claude Code | `@agentclientprotocol/claude-agent-acp`, pinned version | Adapter runs its own bundled `claude` |
 | Codex | `@agentclientprotocol/codex-acp`, pinned version | Adapter runs its own bundled `codex app-server` |
 | Antigravity | `agy acp` | Native ACP; uses the installed `agy` |
-| Refraktal | `refraktal acp` | Recursion |
+| Refraktal | `refraktal acp` | Recursion: `--harness refraktal` (see ACP server and show) |
 
 - **Pin adapter versions.** Keep the adapter's bundled harness binary by
   default; `doctor` reports both bundled and installed versions; config may
@@ -464,7 +464,7 @@ worktree of its own on branch `refraktal/<run id>-<harness>`.
 - Width: the router's choice, capped by `--fan` (`--fan 1` is one harness).
   `--harness a,b` pins the set and skips the router. A route decision is
   width 1; a fan-out decision runs the policy's harnesses in order; an
-  escalation runs the most probable harness (planning is M7).
+  escalation runs the most probable harness (planning is not built yet).
 - With one candidate there is nothing to choose: it is applied as in M3, with
   no checks or judge.
 
@@ -538,8 +538,7 @@ changes. In order:
    installed, logged out) is skipped. Only when none is left does a
    close-call candidate judge. The verdict records the judge, whether it
    judged its own candidate (`judged_own`, also a notice) and any judges
-   that could not be started, in `--json`, the run log and, from M7,
-   `show`. It runs in a fresh worktree of its own with its own grant,
+   that could not be started, in `--json`, the run log and `show`. It runs in a fresh worktree of its own with its own grant,
    read-only twice over: in a judge mode per harness, and under the
    read-only policy, which denies every edit, command and mode switch
    (`switch_mode`: Claude otherwise asks to leave its mode). The modes,
@@ -577,6 +576,61 @@ not answer) exits 1 with the candidates kept. `--mins` running out during
 the candidates or the judge exits 2 (`timed_out`) with the candidates kept;
 a budget spent before the judge could start, or before every candidate
 could run, exits 2 (`budget_exhausted`), reported ahead of `no_changes`.
+
+## ACP server and show (M7)
+
+**`refraktal acp`** speaks ACP (protocol 1) as an agent on stdio, so any ACP
+client, including a parent Refraktal, can drive it.
+
+- `initialize`, `session/new` (an absolute folder), `session/set_mode` (only
+  `default`), `session/prompt`, `session/cancel`. No `loadSession`.
+- Each prompt is one Refraktal run in the session's folder, with the result
+  applied there (a parent gives its child the child's worktree, so the
+  parent collects the child's result like any harness's). Progress and
+  notices arrive as message chunks, then a summary: the outcome, the
+  harness and the files. Error text never crosses, only "the error is in
+  the child's run log": a harness's errors can carry account details. Nor
+  do a harness's auth notifications or permission requests: the run
+  answers those itself under its own policy.
+- The run's cost goes out as a `usage_update` with a US-dollar `cost`,
+  cumulative for the session (as Claude reports it, so the parent charges
+  the difference: `reported`). The prompt response's stop reason is
+  `end_turn` (exit 0), `max_turn_requests` (a budget ran out), `refusal`
+  (nothing usable) or `cancelled`, and `_meta.refraktal` carries the run's
+  outcome, exit code, run folder and the prompts it sent to its own
+  harnesses.
+- **Budgets:** the `acp` flags (`--usd --turns --mins --depth`), shrunk to
+  the parent's `REFRAKTAL_BUDGET` (each the smaller; a deadline already
+  past refuses the prompt). A parent's grant counts the prompt it is
+  sending, so the child gets the turns left after it; the child's reported
+  prompts are added to the parent's `--turns`, so `--turns` covers the
+  whole tree. `--depth` shrinks by one per level (a grant of depth 0 lets
+  the child run harnesses but not another Refraktal), and the nesting
+  guard (`REFRAKTAL_NEST`) refuses any run past `--depth` + 1 levels,
+  whatever its grant says.
+- **Nested run folders:** every child is given `REFRAKTAL_PARENT_RUN`, its
+  scratch folder in the parent's run folder; a child Refraktal makes its
+  run folder there (`<parent run>/refraktal/runs/<id>`), through pinned
+  directory handles, refusing a symlink.
+- **The `refraktal` harness** (`refraktal acp`, the CLI's own binary) runs
+  only when `--harness` names it. It has no read-only mode, so it never
+  judges. A harness that is not installed, or a refused child, is a failed
+  candidate like any other.
+
+**`refraktal show [run] [--json]`** renders a run from its run log: the
+latest, or the one with that ID. The task, the route or the pinned harness,
+each candidate and the judge with their outcomes (and a child Refraktal's
+prompts), the check source, the verdict (winner, method, reason, judge and
+whether it judged its own candidate), costs by source with turns, the
+result's harness, files and branch, then each nested child run, indented.
+`--json` prints the same as one object with nested runs inside.
+
+- Run logs are untrusted (a child process wrote the nested ones): show
+  follows nested runs only under the `refraktal` scratch folder, never
+  through a symlink (nor a symlinked run folder or log), at most eight
+  levels deep, and drops from every value it prints the control
+  characters (terminal escapes and newlines, so a value cannot forge a
+  line) and the bidi and format characters.
 
 ## Doctor
 
@@ -622,11 +676,13 @@ A System 1 decision model chooses; harnesses are System 2.
   matches the spike's outputs, and live the ten samples gave the same
   decisions and outcomes as the spike's run.
 - The questions name the spike's harness labels; they map to Refraktal's
-  harnesses (`claude-code` → claude, `antigravity` → agy). `refraktal` cannot
-  run as a harness until M7: the next most probable harness runs, with a
-  notice.
+  harnesses (`claude-code` → claude, `antigravity` → agy). The router never
+  chooses `refraktal` (re-routing the same task to a child Refraktal gains
+  nothing until planning splits it): the next most probable harness runs,
+  with a notice. `--harness refraktal` runs a child Refraktal (see ACP
+  server and show).
 - A fan-out decision runs its harnesses (see Fan-out and judging); an
-  escalation runs the most probable harness until planning (M7), with a
+  escalation runs the most probable harness until planning is built, with a
   notice. `--harness` skips the router; `--fan N` caps the width. `--dry` routes and plans only (exit 0): no worktree, no
   harness.
 - The key comes from `GEMINI_API_KEY` in the environment, else the

@@ -161,6 +161,13 @@ and judging).
 **Done when:** a Refraktal drives a child Refraktal that drives a harness, and
 `show` renders the whole tree.
 
+**Open tests (taken from the done-when and DESIGN; none were listed):** a
+child Refraktal driven over ACP drives a harness and its result reaches the
+user's tree; the child honours `REFRAKTAL_BUDGET` and its prompts count
+against the parent's `--turns`; `--depth` and the nesting guard each stop
+recursion; child run folders nest; no auth notification or account text
+crosses to the parent.
+
 ## M8. Release
 
 GoReleaser, Homebrew tap, install script at `refraktal.dev/install`, npm and

@@ -106,7 +106,7 @@ func Show(root, id string) (ShowRun, error) {
 const maxNesting = 8
 
 func readRun(dir string, depth int) (ShowRun, error) {
-	r := ShowRun{ID: filepath.Base(dir), Dir: dir, Costs: ShowCosts{BySource: map[string]float64{}}}
+	r := ShowRun{ID: clean(filepath.Base(dir)), Dir: dir, Costs: ShowCosts{BySource: map[string]float64{}}}
 	if fi, err := os.Lstat(filepath.Join(dir, "events.jsonl")); err != nil || !fi.Mode().IsRegular() {
 		return r, fmt.Errorf("%w: %s has no run log", ErrNoRun, r.ID)
 	}
@@ -122,10 +122,10 @@ func readRun(dir string, depth int) (ShowRun, error) {
 		if json.Unmarshal(sc.Bytes(), &e) != nil {
 			continue
 		}
-		str := func(k string) string {
+		str := func(k string) string { // every string from the log is cleaned
 			var s string
 			json.Unmarshal(e[k], &s)
-			return s
+			return clean(s)
 		}
 		switch str("event") {
 		case "run_start":
@@ -134,6 +134,7 @@ func readRun(dir string, depth int) (ShowRun, error) {
 		case "route":
 			rt := &ShowRoute{Decider: str("decider"), Action: str("action")}
 			json.Unmarshal(e["harnesses"], &rt.Harnesses)
+			cleanAll(rt.Harnesses)
 			json.Unmarshal(e["confidence"], &rt.Confidence)
 			json.Unmarshal(e["cached"], &rt.Cached)
 			r.Route = rt
@@ -144,6 +145,7 @@ func readRun(dir string, depth int) (ShowRun, error) {
 				c.Harness = strings.TrimPrefix(c.Harness, "judge-") // the attempt's folder name
 			}
 			json.Unmarshal(e["files"], &c.Files)
+			cleanAll(c.Files)
 			r.Child = append(r.Child, c)
 		case "child_run":
 			var n int
@@ -160,6 +162,7 @@ func readRun(dir string, depth int) (ShowRun, error) {
 			r.Checks = str("source")
 		case "verdict":
 			json.Unmarshal(e["verdict"], &r.Verdict)
+			cleanMap(r.Verdict)
 		case "run_end":
 			r.Outcome, r.Branch = str("outcome"), str("branch")
 			r.Winner = str("winner")
@@ -167,16 +170,18 @@ func readRun(dir string, depth int) (ShowRun, error) {
 				r.Winner = str("harness") // one candidate: it is the result
 			}
 			json.Unmarshal(e["files"], &r.Files)
+			cleanAll(r.Files)
 			var b budget.Summary
 			if json.Unmarshal(e["budget"], &b) == nil {
 				r.Costs.Charged, r.Costs.Limit, r.Costs.Turns, r.Costs.TurnsMax = b.Spent, b.Limits.USD, b.Turns, b.Limits.Turns
-				r.Costs.Unpriced = b.Unpriced
+				r.Costs.Unpriced = cleanAll(b.Unpriced)
 				for _, c := range b.Charges {
-					r.Costs.BySource[string(c.Source)] += c.USD
+					r.Costs.BySource[clean(string(c.Source))] += c.USD
 				}
 			}
 			if r.Verdict == nil {
 				json.Unmarshal(e["verdict"], &r.Verdict)
+				cleanMap(r.Verdict)
 			}
 		}
 	}
@@ -213,15 +218,42 @@ func realDir(path string) bool {
 	return err == nil && fi.IsDir()
 }
 
-// clean drops control characters (terminal escapes among them) from text
-// read from a run log before it is printed.
+// clean drops, from a value read from a run log, every control character
+// (terminal escapes and newlines among them, so a value cannot forge a line)
+// and every bidi or format character (which can reorder what is shown).
 func clean(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+		switch {
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0):
+			return -1
+		case r == 0x200e || r == 0x200f || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) || r == 0xfeff:
 			return -1
 		}
 		return r
 	}, s)
+}
+
+// cleanMap cleans a verdict's string values, and string lists in it.
+func cleanMap(m map[string]any) {
+	for k, v := range m {
+		switch x := v.(type) {
+		case string:
+			m[k] = clean(x)
+		case []any:
+			for i, y := range x {
+				if s, ok := y.(string); ok {
+					x[i] = clean(s)
+				}
+			}
+		}
+	}
+}
+
+func cleanAll(xs []string) []string {
+	for i := range xs {
+		xs[i] = clean(xs[i])
+	}
+	return xs
 }
 
 func mergeChildren(cs []ShowChild) []ShowChild {
