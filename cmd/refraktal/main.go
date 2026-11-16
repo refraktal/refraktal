@@ -151,7 +151,10 @@ func showCmd(args []string, stdout, stderr io.Writer) int {
 		return refraktal.ExitNothingUsable
 	}
 	if *asJSON {
-		refraktal.WriteShowJSON(stdout, r)
+		if err := refraktal.WriteShowJSON(stdout, r); err != nil {
+			fmt.Fprintf(stderr, "refraktal show: %v\n", err)
+			return refraktal.ExitNothingUsable
+		}
 	} else {
 		refraktal.WriteShowText(stdout, r)
 	}

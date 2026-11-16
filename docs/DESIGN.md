@@ -749,7 +749,8 @@ each candidate and the judge with their outcomes (and a child Refraktal's
 prompts), the check source, the verdict (winner, method, reason, judge and
 whether it judged its own candidate), costs by source with turns, the
 result's harness, files and branch, then each nested child run, indented.
-`--json` prints the same as one object with nested runs inside. Runs are
+`--json` prints the same as one object with nested runs inside. If writing
+that object fails, `show` reports the error on stderr and exits nonzero. Runs are
 ordered by their first event's timestamp, with the run ID breaking ties;
 actual spend and retained reservations are separate fields in text and JSON.
 

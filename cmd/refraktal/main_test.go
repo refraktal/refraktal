@@ -227,3 +227,28 @@ func TestRunSIGINTInterruptsOpenStdin(t *testing.T) {
 		t.Fatal("SIGINT did not interrupt stdin collection with its producer still open")
 	}
 }
+
+type fullShowOutput struct{ writes int }
+
+func (w *fullShowOutput) Write([]byte) (int, error) {
+	w.writes++
+	return 0, syscall.ENOSPC
+}
+
+func TestReviewShowJSONReportsOutputFailure(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	run := filepath.Join(root, ".refraktal", "runs", "recorded-run")
+	if err := os.MkdirAll(run, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(run, "events.jsonl"), []byte("{\"event\":\"run_start\"}\n{\"event\":\"run_end\",\"outcome\":\"applied\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	stdout := &fullShowOutput{}
+	code := showCmd([]string{"recorded-run", "--json"}, stdout, &stderr)
+	if stdout.writes != 1 || code != 3 || !strings.Contains(stderr.String(), "refraktal show:") || !strings.Contains(stderr.String(), syscall.ENOSPC.Error()) {
+		t.Fatalf("writes=%d exit=%d stderr=%q; want failed output diagnostic and exit 3", stdout.writes, code, stderr.String())
+	}
+}
