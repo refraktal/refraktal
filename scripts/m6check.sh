@@ -58,7 +58,7 @@ PY
 
 LIVEDIR="$(python3 -c 'import os,sys; print(os.path.expanduser("~/Library/Application Support/refraktal/live") if sys.platform=="darwin" else os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "refraktal/live"))')"
 if [ "${1:-}" = probe ]; then
-  go run ./scripts/judgeprobe -root "$LIVE/probe" -harness "${HARNESSES:-codex,agy}"
+  go run ./scripts/judgeprobe -root "$LIVE/probe" -harness "${HARNESSES:-codex,agy}" ${ALLOW:+-allow}
   rc=$?
   echo "adapter processes running now: $(ps -A -o command= | grep -c '[a]gy acp\|[c]laude-agent-acp\|[c]odex-acp')"
   exit $rc

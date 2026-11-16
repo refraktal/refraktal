@@ -33,8 +33,8 @@ type Harness interface {
 	// ReadOnlyMode is the mode a judge's session runs in, under the read-only
 	// policy: Codex read-only (codex-acp then sends a read-only sandbox, and
 	// asks before writing), Antigravity plan (no action; its plan file goes
-	// to its per-run state folder), Claude default (every edit and shell
-	// command is asked, and denied). Claude's plan mode is not used: it
+	// to its per-run state folder), Claude default with its writing tools
+	// disallowed (Options.ReadOnly). Claude's plan mode is not used: it
 	// writes a plan file into ~/.claude/plans without asking.
 	ReadOnlyMode() string
 	// Prepare finds or installs what is needed to launch the harness.
@@ -49,6 +49,7 @@ type Options struct {
 	MCP         string   // "isolated" or "inherit" (config.MCPIsolated, config.MCPInherit)
 	Executable  string   // optional: the binary to run (see config.Harness.Executable)
 	TmpDir      string   // optional: a private TMPDIR for the child (used for Codex)
+	ReadOnly    bool     // a judge's session: the harness must not write (Claude: disallowed tools)
 }
 
 func (o Options) inherit() bool { return o.MCP == MCPInherit }
@@ -147,11 +148,28 @@ func (a *adapted) Prepare(ctx context.Context, o Options) (Launch, error) {
 // still load: the adapter asks for user, project and local setting sources.
 func isolateClaude(_ context.Context, o Options, _ string, l *Launch) error {
 	l.ShellPrefixVar = "CLAUDE_CODE_SHELL_PREFIX"
+	opts := map[string]any{}
 	if !o.inherit() {
-		l.Meta = json.RawMessage(`{"claudeCode":{"options":{"strictMcpConfig":true}}}`)
+		opts["strictMcpConfig"] = true
+	}
+	if o.ReadOnly {
+		// A judge: no writing tool at all, so an allow rule in the user's or
+		// the repository's settings cannot run one without asking (which the
+		// read-only policy would deny).
+		opts["disallowedTools"] = claudeWritingTools
+	}
+	if len(opts) > 0 {
+		b, err := json.Marshal(map[string]any{"claudeCode": map[string]any{"options": opts}})
+		if err != nil {
+			return err
+		}
+		l.Meta = b
 	}
 	return nil
 }
+
+// claudeWritingTools are Claude Code's tools that change files or run commands.
+var claudeWritingTools = []string{"Bash", "Edit", "MultiEdit", "Write", "NotebookEdit"}
 
 // configureCodex sets the child's private TMPDIR, which Codex uses as its
 // writable temp root instead of the user's, and builds CODEX_CONFIG, which

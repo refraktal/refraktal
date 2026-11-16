@@ -72,7 +72,7 @@ func openSession(ctx context.Context, sp sessionSpec) (*session, error) {
 	}
 	var err error
 	s.launch, err = sp.h.Prepare(ctx, harness.Options{Scratch: sp.scratch, ScratchRoot: sp.scratchRoot, Cwd: sp.cwd, MCP: sp.hcfg.MCP,
-		Executable: sp.hcfg.Executable, TmpDir: sp.tmpDir})
+		Executable: sp.hcfg.Executable, TmpDir: sp.tmpDir, ReadOnly: sp.readOnly})
 	if err != nil {
 		return s, &openError{StatusUnavailable, err}
 	}

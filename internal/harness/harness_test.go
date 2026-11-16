@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -263,5 +264,38 @@ func TestReadOnlyModes(t *testing.T) {
 		if got := h.ReadOnlyMode(); got != want[h.Name()] {
 			t.Errorf("%s: read-only mode %q, want %q", h.Name(), got, want[h.Name()])
 		}
+	}
+}
+
+// A Claude judge's session disallows every writing tool in the SDK options,
+// so an allow rule in the user's or the repository's settings cannot run one
+// without reaching the read-only policy. MCP isolation is kept, and inherit
+// mode gets the same disallowed tools.
+func TestClaudeJudgeDisallowsWritingTools(t *testing.T) {
+	for _, mcp := range []string{MCPIsolated, MCPInherit} {
+		var l Launch
+		if err := isolateClaude(context.Background(), Options{MCP: mcp, ReadOnly: true}, "", &l); err != nil {
+			t.Fatal(err)
+		}
+		var m struct {
+			ClaudeCode struct {
+				Options struct {
+					Strict     bool     `json:"strictMcpConfig"`
+					Disallowed []string `json:"disallowedTools"`
+				} `json:"options"`
+			} `json:"claudeCode"`
+		}
+		if err := json.Unmarshal(l.Meta, &m); err != nil {
+			t.Fatalf("%s: meta %s: %v", mcp, l.Meta, err)
+		}
+		o := m.ClaudeCode.Options
+		if strings.Join(o.Disallowed, ",") != "Bash,Edit,MultiEdit,Write,NotebookEdit" || o.Strict != (mcp == MCPIsolated) {
+			t.Errorf("%s: options %+v", mcp, o)
+		}
+	}
+	var l Launch
+	isolateClaude(context.Background(), Options{MCP: MCPIsolated}, "", &l)
+	if strings.Contains(string(l.Meta), "disallowedTools") {
+		t.Error("a candidate's session disallowed tools")
 	}
 }

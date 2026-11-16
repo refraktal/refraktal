@@ -547,10 +547,14 @@ changes. In order:
    a file and run `touch`: Codex `read-only` (codex-acp sends a read-only
    sandbox; Codex asked to run the command and was denied); Antigravity
    `plan` (it took no action; its plan file goes to its own state folder in
-   the run's scratch); Claude `default` (it asked for the edit and the
-   command, both denied). Claude's `plan` mode is not used: it writes a
-   plan file into `~/.claude/plans` without asking, and asks to leave plan
-   mode before acting. A harness whose session does not offer its judge
+   the run's scratch); Claude `default` with `disallowedTools` (`Bash`,
+   `Edit`, `MultiEdit`, `Write`, `NotebookEdit`) in the session's SDK
+   options, so no allow rule in the user's or the repository's settings can
+   run a writing tool unasked (live, Claude then attempted no tool at all;
+   without them it asked for the edit and the command, both denied).
+   Claude's `plan` mode is not used: it writes a plan file into
+   `~/.claude/plans` without asking, and asks to leave plan mode before
+   acting. A harness whose session does not offer its judge
    mode cannot judge. After the turn the judge's worktree must be
    unchanged (modified, untracked and ignored files alike); if not, its
    answer is not used, the changed paths are recorded, and the checks
