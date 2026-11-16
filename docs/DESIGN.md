@@ -812,7 +812,17 @@ client, including a parent Refraktal, can drive it.
   dropped with a malformed `used` or `size` in the same update) is an
   untrusted report, not an absent cost: it is never priced from tokens
   instead. An absent cost (no field, or `null`) is priced from tokens as
-  for any harness. Anything else charges the
+  for any harness. The same holds for the report itself and the response's
+  `usage`: one that is present (not `null`) but cannot be decoded (a number
+  outside its field's range, such as turns one past the largest 64-bit
+  integer, a wrong type, or not an object) is an untrusted report, exactly
+  like an out-of-range one, never an absent one. The client decodes the
+  response field by field, so one bad field neither hides the report nor
+  hides that it was sent; a field's presence follows the decoder's own key
+  matching, so `"Cost"` is as present as `"cost"`. A response or `_meta`
+  that is not an object shows no report and fails the turn as before: the
+  parent cannot tell a child that sends no report from a plain harness.
+  An untrusted report charges the
   child its whole grant (the unspent dollars as a `forfeited` charge, and
   every unused turn; its real costs are charged first and stand in full, so
   an overrun is never capped), marks it `budget_exhausted` with a notice, and the run

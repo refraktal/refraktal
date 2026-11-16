@@ -70,21 +70,34 @@ func TestCollectFailureNeverOverridesExhaustion(t *testing.T) {
 // it reaches the wire.
 const forgeCostEnv = "REFRAKTAL_TEST_FORGE_COST"
 
+// forgeResultEnv makes the fake agent add a child Refraktal's report to its
+// prompt response, then overwrite the response's top-level fields with this
+// raw JSON object, verbatim: an undecodable report or usage as it reaches
+// the wire (forgeCostEnv may be unset; the agent's own cost stays).
+const forgeResultEnv = "REFRAKTAL_TEST_FORGE_RESULT"
+
 // runForgedAgent serves the fake agent through the forging writer when
-// forgeCostEnv is set (called from TestMain).
+// forgeCostEnv or forgeResultEnv is set (called from TestMain).
 func runForgedAgent() {
-	raw := os.Getenv(forgeCostEnv)
-	if raw == "" || os.Getenv("ACPTEST_MODE") == "" {
+	cost, result := os.Getenv(forgeCostEnv), os.Getenv(forgeResultEnv)
+	if cost == "" && result == "" || os.Getenv("ACPTEST_MODE") == "" {
 		return
 	}
-	w := &costForger{cost: json.RawMessage(raw)}
+	w := &costForger{}
+	if cost != "" {
+		w.cost = json.RawMessage(cost)
+	}
+	if result != "" && json.Unmarshal([]byte(result), &w.result) != nil {
+		panic(forgeResultEnv + " is not a JSON object")
+	}
 	acptest.Serve(os.Getenv("ACPTEST_MODE"), os.Stdin, w)
 	os.Exit(0)
 }
 
 type costForger struct {
-	cost json.RawMessage
-	buf  []byte
+	cost   json.RawMessage            // the usage_update cost, or nil to keep it
+	result map[string]json.RawMessage // prompt response fields, set verbatim
+	buf    []byte
 }
 
 func (f *costForger) Write(b []byte) (int, error) {
@@ -98,12 +111,15 @@ func (f *costForger) Write(b []byte) (int, error) {
 		var m map[string]any
 		if json.Unmarshal(line, &m) == nil {
 			if p, ok := m["params"].(map[string]any); ok {
-				if u, ok := p["update"].(map[string]any); ok && u["sessionUpdate"] == "usage_update" {
+				if u, ok := p["update"].(map[string]any); ok && u["sessionUpdate"] == "usage_update" && f.cost != nil {
 					u["cost"] = f.cost
 				}
 			}
 			if r, ok := m["result"].(map[string]any); ok && r["stopReason"] != nil {
-				r["_meta"] = map[string]any{"refraktal": map[string]any{"turns": 0, "retained_usd": 0, "outcome": "applied", "exit_code": 0}}
+				r["_meta"] = map[string]any{"refraktal": map[string]any{"turns": 0, "retained_usd": 0, "outcome": "applied", "exit": 0}}
+				for k, v := range f.result {
+					r[k] = v
+				}
 			}
 			line, _ = json.Marshal(m)
 		}
