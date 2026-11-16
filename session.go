@@ -33,9 +33,10 @@ type sessionSpec struct {
 	// used as the harness's shell prefix; "" means none. It is never guessed
 	// from os.Executable(): in a test or a library host that is a different
 	// program, and Claude would run it for every tool command.
-	prefixExe string
-	log       *runlog.Log
-	timeout   time.Duration // for initialize, session/new and set_mode
+	prefixExe     string
+	log           *runlog.Log
+	timeout       time.Duration // for initialize, session/new and set_mode
+	probeVersions bool          // doctor reads installed and bundled versions
 	// readOnly sets the harness's own read-only mode instead of its usual
 	// one (a judge); a harness that does not offer it fails to open.
 	readOnly bool
@@ -72,7 +73,7 @@ func openSession(ctx context.Context, sp sessionSpec) (*session, error) {
 	}
 	var err error
 	s.launch, err = sp.h.Prepare(ctx, harness.Options{Scratch: sp.scratch, ScratchRoot: sp.scratchRoot, Cwd: sp.cwd, MCP: sp.hcfg.MCP,
-		Executable: sp.hcfg.Executable, TmpDir: sp.tmpDir, ReadOnly: sp.readOnly})
+		Executable: sp.hcfg.Executable, TmpDir: sp.tmpDir, ReadOnly: sp.readOnly, ProbeVersions: sp.probeVersions})
 	if err != nil {
 		return s, &openError{StatusUnavailable, err}
 	}
