@@ -218,8 +218,17 @@ func recordedSessions(path string, strict bool) ([]Proc, error) {
 		return nil, err
 	}
 	defer f.Close()
+	if testBeforeSessionRead != nil {
+		if err := testBeforeSessionRead(path); err != nil {
+			return nil, err
+		}
+	}
 	return readSessionRecords(f, strict)
 }
+
+// testBeforeSessionRead, set by tests, runs after the inventory is opened; an
+// error it returns is a read failure (a seam that works as root too).
+var testBeforeSessionRead func(path string) error
 
 func readSessions(r io.Reader) ([]Proc, error) {
 	return readSessionRecords(r, false)

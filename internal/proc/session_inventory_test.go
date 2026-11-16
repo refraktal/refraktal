@@ -1,6 +1,7 @@
 package proc
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,15 +10,22 @@ import (
 )
 
 func TestReviewUnreadableSessionsLooksLikeCleanShutdown(t *testing.T) {
-	assertSessionInventoryUnknown(t, func(t *testing.T, sessions string) {
-		if err := os.Chmod(sessions, 0); err != nil {
-			t.Fatal(err)
+	// Like the apply-failure seam, this fails the real inventory read even
+	// when permissions cannot deny it (root and CI).
+	injected := errors.New("injected: sessions read denied")
+	report := assertSessionInventoryUnknown(t, func(t *testing.T, sessions string) {
+		oldRead := testBeforeSessionRead
+		testBeforeSessionRead = func(path string) error {
+			if path != sessions {
+				return nil
+			}
+			return injected
 		}
-		t.Cleanup(func() { os.Chmod(sessions, 0o600) })
-		if _, err := RecordedSessions(sessions); err == nil {
-			t.Fatal("fixture did not deny reads")
-		}
+		t.Cleanup(func() { testBeforeSessionRead = oldRead })
 	})
+	if !strings.Contains(report.Err, injected.Error()) {
+		t.Fatalf("shutdown error = %q; want injected read failure", report.Err)
+	}
 }
 
 func TestMalformedSessionsKeepsLiveRecord(t *testing.T) {
@@ -38,7 +46,7 @@ func TestMalformedSessionsKeepsLiveRecord(t *testing.T) {
 	}
 }
 
-func assertSessionInventoryUnknown(t *testing.T, corrupt func(*testing.T, string)) {
+func assertSessionInventoryUnknown(t *testing.T, corrupt func(*testing.T, string)) ShutdownReport {
 	t.Helper()
 	fakePS(t, "exit 0")
 	sent := interceptSignals(t)
@@ -73,6 +81,10 @@ func assertSessionInventoryUnknown(t *testing.T, corrupt func(*testing.T, string
 	if len(*sent) != 0 {
 		t.Fatalf("inventory failure signalled a process: %v", *sent)
 	}
+	rec, err := loadRecord(records[0])
+	if err != nil || !rec.InventoryUnknown {
+		t.Fatalf("live record must preserve unknown inventory: record=%+v err=%v", rec, err)
+	}
 	// The deterministic empty snapshot makes the owner appear dead. Inventory
 	// uncertainty must survive the handoff from Shutdown to dead-run cleanup.
 	cleanup, err := CleanLeftovers(filepath.Join(dir, "live"))
@@ -80,7 +92,9 @@ func assertSessionInventoryUnknown(t *testing.T, corrupt func(*testing.T, string
 		t.Fatal(err)
 	}
 	records, err = filepath.Glob(filepath.Join(dir, "live", "*.json"))
-	if err != nil || len(records) != 1 || len(cleanup.Errors) == 0 {
+	if err != nil || len(records) != 1 || cleanup.Dead != 1 ||
+		!strings.Contains(strings.Join(cleanup.Errors, "\n"), "recorded sessions inventory is unknown") {
 		t.Fatalf("dead-run cleanup lost unknown inventory: records=%d errors=%v err=%v", len(records), cleanup.Errors, err)
 	}
+	return report
 }
