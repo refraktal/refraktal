@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"answers\":{\"fan_out_width\":{\"type\":\"score\",\"score\":0,\"confidence\":1,\"probabilities\":{\"0\":1,\"1\":0,\"2\":0,\"unknown\":2}}}}")

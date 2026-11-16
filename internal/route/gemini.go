@@ -181,6 +181,9 @@ func choiceAnswer(r geminiResponse, key string, allowed []string) (Answer, error
 			return Answer{}, fmt.Errorf("gemini: malformed body: answer %q has an unknown option or a probability outside [0,1]", key)
 		}
 	}
+	if _, ok := a.Probabilities[a.Choice]; !ok {
+		return Answer{}, fmt.Errorf("gemini: malformed body: answer %q has no probability for its choice", key)
+	}
 	return Answer{Value: a.Choice, Probability: a.Probabilities[a.Choice], Confidence: *a.Confidence, Probabilities: a.Probabilities}, nil
 }
 
@@ -198,6 +201,9 @@ func widthAnswer(r geminiResponse) (Answer, error) {
 	a, ok := r.Answers["fan_out_width"]
 	if !ok || a.Type != "score" || a.Score == nil || a.Confidence == nil || !unit(*a.Confidence) || math.IsNaN(*a.Score) || math.IsInf(*a.Score, 0) {
 		return Answer{}, fmt.Errorf("gemini: malformed body: bad or missing score answer %q", "fan_out_width")
+	}
+	if len(a.Probabilities) != MaxFanOut-MinFanOut+1 {
+		return Answer{}, fmt.Errorf("gemini: malformed body: width probabilities must contain only the known levels")
 	}
 	out := Answer{Confidence: *a.Confidence, Score: a.Score, Probabilities: map[string]float64{}}
 	best := -1.0

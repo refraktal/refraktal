@@ -2,6 +2,7 @@ package acp
 
 import (
 	"encoding/json"
+	"math"
 	"time"
 )
 
@@ -83,15 +84,31 @@ func parseUpdate(params json.RawMessage) Update {
 		SessionID string          `json:"sessionId"`
 		Update    json.RawMessage `json:"update"`
 	}
-	json.Unmarshal(params, &p)
-	var u struct {
+	if json.Unmarshal(params, &p) != nil {
+		return Update{}
+	}
+	var k struct {
 		Kind string `json:"sessionUpdate"`
+	}
+	if json.Unmarshal(p.Update, &k) != nil {
+		return Update{}
+	}
+	out := Update{SessionID: p.SessionID, Kind: k.Kind, Raw: p.Update}
+	// Accounting is all or nothing: if any of used, size or cost is malformed
+	// or out of range, none of them is applied. The update itself still
+	// reaches the callbacks and the log, so a harness's odd number is visible.
+	var a struct {
 		Used *int64 `json:"used"`
 		Size *int64 `json:"size"`
 		Cost *Cost  `json:"cost"`
 	}
-	json.Unmarshal(p.Update, &u)
-	return Update{SessionID: p.SessionID, Kind: u.Kind, Raw: p.Update, Used: u.Used, Size: u.Size, Cost: u.Cost}
+	if json.Unmarshal(p.Update, &a) != nil ||
+		(a.Used != nil && *a.Used < 0) || (a.Size != nil && *a.Size < 0) ||
+		(a.Cost != nil && (a.Cost.Amount < 0 || math.IsNaN(a.Cost.Amount) || math.IsInf(a.Cost.Amount, 0))) {
+		return out
+	}
+	out.Used, out.Size, out.Cost = a.Used, a.Size, a.Cost
+	return out
 }
 
 // PermissionOption is one choice in a permission request.
