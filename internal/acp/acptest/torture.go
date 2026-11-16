@@ -255,14 +255,29 @@ func (n tortureNode) run() error {
 		if err := n.mark("closed-stdio"); err != nil {
 			return err
 		}
-	case "agent-tool", "agent-tool-change", "agent-edit":
+	case "agent-tool", "agent-tool-change", "agent-edit", "agent-edit-tree", "agent-judge":
 		Serve(n.Role, os.Stdin, os.Stdout)
 		return nil
-	case "leaf", "daemon", "stubborn":
+	case "leaf":
+		if err := n.mark(fmt.Sprintf("leaf-ready-%d", n.Launcher)); err != nil {
+			return err
+		}
+	case "daemon", "stubborn":
 	default:
 		return fmt.Errorf("unknown torture role")
 	}
 	return n.awaitExpiry() // no polling or work while waiting for the safety expiry
+}
+
+// readyTree starts a child in another process group and waits until its own
+// child has recorded its PID. A prompt cannot finish before both exist.
+func (n tortureNode) readyTree() error {
+	cmd, err := n.spawn("cycle", 0, &syscall.SysProcAttr{Setpgid: true}, false)
+	if err != nil {
+		return err
+	}
+	go cmd.Wait()
+	return n.await(fmt.Sprintf("leaf-ready-%d", cmd.Process.Pid))
 }
 
 func (n tortureNode) markAndWait() error {

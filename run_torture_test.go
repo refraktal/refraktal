@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -24,9 +27,15 @@ var torture = flag.Bool("torture", false, "repeat the bounded fake-agent timeout
 type tortureHarness struct {
 	spec acptest.TortureSpec
 	role string
+	name string
 }
 
-func (tortureHarness) Name() string         { return "agy" }
+func (h tortureHarness) Name() string {
+	if h.name != "" {
+		return h.name
+	}
+	return "agy"
+}
 func (tortureHarness) Mode() string         { return "default" }
 func (tortureHarness) ReadOnlyMode() string { return "plan" }
 func (h tortureHarness) Prepare(context.Context, harness.Options) (harness.Launch, error) {
@@ -39,13 +48,16 @@ type tortureRunReply struct {
 	err    error
 }
 
-func startTortureRun(t *testing.T, r runRig, s acptest.TortureSpec, role string) (<-chan tortureRunReply, <-chan struct{}) {
+func startTortureRun(t *testing.T, r runRig, s acptest.TortureSpec, role string, muts ...func(*RunOptions)) (<-chan tortureRunReply, <-chan struct{}) {
 	t.Helper()
 	// This is the duration represented by --mins, not a parent cancellation.
 	lim := budget.Limits{USD: 5, Turns: 5, Wall: 6 * time.Second, Depth: 2}
 	o := RunOptions{Task: "exercise timeout cleanup", Harness: "agy", Dir: r.repo, Budget: &lim,
 		PriceURL: r.priceURL, PriceCache: r.priceCache, LiveDir: r.live, ConfigPath: r.config, WorktreeDir: r.wtDir,
 		Harnesses: []harness.Harness{tortureHarness{spec: s, role: role}}}
+	for _, mut := range muts {
+		mut(&o)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	replies := make(chan tortureRunReply, 1)
 	finished := make(chan struct{})
@@ -79,7 +91,7 @@ func tortureRunResult(t *testing.T, replies <-chan tortureRunReply) RunResult {
 	}
 }
 
-func rootTortureGone(t *testing.T, r runRig, s acptest.TortureSpec) {
+func rootTortureGone(t *testing.T, r runRig, s acptest.TortureSpec, observed ...proc.Proc) {
 	t.Helper()
 	var quietSince time.Time
 	var survivors []int
@@ -96,7 +108,8 @@ func rootTortureGone(t *testing.T, r runRig, s acptest.TortureSpec) {
 		survivors = survivors[:0]
 		for _, p := range all {
 			// Read-only assertions, never inputs to a signal or session sweep.
-			if acptest.TortureMatches(s, p.Cmd) || strings.Contains(p.Cmd, r.repo) || strings.Contains(p.Cmd, r.wtDir) {
+			known := slices.ContainsFunc(observed, func(was proc.Proc) bool { return p.Same(was) })
+			if known || acptest.TortureMatches(s, p.Cmd) || strings.Contains(p.Cmd, r.repo) || strings.Contains(p.Cmd, r.wtDir) {
 				survivors = append(survivors, p.PID)
 			}
 		}
@@ -249,8 +262,422 @@ func TestTortureMinsExpiresMidTool(t *testing.T) {
 			})
 		}
 	}
-	// TODO(M6): --mins expiring mid-judge and mid-check, including fan-out
-	// cancellation and cleanup of every sibling candidate's process tree.
+}
+
+func startTortureFan(t *testing.T, r runRig, s acptest.TortureSpec) (<-chan tortureRunReply, <-chan struct{}) {
+	t.Helper()
+	return startTortureRun(t, r, s, "", func(o *RunOptions) {
+		o.Budget.Wall = 12 * time.Second
+		o.Harness = "claude,codex"
+		o.Getenv = func(string) string { return "" }
+		o.Harnesses = []harness.Harness{
+			tortureHarness{spec: s, name: "claude", role: "agent-edit-tree"},
+			tortureHarness{spec: s, name: "codex", role: "agent-edit-tree"},
+			tortureHarness{spec: s, name: "agy", role: "agent-judge"},
+		}
+	})
+}
+
+// Snapshot all user files, including binary untracked bytes, modes and empty
+// directories. Git administration and the run's own logs are the only exclusions.
+func tortureTree(t *testing.T, repo string) map[string]struct {
+	mode os.FileMode
+	data string
+} {
+	t.Helper()
+	out := map[string]struct {
+		mode os.FileMode
+		data string
+	}{}
+	err := filepath.WalkDir(repo, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(repo, path)
+		if err != nil {
+			return err
+		}
+		if rel == ".git" || rel == ".refraktal" {
+			return filepath.SkipDir
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		var data []byte
+		if !d.IsDir() {
+			data, err = os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+		}
+		out[rel] = struct {
+			mode os.FileMode
+			data string
+		}{info.Mode(), string(data)}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func preserveTortureTree(t *testing.T, r runRig) func() {
+	t.Helper()
+	write := func(name, data string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(r.repo, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("user.txt", "base\n")
+	r.git(t, "add", "user.txt")
+	r.git(t, "commit", "-q", "-m", "user fixture")
+	write("user.txt", "staged user bytes\n")
+	r.git(t, "add", "user.txt")
+	write("user.txt", "unstaged user bytes\x00\xff\n")
+	write("local.txt", "untracked user bytes\x00\xfe\n")
+	before := tortureTree(t, r.repo)
+	head := r.git(t, "rev-parse", "HEAD")
+	index := r.git(t, "diff", "--cached", "--binary")
+	status := r.git(t, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	return func() {
+		t.Helper()
+		if !maps.Equal(before, tortureTree(t, r.repo)) {
+			t.Error("exhausted run changed the user's file bytes, modes or paths")
+		}
+		if r.git(t, "rev-parse", "HEAD") != head || r.git(t, "diff", "--cached", "--binary") != index ||
+			r.git(t, "status", "--porcelain=v1", "-z", "--untracked-files=all") != status {
+			t.Error("exhausted run changed the user's HEAD, index or working-tree status")
+		}
+	}
+}
+
+// Remember birth identities as well as argv tags, so a check's make parent
+// and short-lived polling children are covered without matching their names.
+// These observations are only assertions, never signal targets.
+func observeTortureTree(t *testing.T, r runRig, s acptest.TortureSpec, roles map[string]int, ready func() bool, finished <-chan struct{}) []proc.Proc {
+	t.Helper()
+	var observed []proc.Proc
+	acptest.WaitFor(t, 18*time.Second, "the gated phase and its live descendants", func() bool {
+		select {
+		case <-finished:
+			t.Fatal("Run finished before the gated phase became active")
+		default:
+		}
+		if err := acptest.TortureError(s); err != nil {
+			t.Fatal(err)
+		}
+		if !ready() {
+			return false
+		}
+		all, err := proc.List()
+		if err != nil {
+			t.Fatal(err)
+		}
+		liveRoles := map[string]int{}
+		selected := map[int]bool{}
+		for _, p := range all {
+			if acptest.TortureMatches(s, p.Cmd) || strings.Contains(p.Cmd, r.repo) || strings.Contains(p.Cmd, r.wtDir) {
+				selected[p.PID] = true
+			}
+		}
+		for _, p := range acptest.TortureInventory(s) {
+			if selected[p.PID] {
+				liveRoles[p.Role]++
+			}
+		}
+		for role, want := range roles {
+			if liveRoles[role] != want {
+				return false
+			}
+		}
+		for changed := true; changed; {
+			changed = false
+			for _, p := range all {
+				if selected[p.PID] && p.PPID > 1 && p.PPID != os.Getpid() && !selected[p.PPID] {
+					selected[p.PPID], changed = true, true
+				}
+				if selected[p.PPID] && !selected[p.PID] {
+					selected[p.PID], changed = true, true
+				}
+			}
+		}
+		for pid := range selected {
+			if p, ok := all[pid]; ok {
+				observed = append(observed, p)
+			}
+		}
+		return true
+	})
+	return observed
+}
+
+func assertTortureCandidatesKept(t *testing.T, r runRig, res RunResult) {
+	t.Helper()
+	if res.Outcome != RunTimedOut || res.ExitCode() != ExitBudget || len(res.Candidates) != 2 || res.LeftRunning != 0 || res.Unknown != 0 {
+		t.Fatalf("fan-out exhaustion: outcome %q, exit %d, candidates %d, alive/unknown %d/%d", res.Outcome, res.ExitCode(), len(res.Candidates), res.LeftRunning, res.Unknown)
+	}
+	var branches, dirs []string
+	worktrees := []string{tortureCanonicalPath(t, r.repo)}
+	for _, name := range []string{"claude", "codex"} {
+		c := cand(res, name)
+		id := filepath.Base(res.Run) + "-" + name
+		wantDir, wantBranch := filepath.Join(r.wtDir, id), "refraktal/"+id
+		if c.Outcome != candChanges || c.StopReason != "end_turn" || c.Worktree != wantDir || c.Branch != wantBranch ||
+			c.LeftRunning != 0 || c.Unknown != 0 || c.Applies == nil || !*c.Applies {
+			t.Fatalf("%s was not checked and retained normally: %+v", name, c)
+		}
+		for file, want := range map[string]string{"README": "agent result\n", "tool-output.txt": "complete result\n"} {
+			b, err := os.ReadFile(filepath.Join(c.Worktree, file))
+			if err != nil || string(b) != want || r.git(t, "show", c.Branch+":"+file) != want {
+				t.Errorf("%s lost collected %s in its branch or worktree", name, file)
+			}
+		}
+		if b, err := os.ReadFile(filepath.Join(r.repo, res.Run, resultName(name))); err != nil || len(b) == 0 {
+			t.Errorf("%s has no retained result patch", name)
+		}
+		branches, dirs, worktrees = append(branches, wantBranch), append(dirs, id), append(worktrees, tortureCanonicalPath(t, wantDir))
+	}
+	gotBranches := strings.Fields(r.git(t, "for-each-ref", "--format=%(refname:short)", "refs/heads/refraktal/"))
+	entries, err := os.ReadDir(r.wtDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotDirs, gotWorktrees []string
+	for _, e := range entries {
+		gotDirs = append(gotDirs, e.Name())
+	}
+	for _, line := range strings.Split(r.git(t, "worktree", "list", "--porcelain"), "\n") {
+		if path, ok := strings.CutPrefix(line, "worktree "); ok {
+			gotWorktrees = append(gotWorktrees, path)
+		}
+	}
+	for _, pair := range [][2][]string{{branches, gotBranches}, {dirs, gotDirs}, {worktrees, gotWorktrees}} {
+		slices.Sort(pair[0])
+		slices.Sort(pair[1])
+		if !slices.Equal(pair[0], pair[1]) {
+			t.Errorf("wrong retained branches or worktrees: want %v, got %v", pair[0], pair[1])
+		}
+	}
+}
+
+func tortureCanonicalPath(t *testing.T, path string) string {
+	t.Helper()
+	path, err := filepath.EvalSymlinks(path) // macOS: /var may be /private/var
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func assertTortureFanEvents(t *testing.T, r runRig, res RunResult, judging bool) {
+	t.Helper()
+	seen := map[string]int{}
+	checked, ended, shutdown := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	str := func(e map[string]json.RawMessage, key string) string {
+		var s string
+		json.Unmarshal(e[key], &s)
+		return s
+	}
+	for _, e := range tortureEvents(t, filepath.Join(r.repo, res.Run, "events.jsonl")) {
+		name, h := str(e, "event"), str(e, "harness")
+		seen[name]++
+		switch name {
+		case "checks":
+			if judging {
+				if str(e, "source") != "none" {
+					t.Error("judge fixture did not reach an unchecked tie")
+				}
+			} else {
+				var steps []checkStep
+				if json.Unmarshal(e["steps"], &steps) != nil || str(e, "source") != "make" || len(steps) != 1 ||
+					!slices.Equal(steps[0].Argv, []string{"make", "-f", "Makefile", "test"}) {
+					t.Error("check was not detected from the committed Makefile")
+				}
+			}
+		case "run_end":
+			var detail struct{ Code string }
+			if json.Unmarshal(e["error"], &detail) != nil || detail.Code != RunTimedOut || str(e, "outcome") != RunTimedOut {
+				t.Error("run_end does not durably record --mins exhaustion")
+			}
+		case "checked":
+			var checks []CheckResult
+			if err := json.Unmarshal(e["checks"], &checks); err != nil {
+				t.Fatal(err)
+			}
+			if !judging && (len(checks) != 1 || checks[0].Status != CheckTimedOut) {
+				t.Errorf("%s event lacks its in-flight check timeout: %+v", h, checks)
+			}
+			checked[h] = true
+		case "child_end":
+			ended[h] = true
+		case "shutdown":
+			shutdown[h] = true
+		case "judge_start":
+			var close []string
+			if json.Unmarshal(e["close_call"], &close) != nil || !slices.Equal(close, []string{"claude", "codex"}) {
+				t.Error("judge did not receive the two-candidate close call")
+			}
+		case "judge_end":
+			if str(e, "outcome") != candTimedOut {
+				t.Error("judge_end does not record the judge timeout")
+			}
+		}
+	}
+	for _, event := range []string{"run_start", "checks", "run_end"} {
+		if seen[event] != 1 {
+			t.Errorf("expected one durable %s event, got %d", event, seen[event])
+		}
+	}
+	for _, h := range []string{"claude", "codex"} {
+		if !checked[h] || !ended[h] || !shutdown[h] {
+			t.Errorf("%s lacks its checked, child_end or shutdown event", h)
+		}
+	}
+	if judging {
+		if seen["judge_start"] != 1 || seen["judge_end"] != 1 || !ended["judge-agy"] || !shutdown["judge-agy"] {
+			t.Error("judge lifecycle was not recorded")
+		}
+	} else if seen["judge_start"] != 0 {
+		t.Error("judge started after the check exhausted --mins")
+	}
+	if seen["worktree_remove_failed"] != 0 {
+		t.Error("worktree removal failed")
+	}
+}
+
+func TestTortureMinsExpiresMidCheck(t *testing.T) {
+	repeats := 1
+	if *torture {
+		repeats = 5
+	}
+	for trial := 0; trial < repeats; trial++ {
+		t.Run(fmt.Sprint(trial), func(t *testing.T) {
+			checkSentinel := acptest.StartSentinel(t)
+			r := newRunRig(t)
+			s := acptest.NewTortureSpec(t, *torture)
+			// Permit only this test's shell/make fixture through the test-only
+			// proc launch guard. Harnesses stay pinned to acptest fakes.
+			t.Setenv(proc.LiveEnv, "1")
+			for name, data := range map[string]string{
+				"torture-check.sh": acptest.TortureCheckScript(s),
+				"Makefile":         "test:\n\texec /bin/sh ./torture-check.sh '" + strings.ReplaceAll(s.Dir, "'", `'\''`) + "'\n",
+			} {
+				if err := os.WriteFile(filepath.Join(r.repo, name), []byte(data), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r.git(t, "add", "Makefile", "torture-check.sh")
+			r.git(t, "commit", "-q", "-m", "base-commit check gate")
+			// Detection must read HEAD, even when the user removes test: locally.
+			if err := os.WriteFile(filepath.Join(r.repo, "Makefile"), []byte("# user's uncommitted makefile\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			unchanged := preserveTortureTree(t, r)
+			defer acptest.TortureMark(t, s, "release-check")
+			replies, finished := startTortureFan(t, r, s)
+			observed := observeTortureTree(t, r, s, map[string]int{"check": 2, "check-child": 2}, func() bool {
+				paths, _ := filepath.Glob(filepath.Join(s.Dir, "check-entered-*"))
+				if len(paths) != 2 {
+					return false
+				}
+				for _, path := range paths {
+					if b, err := os.ReadFile(path); err != nil || len(b) == 0 {
+						return false
+					}
+				}
+				return true
+			}, finished)
+			deadline := tortureGrantDeadline(t, r)
+			if !time.Now().Before(deadline) {
+				t.Fatal("fixture reached the checks after its grant expired")
+			}
+			acptest.WaitFor(t, 14*time.Second, "--mins to expire inside both checks", func() bool { return !time.Now().Before(deadline) })
+			// Keep the gate closed through shutdown, so a check cannot mask a
+			// missing kill by exiting voluntarily when the test releases it.
+			res := tortureRunResult(t, replies)
+			assertTortureCandidatesKept(t, r, res)
+			checkDirs := map[string]bool{}
+			for _, c := range res.Candidates {
+				checkDirs[tortureCanonicalPath(t, c.Worktree)] = true
+				if len(c.Checks) != 1 || c.Checks[0].Status != CheckTimedOut {
+					t.Errorf("%s was not interrupted in its deterministic check: %+v", c.Harness, c.Checks)
+				}
+			}
+			paths, _ := filepath.Glob(filepath.Join(s.Dir, "check-entered-*"))
+			for _, path := range paths {
+				b, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				dir := tortureCanonicalPath(t, strings.TrimSpace(string(b)))
+				if !checkDirs[dir] {
+					t.Error("check did not run in a distinct candidate worktree")
+				}
+				delete(checkDirs, dir)
+			}
+			if len(paths) != 2 || len(checkDirs) != 0 {
+				t.Error("a candidate worktree never entered its deterministic check")
+			}
+			if res.Judge != nil {
+				t.Error("exhausted checks reached the judge")
+			}
+			unchanged()
+			assertTortureFanEvents(t, r, res, false)
+			rootTortureGone(t, r, s, observed...)
+			if n := acptest.TortureSlots(t, s); n != 10 {
+				t.Errorf("two candidate trees and two shell check trees used %d slots, want 10", n)
+			}
+			acptest.TortureMark(t, s, "release-check")
+			checkSentinel()
+		})
+	}
+}
+
+func TestTortureMinsExpiresMidJudge(t *testing.T) {
+	repeats := 1
+	if *torture {
+		repeats = 5
+	}
+	for trial := 0; trial < repeats; trial++ {
+		t.Run(fmt.Sprint(trial), func(t *testing.T) {
+			checkSentinel := acptest.StartSentinel(t)
+			r := newRunRig(t)
+			s := acptest.NewTortureSpec(t, *torture)
+			unchanged := preserveTortureTree(t, r)
+			defer acptest.TortureMark(t, s, "release-judge")
+			replies, finished := startTortureFan(t, r, s)
+			observed := observeTortureTree(t, r, s, map[string]int{"agent-judge": 1, "cycle": 1, "leaf": 1},
+				func() bool { return acptest.TortureHas(s, "judge-started") }, finished)
+			deadline := tortureGrantDeadline(t, r)
+			if !time.Now().Before(deadline) {
+				t.Fatal("fixture reached the judge after its grant expired")
+			}
+			acptest.WaitFor(t, 14*time.Second, "--mins and session/cancel inside the judge", func() bool {
+				return !time.Now().Before(deadline) && acptest.TortureHas(s, "judge-cancelled")
+			})
+			acptest.TortureMark(t, s, "release-judge")
+			res := tortureRunResult(t, replies)
+			assertTortureCandidatesKept(t, r, res)
+			if j := res.Judge; j == nil || j.Harness != "agy" || j.Outcome != candTimedOut || j.StopReason != "cancelled" ||
+				j.Branch != "" || j.Worktree != "" || len(j.Files) != 0 || j.LeftRunning != 0 || j.Unknown != 0 {
+				t.Fatalf("judge timeout did not cancel and discard its unchanged worktree: %+v", j)
+			}
+			if v := res.Verdict; v == nil || v.Judge != "agy" || v.JudgedOwn || v.Winner != "" ||
+				v.Checks != "none" || !slices.Equal(v.CloseCall, []string{"claude", "codex"}) {
+				t.Fatalf("did not time out in an unscored close call: %+v", v)
+			}
+			unchanged()
+			assertTortureFanEvents(t, r, res, true)
+			rootTortureGone(t, r, s, observed...)
+			if n := acptest.TortureSlots(t, s); n != 9 {
+				t.Errorf("two candidate trees and the judge tree used %d slots, want 9", n)
+			}
+			checkSentinel()
+		})
+	}
 }
 
 // A test-only Git wrapper gates the mutating apply command. It is a shell

@@ -84,6 +84,46 @@ func TortureSlots(t *testing.T, s TortureSpec) int {
 	return len(paths)
 }
 
+// TortureCheckScript is committed by the caller, then run in each candidate.
+// Its shell and child share the Go fakes' permanent O_EXCL slot namespace
+// (shell noclobber), absolute expiry and PID inventory. Polling uses small
+// shell utilities, never a fresh race-instrumented test binary per command.
+func TortureCheckScript(s TortureSpec) string {
+	return fmt.Sprintf(`#!/bin/sh
+fixture=$1
+deadline=%d
+cap=%d
+fail() { : > "$fixture/error"; exit 125; }
+[ "$(date +%%s)" -lt "$deadline" ] || fail
+slot=0
+while [ "$slot" -lt "$cap" ]; do
+  slotfile=$(printf '%%s/slot-%%03d' "$fixture" "$slot")
+  if (set -C; : > "$slotfile") 2>/dev/null; then break; fi
+  slot=$((slot + 1))
+done
+[ "$slot" -lt "$cap" ] || fail
+role=${2:-check}
+pidfile=$(printf '%%s/pid-%%03d.json' "$fixture" "$slot")
+printf '{"PID":%%s,"Parent":%%s,"Role":"%%s"}\n' "$$" "$PPID" "$role" > "$pidfile" || fail
+if [ "$role" = check ]; then
+  /bin/sh "$0" "$fixture" check-child &
+  child=$!
+  printf '%%s\n' "$PWD" > "$fixture/check-entered-$slot" || fail
+fi
+while :; do
+  if [ "$(date +%%s)" -ge "$deadline" ]; then
+    : > "$fixture/error"
+    if [ "$role" = check ]; then wait "$child"; fi
+    exit 124
+  fi
+  # The child ignores the parent's release: it must be killed even if its
+  # parent exits normally. Both expire independently if cleanup is broken.
+  if [ "$role" = check ] && [ -e "$fixture/release-check" ]; then exit 0; fi
+  sleep 0.05
+done
+`, s.Deadline.Unix(), s.Cap)
+}
+
 // StartSentinel must be called by the test, outside the fake's process tree.
 // It is a plain, self-expiring sleep of the same user, in a separate session.
 // Cleanup checks it before touching it; only its original unreaped process

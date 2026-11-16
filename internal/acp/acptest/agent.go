@@ -283,7 +283,25 @@ func (a *agent) handle(m message, line string) {
 
 func (a *agent) prompt(id json.RawMessage) {
 	switch a.mode {
-	case "agent-tool", "agent-tool-change", "agent-edit":
+	case "agent-judge":
+		var n tortureNode
+		if json.Unmarshal([]byte(os.Getenv(tortureEnv)), &n) != nil {
+			return
+		}
+		if err := n.readyTree(); err != nil {
+			n.mark("error")
+			return
+		}
+		n.mark("judge-started")
+		<-a.cancel
+		n.mark("judge-cancelled")
+		if err := n.await("release-judge"); err != nil {
+			n.mark("error")
+			return
+		}
+		a.send(message{ID: id, Result: obj{"stopReason": "cancelled"}})
+		return
+	case "agent-tool", "agent-tool-change", "agent-edit", "agent-edit-tree":
 		var n tortureNode
 		if json.Unmarshal([]byte(os.Getenv(tortureEnv)), &n) != nil {
 			return // the parent observes the missing tool-started marker
@@ -295,7 +313,13 @@ func (a *agent) prompt(id json.RawMessage) {
 				return
 			}
 		}
-		if a.mode == "agent-edit" {
+		if a.mode == "agent-edit-tree" {
+			if err := n.readyTree(); err != nil {
+				n.mark("error")
+				return
+			}
+		}
+		if a.mode == "agent-edit" || a.mode == "agent-edit-tree" {
 			a.send(message{ID: id, Result: obj{"stopReason": "end_turn"}})
 			return
 		}
