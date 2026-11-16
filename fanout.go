@@ -556,7 +556,9 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 			res.LeftRunning += c.LeftRunning
 			res.Unknown += c.Unknown
 			res.Denied += c.Denied
-			res.Candidates = append(res.Candidates, *c)
+			returned := *c
+			returned.result = worktree.Result{}
+			res.Candidates = append(res.Candidates, returned)
 		}
 	}
 	var changed, unusable, timedOut, exhausted, nochange int
