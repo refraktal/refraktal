@@ -179,6 +179,7 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 		"deadline": grant.Deadline.UTC().Format(time.RFC3339), "depth": grant.Depth})
 	s, err := openSession(sctx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, scratchRoot: scratchRoot, cwd: wt.Dir, tmpDir: tmp,
 		liveDir: e.o.LiveDir, labels: map[string]string{"run": e.run.ID, "harness": name}, log: e.log, timeout: 2 * time.Minute,
+		readOnly: sp.judge,
 		// REFRAKTAL_RUN tags the child's processes for logs only (the session
 		// sweep finds leftovers). REFRAKTAL_BUDGET is what a child Refraktal
 		// may use.

@@ -742,3 +742,24 @@ func TestHarnessChildrenGetNoAPIKeysByDefault(t *testing.T) {
 		t.Fatalf("opt-in: %q", b)
 	}
 }
+
+// Review (2): a judge runs in its harness's own read-only mode (Claude and
+// Antigravity plan, Codex read-only, whose sandbox codex-acp then sends),
+// besides the policy gate; a harness that does not offer that mode cannot
+// judge, and the next judge is tried.
+func TestJudgeRunsInTheHarnessReadOnlyMode(t *testing.T) {
+	r := newRunRig(t)
+	modes := filepath.Join(t.TempDir(), "claude")
+	res := r.fan(t, []harness.Harness{writer("claude", "a.txt=1", "ACPTEST_JUDGE=WINNER: B", "ACPTEST_PROMPTS="+modes), writer("codex", "b.txt=2")}, nil)
+	b, _ := os.ReadFile(modes + ".modes")
+	if res.Verdict.Judge != "claude" || strings.Join(strings.Fields(string(b)), ",") != "default,plan" {
+		t.Fatalf("claude's sessions set modes %q (judge %s); want default for its candidate, then plan for judging", b, res.Verdict.Judge)
+	}
+	// A harness that does not offer its read-only mode is skipped as judge.
+	r = newRunRig(t)
+	res = r.fan(t, []harness.Harness{writer("claude", "a.txt=1", "ACPTEST_JUDGE=WINNER: B", "ACPTEST_MODES=default"),
+		writer("codex", "b.txt=2", "ACPTEST_JUDGE=WINNER: A")}, nil)
+	if v := res.Verdict; v.Judge != "codex" || len(v.JudgesTried) != 1 || v.JudgesTried[0] != "claude" || v.Winner != "claude" {
+		t.Fatalf("verdict %+v", v)
+	}
+}

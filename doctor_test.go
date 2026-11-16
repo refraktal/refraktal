@@ -64,8 +64,9 @@ type fake struct {
 	prefixVar            string   // the shell-prefix variable the fake harness declares
 }
 
-func (f fake) Name() string { return f.name }
-func (f fake) Mode() string { return "default" }
+func (f fake) Name() string         { return f.name }
+func (f fake) Mode() string         { return "default" }
+func (f fake) ReadOnlyMode() string { return "plan" }
 func (f fake) Prepare(_ context.Context, o harness.Options) (harness.Launch, error) {
 	if f.prepErr != nil {
 		return harness.Launch{Installed: ""}, f.prepErr
@@ -296,8 +297,9 @@ type inspectingHarness struct {
 	prepare func(harness.Options) (harness.Launch, error)
 }
 
-func (inspectingHarness) Name() string { return "claude" }
-func (inspectingHarness) Mode() string { return "default" }
+func (inspectingHarness) Name() string         { return "claude" }
+func (inspectingHarness) Mode() string         { return "default" }
+func (inspectingHarness) ReadOnlyMode() string { return "plan" }
 func (h inspectingHarness) Prepare(_ context.Context, o harness.Options) (harness.Launch, error) {
 	return h.prepare(o)
 }

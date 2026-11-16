@@ -30,6 +30,10 @@ const (
 type Harness interface {
 	Name() string
 	Mode() string // the permission mode set on every session (docs/DESIGN.md)
+	// ReadOnlyMode is the harness's own read-only mode, set on a judge's
+	// session on top of the policy gate: Claude and Antigravity plan, Codex
+	// read-only (codex-acp then sends a read-only sandbox).
+	ReadOnlyMode() string
 	// Prepare finds or installs what is needed to launch the harness.
 	Prepare(ctx context.Context, o Options) (Launch, error)
 }
@@ -66,10 +70,10 @@ type Launch struct {
 // Adapters are installed under cacheDir.
 func Defaults(cacheDir string) []Harness {
 	return []Harness{
-		&adapted{name: "claude", mode: "default", cli: "claude", exeEnv: "CLAUDE_CODE_EXECUTABLE",
+		&adapted{name: "claude", mode: "default", roMode: "plan", cli: "claude", exeEnv: "CLAUDE_CODE_EXECUTABLE",
 			pkg: "@agentclientprotocol/claude-agent-acp", version: "0.107.0", bin: "claude-agent-acp",
 			bundled: "@anthropic-ai/claude-agent-sdk-*/claude", cache: cacheDir, isolate: isolateClaude},
-		&adapted{name: "codex", mode: "workspace-write", cli: "codex", exeEnv: "CODEX_PATH",
+		&adapted{name: "codex", mode: "workspace-write", roMode: "read-only", cli: "codex", exeEnv: "CODEX_PATH",
 			pkg: "@agentclientprotocol/codex-acp", version: "2.6.0", bin: "codex-acp",
 			bundled: "@openai/codex-*/vendor/*/bin/codex", cache: cacheDir, isolate: configureCodex},
 		agy{},
@@ -89,6 +93,7 @@ func DefaultCacheDir() (string, error) {
 // its own harness binary.
 type adapted struct {
 	name, mode   string
+	roMode       string // ReadOnlyMode
 	cli          string // the harness's own CLI, for the installed version
 	exeEnv       string // the adapter's variable for running another harness binary
 	pkg, version string
@@ -101,8 +106,9 @@ type adapted struct {
 	isolate func(ctx context.Context, o Options, harnessBin string, l *Launch) error
 }
 
-func (a *adapted) Name() string { return a.name }
-func (a *adapted) Mode() string { return a.mode }
+func (a *adapted) Name() string         { return a.name }
+func (a *adapted) Mode() string         { return a.mode }
+func (a *adapted) ReadOnlyMode() string { return a.roMode }
 
 func (a *adapted) Prepare(ctx context.Context, o Options) (Launch, error) {
 	l := Launch{Adapter: a.pkg + "@" + a.version, Installed: installedVersion(ctx, a.cli), MCP: MCPIsolated}
@@ -258,8 +264,9 @@ func lastLine(b []byte) string {
 // agy is Antigravity, which speaks ACP natively.
 type agy struct{}
 
-func (agy) Name() string { return "agy" }
-func (agy) Mode() string { return "default" }
+func (agy) Name() string         { return "agy" }
+func (agy) Mode() string         { return "default" }
+func (agy) ReadOnlyMode() string { return "plan" }
 
 // Prepare isolates Antigravity with a fresh --gemini-dir inside the scratch
 // folder. That hides all of ~/.gemini (MCP servers, settings, history) for

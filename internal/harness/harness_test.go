@@ -254,3 +254,14 @@ func TestAgyCreatesGeminiDirThroughPinnedRoot(t *testing.T) {
 		t.Errorf("gemini dir missing from pinned folder: %v", err)
 	}
 }
+
+// Review (2): each harness's own read-only mode, from the modes the spike
+// recorded (docs/DESIGN.md): the judge runs in it.
+func TestReadOnlyModes(t *testing.T) {
+	want := map[string]string{"claude": "plan", "codex": "read-only", "agy": "plan"}
+	for _, h := range Defaults(t.TempDir()) {
+		if got := h.ReadOnlyMode(); got != want[h.Name()] {
+			t.Errorf("%s: read-only mode %q, want %q", h.Name(), got, want[h.Name()])
+		}
+	}
+}

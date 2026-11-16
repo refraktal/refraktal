@@ -33,6 +33,10 @@
 // text, or "hang" to wait for session/cancel; "stop=<reason>\n<text>" ends
 // the turn with that stop reason, and stop=error with an ACP error.
 //
+// session/new offers the modes in ACPTEST_MODES (comma-separated; default
+// "default,plan,read-only"), and session/set_mode appends the mode set to
+// ACPTEST_PROMPTS plus ".modes".
+//
 // session/new reports the model in ACPTEST_MODEL (default fake-model). With
 // ACPTEST_NOCOST set, the turn reports tokens but no cost, as Codex and
 // Antigravity do. In hang mode the cancelled response carries usage for a
@@ -206,13 +210,27 @@ func (a *agent) handle(m message, line string) {
 		if model == "" {
 			model = "fake-model"
 		}
+		modes := []obj{}
+		for _, id := range strings.Split(cmpOr(os.Getenv("ACPTEST_MODES"), "default,plan,read-only"), ",") {
+			modes = append(modes, obj{"id": id, "name": id})
+		}
 		a.send(message{ID: m.ID, Result: obj{"sessionId": "fake-1",
-			"modes":         obj{"currentModeId": "default", "availableModes": []obj{{"id": "default", "name": "Default"}}},
+			"modes":         obj{"currentModeId": "default", "availableModes": modes},
 			"configOptions": []obj{{"id": "model", "category": "model", "currentValue": model}}}})
 		a.update(obj{"sessionUpdate": "available_commands_update", "availableCommands": []obj{{"name": "review", "description": "Review"}}})
 	case "session/set_mode":
+		var p struct {
+			ModeID string `json:"modeId"`
+		}
+		json.Unmarshal(m.Params, &p)
+		if f := os.Getenv("ACPTEST_PROMPTS"); f != "" { // record each mode set, for tests
+			if fh, err := os.OpenFile(f+".modes", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err == nil {
+				fh.WriteString(p.ModeID + "\n")
+				fh.Close()
+			}
+		}
 		a.send(message{ID: m.ID, Result: obj{}})
-		a.update(obj{"sessionUpdate": "current_mode_update", "currentModeId": "default"})
+		a.update(obj{"sessionUpdate": "current_mode_update", "currentModeId": p.ModeID})
 	case "session/prompt":
 		if a.mode == "bigframe" { // writes past the frame limit without a newline, then waits
 			chunk := make([]byte, 1<<20)
@@ -404,4 +422,11 @@ func keysSet() string {
 		}
 	}
 	return strings.Join(set, ",")
+}
+
+func cmpOr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
