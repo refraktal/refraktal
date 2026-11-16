@@ -220,9 +220,13 @@ func readSessions(r io.Reader) ([]Proc, error) {
 	var out []Proc
 	br := bufio.NewReader(r) // no line limit: a bad or very long line is skipped, not fatal
 	for {
-		line, err := br.ReadBytes('\n')
+		line, err := br.ReadSlice('\n')
+		oversized := err == bufio.ErrBufferFull
+		for err == bufio.ErrBufferFull {
+			_, err = br.ReadSlice('\n')
+		}
 		var p Proc
-		if len(line) < 4096 && json.Unmarshal(line, &p) == nil && p.PID > 1 && p.Start != "" {
+		if !oversized && len(line) < 4096 && json.Unmarshal(line, &p) == nil && p.PID > 1 && p.Start != "" {
 			if k := strconv.Itoa(p.PID) + "|" + p.Start; !seen[k] {
 				seen[k] = true
 				out = append(out, Proc{PID: p.PID, Start: p.Start})
