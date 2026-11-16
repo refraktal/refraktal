@@ -1,9 +1,6 @@
 package route
 
-import (
-	"fmt"
-	"sort"
-)
+import "fmt"
 
 // Thresholds for the escalation policy. Starting values, to be tuned against
 // the decision log once outcomes are attached. Reasoning:
@@ -77,20 +74,7 @@ func Policy(d Decision, t Thresholds) Outcome {
 // topHarnesses returns the n most probable harnesses, chosen one first, ties
 // broken by name so the result is deterministic.
 func topHarnesses(d Decision, n int) []string {
-	hs := append([]string(nil), Harnesses...)
-	p := func(h string) float64 {
-		if h == d.Harness.Value {
-			return 2 // always first
-		}
-		return d.Harness.Probabilities[h]
-	}
-	sort.SliceStable(hs, func(i, j int) bool {
-		if p(hs[i]) != p(hs[j]) {
-			return p(hs[i]) > p(hs[j])
-		}
-		return hs[i] < hs[j]
-	})
-	return hs[:n]
+	return byProbability(d)[:n]
 }
 
 func clampWidth(w int) int { return max(MinFanOut, min(w, MaxFanOut, len(Harnesses))) }

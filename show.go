@@ -2,6 +2,7 @@ package refraktal
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -542,7 +543,7 @@ func writeShow(w io.Writer, r ShowRun, in string) {
 	if r.Via != "" {
 		head = "nested run " + r.ID + " (child Refraktal, via " + r.Via + ")"
 	}
-	fmt.Fprintf(w, "%s%s: %s\n", in, head, cmpOrS(r.Outcome, "unfinished"))
+	fmt.Fprintf(w, "%s%s: %s\n", in, head, cmp.Or(r.Outcome, "unfinished"))
 	in2 := in + "  "
 	if r.Task != "" {
 		fmt.Fprintf(w, "%stask: %s\n", in2, firstLine(r.Task))
@@ -563,7 +564,7 @@ func writeShow(w io.Writer, r ShowRun, in string) {
 		if c.Judge {
 			role = "judge"
 		}
-		fmt.Fprintf(w, "%s%s %s: %s", in2, role, c.Harness, cmpOrS(c.Outcome, "no result"))
+		fmt.Fprintf(w, "%s%s %s: %s", in2, role, c.Harness, cmp.Or(c.Outcome, "no result"))
 		if len(c.Files) > 0 {
 			fmt.Fprintf(w, ", %d files", len(c.Files))
 		}
@@ -580,7 +581,7 @@ func writeShow(w io.Writer, r ShowRun, in string) {
 	}
 	if v := r.Verdict; v != nil {
 		s := func(k string) string { x, _ := v[k].(string); return x }
-		fmt.Fprintf(w, "%sverdict: %s by %s (%s)", in2, cmpOrS(s("winner"), "no winner"), s("method"), s("reason"))
+		fmt.Fprintf(w, "%sverdict: %s by %s (%s)", in2, cmp.Or(s("winner"), "no winner"), s("method"), s("reason"))
 		if j := s("judge"); j != "" {
 			own, _ := v["judged_own"].(bool)
 			fmt.Fprintf(w, "; judge %s, judged its own candidate: %v", j, own)
@@ -621,13 +622,6 @@ func writeShow(w io.Writer, r ShowRun, in string) {
 	for _, n := range r.Nested {
 		writeShow(w, n, in2)
 	}
-}
-
-func cmpOrS(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
 
 // RepoRoot is the git top level of the current folder, or the folder itself

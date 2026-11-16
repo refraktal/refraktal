@@ -1,6 +1,7 @@
 package refraktal
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -294,7 +295,7 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 	tcancel()
 	sr := closeSession(10 * time.Second)
 	c.swept = len(sr.Swept.Killed)
-	c.Model = cmpOr(turn.Model, s.model)
+	c.Model = cmp.Or(turn.Model, s.model)
 	// A turn is cancelled if we sent session/cancel or the harness ended it
 	// as cancelled on its own (Codex does after a denial).
 	turn.Cancelled = turn.Cancelled || turn.StopReason == "cancelled"
@@ -556,7 +557,9 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 			res.LeftRunning += c.LeftRunning
 			res.Unknown += c.Unknown
 			res.Denied += c.Denied
-			res.Candidates = append(res.Candidates, *c)
+			returned := *c
+			returned.result = worktree.Result{}
+			res.Candidates = append(res.Candidates, returned)
 		}
 	}
 	var changed, unusable, timedOut, exhausted, nochange int
@@ -732,7 +735,7 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 			// Cancelled, max_tokens or an ACP error: its answer does not
 			// count. The checks ranking decides; a flagged candidate cannot
 			// win that way.
-			why := "the judge did not finish (" + cmpOr(j.StopReason, "error") + ")"
+			why := "the judge did not finish (" + cmp.Or(j.StopReason, "error") + ")"
 			if len(j.Files) > 0 || strings.HasPrefix(j.Error, "the judge") {
 				why = "the judge's answer is not used (it changed its worktree, or it could not be checked)"
 			}
@@ -781,22 +784,22 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 	switch {
 	case e.o.NoApply:
 		finish(RunKept, "", true)
-		res.Branch, res.Worktree = winner.wtKept(res.Candidates)
+		res.Branch, res.Worktree = winner.Branch, winner.Worktree
 	default:
 		n, err := e.apply(winner)
 		if errors.Is(err, errMinsExpired) {
 			finish(RunTimedOut, err.Error(), true)
-			res.Branch, res.Worktree = winner.wtKept(res.Candidates)
+			res.Branch, res.Worktree = winner.Branch, winner.Worktree
 			return
 		}
 		if errors.Is(err, errCancelled) {
 			finish(RunFailed, err.Error(), true)
-			res.Branch, res.Worktree = winner.wtKept(res.Candidates)
+			res.Branch, res.Worktree = winner.Branch, winner.Worktree
 			return
 		}
 		if err != nil {
 			finish(RunApplyFailed, err.Error(), true)
-			res.Branch, res.Worktree = winner.wtKept(res.Candidates)
+			res.Branch, res.Worktree = winner.Branch, winner.Worktree
 			return
 		}
 		if n != "" {
@@ -804,16 +807,6 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 		}
 		finish(RunApplied, "", false)
 	}
-}
-
-// wtKept returns the winner's kept branch and worktree from the final list.
-func (c *Candidate) wtKept(all []Candidate) (string, string) {
-	for _, k := range all {
-		if k.Harness == c.Harness {
-			return k.Branch, k.Worktree
-		}
-	}
-	return "", ""
 }
 
 // judgeOrder is the order judges are tried in: harnesses outside the close

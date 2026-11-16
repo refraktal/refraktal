@@ -65,7 +65,7 @@ func TestAdapterIsInstalledOnceAndVersionsAreRead(t *testing.T) {
 	if claude.Name() != "claude" || claude.Mode() != "default" {
 		t.Fatalf("claude facts: %s %s", claude.Name(), claude.Mode())
 	}
-	l, err := claude.Prepare(context.Background(), Options{Scratch: t.TempDir()})
+	l, err := claude.Prepare(context.Background(), Options{Scratch: t.TempDir(), ProbeVersions: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestAdapterIsInstalledOnceAndVersionsAreRead(t *testing.T) {
 		t.Fatalf("npm called without --ignore-scripts: %s", b)
 	}
 
-	l, err = claude.Prepare(context.Background(), Options{Scratch: t.TempDir()})
+	l, err = claude.Prepare(context.Background(), Options{Scratch: t.TempDir(), ProbeVersions: true})
 	if err != nil || l.AdapterInstalled {
 		t.Fatalf("second prepare reinstalled: %+v %v", l, err)
 	}
@@ -111,7 +111,7 @@ func TestAgyGetsAFreshGeminiDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pinned.Close()
-	l, err := Defaults("")[2].Prepare(context.Background(), Options{Scratch: scratch, ScratchRoot: pinned})
+	l, err := Defaults("")[2].Prepare(context.Background(), Options{Scratch: scratch, ScratchRoot: pinned, ProbeVersions: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestCodexIsolationIsBuiltFromItsOwnServerList(t *testing.T) {
 	bin, _ := fakeNPM(t)
 	cache, cwd, tmp := t.TempDir(), t.TempDir(), t.TempDir()
 	codex := Defaults(cache)[1]
-	l, err := codex.Prepare(context.Background(), Options{Scratch: t.TempDir(), Cwd: cwd, TmpDir: tmp})
+	l, err := codex.Prepare(context.Background(), Options{Scratch: t.TempDir(), Cwd: cwd, TmpDir: tmp, ProbeVersions: true})
 	if err != nil {
 		t.Fatal(err)
 	}

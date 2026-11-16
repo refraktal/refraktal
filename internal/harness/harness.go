@@ -43,13 +43,14 @@ type Harness interface {
 
 // Options say how to prepare a harness for one session.
 type Options struct {
-	Scratch     string   // a folder inside the run folder the harness may use
-	ScratchRoot *os.Root // pinned scratch folder, required when Refraktal writes
-	Cwd         string   // the session folder
-	MCP         string   // "isolated" or "inherit" (config.MCPIsolated, config.MCPInherit)
-	Executable  string   // optional: the binary to run (see config.Harness.Executable)
-	TmpDir      string   // optional: a private TMPDIR for the child (used for Codex)
-	ReadOnly    bool     // a judge's session: the harness must not write (Claude: disallowed tools)
+	Scratch       string   // a folder inside the run folder the harness may use
+	ScratchRoot   *os.Root // pinned scratch folder, required when Refraktal writes
+	Cwd           string   // the session folder
+	MCP           string   // "isolated" or "inherit" (config.MCPIsolated, config.MCPInherit)
+	Executable    string   // optional: the binary to run (see config.Harness.Executable)
+	TmpDir        string   // optional: a private TMPDIR for the child (used for Codex)
+	ProbeVersions bool     // doctor: read installed and bundled versions
+	ReadOnly      bool     // a judge's session: the harness must not write (Claude: disallowed tools)
 }
 
 func (o Options) inherit() bool { return o.MCP == MCPInherit }
@@ -139,7 +140,10 @@ func (a *adapted) Mode() string         { return a.mode }
 func (a *adapted) ReadOnlyMode() string { return a.roMode }
 
 func (a *adapted) Prepare(ctx context.Context, o Options) (Launch, error) {
-	l := Launch{Adapter: a.pkg + "@" + a.version, Installed: installedVersion(ctx, a.cli), MCP: MCPIsolated}
+	l := Launch{Adapter: a.pkg + "@" + a.version, MCP: MCPIsolated}
+	if o.ProbeVersions {
+		l.Installed = installedVersion(ctx, a.cli)
+	}
 	if o.inherit() {
 		l.MCP = MCPInherit
 	}
@@ -155,7 +159,9 @@ func (a *adapted) Prepare(ctx context.Context, o Options) (Launch, error) {
 	harnessBin := ""
 	if m, _ := filepath.Glob(filepath.Join(dir, "node_modules", a.bundled)); len(m) > 0 {
 		harnessBin = m[0]
-		l.Bundled = Version(ctx, harnessBin)
+		if o.ProbeVersions {
+			l.Bundled = Version(ctx, harnessBin)
+		}
 	}
 	if o.Executable != "" {
 		harnessBin = o.Executable
@@ -327,7 +333,10 @@ func (agy) Prepare(ctx context.Context, o Options) (Launch, error) {
 			return Launch{}, errors.New("agy not installed")
 		}
 	}
-	l := Launch{Installed: Version(ctx, bin), Argv: []string{bin, "acp"}, MCP: MCPInherit}
+	l := Launch{Argv: []string{bin, "acp"}, MCP: MCPInherit}
+	if o.ProbeVersions {
+		l.Installed = Version(ctx, bin)
+	}
 	if !o.inherit() {
 		dir := filepath.Join(o.Scratch, "gemini-dir")
 		if o.ScratchRoot == nil {

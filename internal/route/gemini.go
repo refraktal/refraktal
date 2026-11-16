@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -173,11 +174,11 @@ func unit(p float64) bool { return !math.IsNaN(p) && p >= 0 && p <= 1 }
 
 func choiceAnswer(r geminiResponse, key string, allowed []string) (Answer, error) {
 	a, ok := r.Answers[key]
-	if !ok || a.Type != "choice" || a.Confidence == nil || !unit(*a.Confidence) || !contains(allowed, a.Choice) || len(a.Probabilities) == 0 {
+	if !ok || a.Type != "choice" || a.Confidence == nil || !unit(*a.Confidence) || !slices.Contains(allowed, a.Choice) || len(a.Probabilities) == 0 {
 		return Answer{}, fmt.Errorf("gemini: malformed body: bad or missing choice answer %q", key)
 	}
 	for k, p := range a.Probabilities {
-		if !contains(allowed, k) || !unit(p) {
+		if !slices.Contains(allowed, k) || !unit(p) {
 			return Answer{}, fmt.Errorf("gemini: malformed body: answer %q has an unknown option or a probability outside [0,1]", key)
 		}
 	}
@@ -219,15 +220,6 @@ func widthAnswer(r geminiResponse) (Answer, error) {
 		}
 	}
 	return out, nil
-}
-
-func contains(xs []string, x string) bool {
-	for _, v := range xs {
-		if v == x {
-			return true
-		}
-	}
-	return false
 }
 
 // checkTestEndpoint refuses, inside a test binary, any endpoint that is not a

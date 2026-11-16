@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -70,7 +71,7 @@ func shellPrefix(args []string) error {
 	// claude or refraktal would otherwise route every command through us.
 	env := make([]string, 0, len(os.Environ()))
 	for _, kv := range os.Environ() {
-		name, _, _ := cutEq(kv)
+		name, _, _ := strings.Cut(kv, "=")
 		if name == HelperEnv || name == SessionsEnv || name == NextEnv || name == PrefixVarEnv || (prefixVar != "" && name == prefixVar) {
 			continue
 		}
@@ -117,15 +118,6 @@ func SameFile(a, b string) bool {
 	fa, err1 := os.Stat(a)
 	fb, err2 := os.Stat(b)
 	return err1 == nil && err2 == nil && os.SameFile(fa, fb)
-}
-
-func cutEq(kv string) (string, string, bool) {
-	for i := 0; i < len(kv); i++ {
-		if kv[i] == '=' {
-			return kv[:i], kv[i+1:], true
-		}
-	}
-	return kv, "", false
 }
 
 // recordSession appends this process's session leader, as ps lists it, to
@@ -228,9 +220,13 @@ func readSessions(r io.Reader) ([]Proc, error) {
 	var out []Proc
 	br := bufio.NewReader(r) // no line limit: a bad or very long line is skipped, not fatal
 	for {
-		line, err := br.ReadBytes('\n')
+		line, err := br.ReadSlice('\n')
+		oversized := err == bufio.ErrBufferFull
+		for err == bufio.ErrBufferFull {
+			_, err = br.ReadSlice('\n')
+		}
 		var p Proc
-		if len(line) < 4096 && json.Unmarshal(line, &p) == nil && p.PID > 1 && p.Start != "" {
+		if !oversized && len(line) < 4096 && json.Unmarshal(line, &p) == nil && p.PID > 1 && p.Start != "" {
 			if k := strconv.Itoa(p.PID) + "|" + p.Start; !seen[k] {
 				seen[k] = true
 				out = append(out, Proc{PID: p.PID, Start: p.Start})

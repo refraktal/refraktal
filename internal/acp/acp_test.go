@@ -283,8 +283,26 @@ func TestProtocolVersionIsChecked(t *testing.T) {
 func TestAgentExitEndsAPrompt(t *testing.T) {
 	r := start(t, "hang", acp.Options{})
 	s := r.session(t)
-	go func() { time.Sleep(200 * time.Millisecond); r.child.Shutdown(100 * time.Millisecond) }()
-	_, err := prompt(t, r, s, 10*time.Second)
+	done := make(chan error, 1)
+	go func() {
+		_, err := prompt(t, r, s, 10*time.Second)
+		done <- err
+	}()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	for !strings.Contains(r.text(), "working") {
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("the agent did not start its prompt")
+		case err := <-done:
+			t.Fatalf("prompt ended before shutdown: %v", err)
+		}
+	}
+	r.child.Shutdown(100 * time.Millisecond)
+	err := <-done
 	if !errors.Is(err, acp.ErrAgentExited) {
 		t.Fatalf("want ErrAgentExited, got %v", err)
 	}

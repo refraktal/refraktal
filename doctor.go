@@ -156,14 +156,18 @@ func Doctor(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 	}
 	log.Procs("cleanup_killed", cr.Kill.Killed)
 
-	rep.Decider = checkDecider(ctx, o)
-
 	cfg, err := config.Load(o.ConfigPath)
 	if err != nil {
+		rep.Decider = checkDecider(ctx, o)
 		return rep, err
 	}
 	rep.Harnesses = make([]HarnessCheck, len(o.Harnesses))
 	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		rep.Decider = checkDecider(ctx, o)
+	}()
 	for i, h := range o.Harnesses {
 		wg.Add(1)
 		go func() {
@@ -277,7 +281,7 @@ func checkHarness(ctx context.Context, h harness.Harness, hcfg config.Harness, o
 	start := time.Now()
 	s, err := openSession(ctx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, scratchRoot: scratchRoot, cwd: cwd, tmpDir: filepath.Join(scratch, "tmp"),
 		liveDir: o.LiveDir, labels: map[string]string{"run": run.ID, "harness": h.Name()}, log: log, timeout: o.Timeout,
-		env: []string{"REFRAKTAL_RUN=" + run.ID + "-" + h.Name()}, prefixExe: o.ShellPrefix})
+		env: []string{"REFRAKTAL_RUN=" + run.ID + "-" + h.Name()}, prefixExe: o.ShellPrefix, probeVersions: true})
 	l := s.launch
 	c.Adapter, c.AdapterInstalled, c.Bundled, c.Installed = l.Adapter, l.AdapterInstalled, l.Bundled, l.Installed
 	if l.MCP != "" {

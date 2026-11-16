@@ -89,7 +89,7 @@ func TestRedaction(t *testing.T) {
 	l.Update("claude", "s1", "agent_message_chunk", json.RawMessage(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"OK"}}`))
 	l.Update("claude", "s1", "available_commands_update", json.RawMessage(big))
 	l.Update("claude", "s1", "account_update", json.RawMessage(`{"sessionUpdate":"account_update","email":"`+email+`"}`))
-	l.Update("claude", "s1", "tool_call", json.RawMessage(`{"sessionUpdate":"tool_call","huge":"`+strings.Repeat("a", MaxVerbatim)+`"}`))
+	l.Update("claude", "s1", "tool_call", json.RawMessage(`{"sessionUpdate":"tool_call","huge":"`+strings.Repeat("a", maxVerbatim)+`"}`))
 	l.Notification("claude", "auth/status_update", json.RawMessage(`{"email":"`+email+`","organization":"Acme"}`))
 	l.Procs("tracked", []proc.Proc{{PID: 7, PPID: 1, PGID: 7, Start: "Sun Nov 15 15:45:51 2026", Cmd: home + "/.local/bin/my-mcp-server --stdio"}})
 	if err := l.Close(); err != nil {

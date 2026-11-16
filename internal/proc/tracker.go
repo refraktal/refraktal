@@ -119,6 +119,30 @@ func (t *Tracker) add(all map[int]Proc) {
 func (t *Tracker) Tracked() []Proc {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.tracked()
+}
+
+// trackedIfChanged avoids a sorted snapshot when every recorded process is unchanged.
+func (t *Tracker) trackedIfChanged(previous []Proc) ([]Proc, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(previous) == len(t.seen) {
+		unchanged := true
+		for _, p := range previous {
+			if now, ok := t.seen[p.PID]; !ok || now != p {
+				unchanged = false
+				break
+			}
+		}
+		if unchanged {
+			return nil, false
+		}
+	}
+	return t.tracked(), true
+}
+
+// tracked returns a sorted snapshot while the caller holds mu.
+func (t *Tracker) tracked() []Proc {
 	out := make([]Proc, 0, len(t.seen))
 	for _, p := range t.seen {
 		out = append(out, p)
