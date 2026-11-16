@@ -42,3 +42,23 @@ jobs:
         run: go vet ./...
       - name: go test
         run: go test -race ./...
+
+  release-build:
+    # The release tooling must keep working: build every target, reproducibly,
+    # as the Release workflow would (no tag, no release, nothing uploaded).
+    name: release build (dry)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+      - name: build all targets twice
+        run: |
+          go run ./scripts/release -version v0.0.0-ci -out "$RUNNER_TEMP/a"
+          go run ./scripts/release -version v0.0.0-ci -out "$RUNNER_TEMP/b"
+          (cd "$RUNNER_TEMP/a" && sha256sum -c SHA256SUMS)
+          cmp "$RUNNER_TEMP/a/SHA256SUMS" "$RUNNER_TEMP/b/SHA256SUMS"

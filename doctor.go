@@ -69,7 +69,8 @@ type DoctorOptions struct {
 
 // DoctorReport is what Doctor found.
 type DoctorReport struct {
-	Run       string         `json:"run"` // run folder, relative to the root
+	Version   string         `json:"version"` // this build's version (Version)
+	Run       string         `json:"run"`     // run folder, relative to the root
 	Harnesses []HarnessCheck `json:"harnesses"`
 	Decider   DeciderCheck   `json:"decider"`
 	Cleanup   CleanupCheck   `json:"cleanup"`
@@ -128,7 +129,7 @@ type CleanupCheck struct {
 // zero-token handshake: initialize, session/new and session/set_mode, then
 // shutdown. No prompt is ever sent.
 func Doctor(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
-	var rep DoctorReport
+	rep := DoctorReport{Version: Version}
 	if n := proc.Nest(); n > budget.Defaults.Depth+1 {
 		return rep, fmt.Errorf("refusing to start: nested %d levels deep (%s)", n, proc.NestEnv)
 	}
@@ -312,7 +313,7 @@ func WriteDoctorJSON(w io.Writer, r DoctorReport) error {
 			Type string `json:"type"`
 			CleanupCheck
 		}{"cleanup", r.Cleanup},
-		map[string]any{"type": "summary", "usable": r.Usable, "run": r.Run, "exit": r.ExitCode()},
+		map[string]any{"type": "summary", "version": r.Version, "usable": r.Usable, "run": r.Run, "exit": r.ExitCode()},
 	}
 	for _, l := range lines {
 		if err := enc.Encode(l); err != nil {
@@ -325,6 +326,7 @@ func WriteDoctorJSON(w io.Writer, r DoctorReport) error {
 // WriteDoctorText writes the report for a person.
 func WriteDoctorText(w io.Writer, r DoctorReport) {
 	p := func(format string, a ...any) { fmt.Fprintf(w, format, a...) }
+	p("refraktal %s\n", r.Version)
 	for _, c := range r.Harnesses {
 		p("%-8s %-11s", c.Name, c.Status)
 		var parts []string

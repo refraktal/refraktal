@@ -1,0 +1,95 @@
+name: Release
+# Builds the release assets (darwin/linux x arm64/amd64 archives, SHA256SUMS,
+# the Homebrew formula) with scripts/release, from a pushed vX.Y.Z tag, and
+# attaches them to a DRAFT GitHub release: the owner reviews and publishes it.
+# A manual run (workflow_dispatch) is a dry run: it builds and uploads the
+# assets as a workflow artifact only, with no release and no tag.
+# The npm and PyPI workflows are separate and untouched (PyPI uses py-v* tags).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp for the dry run, a semver tag such as v0.1.0-rc.1"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+      - name: build assets
+        env:
+          # Through the environment, never interpolated into the script.
+          VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+        run: go run ./scripts/release -version "$VERSION" -out dist
+      - name: verify checksums
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  draft:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # to create the draft release
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: dist
+      - name: create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          # A tag with a hyphen (v0.2.0-rc.1) is a prerelease: never marked
+          # latest, so neither GitHub's latest release nor the installer's
+          # default ever picks it.
+          kind=(--latest)
+          case "$TAG" in *-*) kind=(--prerelease --latest=false) ;; esac
+          gh release create "$TAG" --repo "$REPO" --draft --verify-tag "${kind[@]}" --title "Refraktal $TAG" \
+            --notes "Assets built by the Release workflow. To verify one archive: grep ' refraktal_<version>_<os>_<arch>.tar.gz\$' SHA256SUMS | sha256sum -c - (on macOS: shasum -a 256 -c -). See docs/RELEASING.md." \
+            dist/*.tar.gz dist/SHA256SUMS dist/install.sh dist/refraktal.rb
