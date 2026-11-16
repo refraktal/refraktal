@@ -138,12 +138,6 @@ func Show(ctx context.Context, repo, commit, path string) []byte {
 	return out
 }
 
-// Create adds a worktree at dir on a new branch, from the repository's HEAD.
-// Uncommitted changes in the user's tree are not part of it.
-func Create(ctx context.Context, repo, dir, branch string) (Worktree, error) {
-	return CreateAt(ctx, repo, dir, branch, "HEAD")
-}
-
 // CreateAt adds a worktree at dir on a new branch, from the commit base, so
 // every candidate of a run starts from the same commit.
 // If setup fails, it rolls back the checkout and branch. A failed rollback

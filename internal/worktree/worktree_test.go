@@ -13,6 +13,12 @@ import (
 	"time"
 )
 
+// Create adds a worktree at dir on a new branch, from the repository's HEAD.
+// Uncommitted changes in the user's tree are not part of it.
+func Create(ctx context.Context, repo, dir, branch string) (Worktree, error) {
+	return CreateAt(ctx, repo, dir, branch, "HEAD")
+}
+
 // repo makes a repository with one commit and git hooks that would leave a
 // marker if any of them ran.
 func repo(t *testing.T) string {

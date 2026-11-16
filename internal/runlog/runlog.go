@@ -35,9 +35,9 @@ var verbatim = map[string]bool{
 	"session_info_update":  true,
 }
 
-// MaxVerbatim is the size above which even an allowlisted update is logged as
+// maxVerbatim is the size above which even an allowlisted update is logged as
 // a size and a hash.
-const MaxVerbatim = 64 << 10
+const maxVerbatim = 64 << 10
 
 // Log is one run's event log.
 type Log struct {
@@ -77,27 +77,27 @@ func (l *Log) Event(event string, fields map[string]any) error {
 	return err
 }
 
-// Digest is how redacted data is logged: its size and a hash, so repeats and
+// digest is how redacted data is logged: its size and a hash, so repeats and
 // changes stay visible.
-type Digest struct {
+type digest struct {
 	Bytes  int    `json:"bytes"`
 	SHA256 string `json:"sha256"`
 }
 
-// Of returns the digest of b.
-func Of(b []byte) Digest {
+// digestOf returns the digest of b.
+func digestOf(b []byte) digest {
 	h := sha256.Sum256(b)
-	return Digest{Bytes: len(b), SHA256: hex.EncodeToString(h[:])}
+	return digest{Bytes: len(b), SHA256: hex.EncodeToString(h[:])}
 }
 
 // Update logs one session update: verbatim if its kind is allowlisted and it
 // is not too large, otherwise as a digest.
 func (l *Log) Update(harness, sessionID, kind string, raw json.RawMessage) error {
 	f := map[string]any{"harness": harness, "session": sessionID, "kind": kind}
-	if verbatim[kind] && len(raw) <= MaxVerbatim && json.Valid(raw) {
+	if verbatim[kind] && len(raw) <= maxVerbatim && json.Valid(raw) {
 		f["update"] = raw
 	} else {
-		f["digest"] = Of(raw)
+		f["digest"] = digestOf(raw)
 	}
 	return l.Event("update", f)
 }
@@ -105,7 +105,7 @@ func (l *Log) Update(harness, sessionID, kind string, raw json.RawMessage) error
 // Notification logs a notification other than session/update: its method and
 // a digest only, because auth notifications carry account details.
 func (l *Log) Notification(harness, method string, params json.RawMessage) error {
-	return l.Event("notification", map[string]any{"harness": harness, "method": method, "digest": Of(params)})
+	return l.Event("notification", map[string]any{"harness": harness, "method": method, "digest": digestOf(params)})
 }
 
 // loggedProc is a process with its command line reduced to a digest.
@@ -114,7 +114,7 @@ type loggedProc struct {
 	PPID  int    `json:"ppid"`
 	PGID  int    `json:"pgid"`
 	Start string `json:"start"`
-	Cmd   Digest `json:"cmd"`
+	Cmd   digest `json:"cmd"`
 }
 
 // Procs logs a process listing with each command line as a digest, because
@@ -122,7 +122,7 @@ type loggedProc struct {
 func (l *Log) Procs(event string, procs []proc.Proc) error {
 	out := make([]loggedProc, 0, len(procs))
 	for _, p := range procs {
-		out = append(out, loggedProc{PID: p.PID, PPID: p.PPID, PGID: p.PGID, Start: p.Start, Cmd: Of([]byte(p.Cmd))})
+		out = append(out, loggedProc{PID: p.PID, PPID: p.PPID, PGID: p.PGID, Start: p.Start, Cmd: digestOf([]byte(p.Cmd))})
 	}
 	return l.Event(event, map[string]any{"procs": out})
 }
