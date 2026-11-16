@@ -1,12 +1,15 @@
 package refraktal
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"refraktal.dev/refraktal/internal/acp"
 	"refraktal.dev/refraktal/internal/budget"
@@ -119,5 +122,35 @@ func TestUntrustedChildReportForfeitsTheGrant(t *testing.T) {
 				t.Errorf("%s: no forfeit charge or notice: %+v %q", where, res.Budget.Charges, safe)
 			}
 		}
+	}
+}
+
+// blockedWriter blocks every write until released.
+type blockedWriter struct {
+	entered, release chan struct{}
+	once             sync.Once
+}
+
+func (w *blockedWriter) Write(b []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	<-w.release
+	return len(b), nil
+}
+
+// Run-4 #5: when stdin closes while the client is not reading, the final
+// drain's timeout is a transport failure: ServeACP returns an error, never
+// success for a response that was not delivered.
+func TestServerEOFReportsAStuckFinalWrite(t *testing.T) {
+	w := &blockedWriter{entered: make(chan struct{}), release: make(chan struct{})}
+	defer close(w.release)
+	err := ServeACP(context.Background(), strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`+"\n"), w,
+		ServeOptions{WriteTimeout: 20 * time.Millisecond})
+	select {
+	case <-w.entered:
+	default:
+		t.Fatal("the reply was never written")
+	}
+	if err == nil {
+		t.Fatal("ServeACP succeeded although its response was never delivered")
 	}
 }

@@ -669,7 +669,10 @@ client, including a parent Refraktal, can drive it.
 - **Transport:** one writer drains a queue; a write that takes longer than
   10 s (a client that stopped reading), or a full queue, fails the
   transport, which cancels every run (their harnesses are shut down as on
-  any cancel) and ends the server with an error. The read loop never holds
+  any cancel) and ends the server with an error. This holds through the
+  final drain after stdin closes: the watchdog stays on, and a drain that
+  cannot finish within the write timeout ends the server with an error,
+  never success for an undelivered response. The read loop never holds
   the server: Ctrl-C ends it at once, even idle. A prompt ends with the
   cost in its own small frame, then the summary in chunks of at most
   256 KiB of text, then the response, so no frame nears the 16 MiB limit.
