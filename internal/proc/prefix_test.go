@@ -98,6 +98,22 @@ func TestShutdownSweepsRecordedSessions(t *testing.T) {
 	if sid, _ := getsid(bg); sid == c.PID() {
 		t.Fatal("the tool command ran in the harness's session; the test needs a session of its own")
 	}
+	// The tracker finds descendants through their parents: until the tool
+	// shell that started bg has exited (and bg is reparented), bg is still a
+	// descendant and Shutdown's last poll would track it. Wait for that
+	// observed condition, so only the recorded-session sweep can reach bg.
+	waitUntil(t, "the background child to leave the harness's tree", func() bool {
+		all, err := List()
+		if err != nil {
+			return false
+		}
+		for p, seen := all[bg], 0; p.PID > 1 && seen < 64; p, seen = all[p.PPID], seen+1 {
+			if p.PPID == c.PID() {
+				return false
+			}
+		}
+		return true
+	})
 	r := c.Shutdown(2 * time.Second)
 	if slices.Contains(pids(r.Tracked), bg) {
 		t.Fatalf("the tracker saw the background child; the test needs it untracked: %+v", r.Tracked)
