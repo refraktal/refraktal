@@ -262,7 +262,7 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 	}
 	if ch := turn.Child; ch != nil {
 		// A child Refraktal's own prompts count against --turns too.
-		e.ledger.AddTurns(ch.Turns)
+		e.ledger.AddTurns(grant, ch.Turns)
 		e.log.Event("child_run", map[string]any{"harness": name, "turns": ch.Turns, "outcome": ch.Outcome, "exit": ch.Exit})
 	}
 	settle(turn.Cancelled)
