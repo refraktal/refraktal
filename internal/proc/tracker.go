@@ -165,7 +165,7 @@ type KillReport struct {
 	Gone    []Proc `json:"gone"`    // had already exited
 	Changed []Proc `json:"changed"` // its PID now belongs to a different process: left alone
 	Alive   []Proc `json:"alive"`   // sent SIGKILL but still running killConfirm (5 s) later
-	Unknown []Proc `json:"unknown"` // lookup failed: identity or exit could not be confirmed
+	Unknown []Proc `json:"unknown"` // identity, ownership or exit could not be confirmed
 }
 
 // killConfirm is how long Kill waits for killed processes to disappear.

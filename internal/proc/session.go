@@ -78,16 +78,28 @@ func sweepSession(leader Proc, known []Proc, pinned func() bool, remember func([
 		return r, nil
 	}
 	deadline := time.Now().Add(sweepFor)
+	empty := false
 	for pass := 0; ; pass++ {
-		members, _, all, err := sessionSnapshot(leader)
+		members, occupied, all, err := sessionSnapshot(leader)
 		if err != nil {
 			r.Unknown = append(r.Unknown, leader)
 			return r, err
 		}
 		if len(members) == 0 {
-			r.Alive = r.Alive[:0]
-			break
+			if !occupied && empty {
+				r.Alive = r.Alive[:0]
+				break
+			}
+			empty = !occupied
+			if time.Now().After(deadline) {
+				r.Alive = r.Alive[:0]
+				r.Unknown = append(r.Unknown, leader)
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+			continue
 		}
+		empty = false
 		owned, unknown := provenMembers(leader, members, all, known, pinned != nil && pinned())
 		if remember != nil {
 			remember(owned)

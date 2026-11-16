@@ -308,6 +308,11 @@ process-group kill does not reach them.
     empty does not prove current membership belongs to it. The poller records
     members only with the ownership proof above. Sessions seen empty twice
     are retired permanently. A changed leader identity is never swept.
+  - **Occupied is not empty.** A member that forks and exits between snapshots
+    can leave no stable members while its session remains occupied. The sweep
+    retries that state until emptiness is confirmed twice or the sweep deadline
+    expires. If it cannot establish emptiness, it reports `unknown` and keeps
+    the live record. An inspection failure also remains unknown.
   - **Unknown means kept.** Members without proof are not signalled. They are
     reported as `unknown`, and the live record is kept. Unresolved session IDs
     are stored separately from trusted process identities: an unknown stranger
