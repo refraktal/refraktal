@@ -1,24 +1,13 @@
 package proc
 
 import (
-	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 )
 
-// These opt-in reproductions deliberately fail while the documented OS races
-// remain. They use the production lookup/signal seams and never signal an OS
-// process. Run with REFRAKTAL_VERIFY_FINDINGS=1 go test ./internal/proc -run TestVerifyFinding.
-func requireVerifyFinding(t *testing.T) {
-	t.Helper()
-	if os.Getenv("REFRAKTAL_VERIFY_FINDINGS") != "1" {
-		t.Skip("known kill-safety findings; set REFRAKTAL_VERIFY_FINDINGS=1 to reproduce")
-	}
-}
-
 func TestVerifyFindingPIDReuseAfterRecheck(t *testing.T) {
-	requireVerifyFinding(t)
+	requirePIDFDKillSafety(t)
 	recorded := Proc{PID: 999991, Start: "Sun Nov 15 15:45:51 2026"}
 	stranger := recorded
 	stranger.Start = "Sun Nov 15 15:45:52 2026"
@@ -49,7 +38,6 @@ func TestVerifyFindingPIDReuseAfterRecheck(t *testing.T) {
 }
 
 func TestVerifyFindingRecordedSessionReusedBetweenPolls(t *testing.T) {
-	requireVerifyFinding(t)
 	// Both old and replacement leaders have exited and been reaped. An
 	// unrelated replacement member still occupies the reused session ID.
 	recorded := Proc{PID: 999992, Start: "Sun Nov 15 15:45:51 2026"}

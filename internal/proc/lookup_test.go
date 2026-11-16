@@ -18,6 +18,7 @@ var lookupProc = Proc{PID: 42420, PPID: 1, PGID: 42420, UID: 501,
 // fakePS starts only a short shell script, never process-tree helpers.
 func fakePS(t *testing.T, body string) {
 	t.Helper()
+	fakeKillHandles(t)
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "ps"), []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
 		t.Fatal(err)
@@ -27,6 +28,7 @@ func fakePS(t *testing.T, body string) {
 
 func interceptSignals(t *testing.T) *[]int {
 	t.Helper()
+	fakeKillHandles(t)
 	orig := signal
 	var sent []int
 	signal = func(pid int, _ syscall.Signal) error { sent = append(sent, pid); return nil }

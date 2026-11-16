@@ -275,9 +275,15 @@ process-group kill does not reach them.
   or with a changed leader identity is retired permanently. This keeps a
   tool's backgrounded child after its shell exits, without pulling in
   unrelated members of a shared or reused group.
-- **Signals and PID reuse.** Every individual kill re-checks the target's
-  birth identity immediately before its signal. The harness, a process-group
-  and session leader, stays unreaped until its group and session have been
+- **Signals and PID reuse.** Every individual kill first acquires a process
+  handle with `os.FindProcess`, then re-checks the target's birth identity, then
+  signals through `Process.Signal` and releases the handle. On Linux, Go
+  1.23+ uses a pidfd: a PID reused after the check cannot receive the signal.
+  If pidfds are unavailable (an old kernel, `ENOSYS`, blocked syscalls, or a
+  failed pidfd open), Go falls back to signalling by PID. macOS has no pidfd,
+  so its final identity-check-to-signal window remains. Process-group signals
+  also use a group ID, with the check-to-signal window on both systems.
+  The harness, a process-group and session leader, stays unreaped until its group and session have been
   cleaned up, so neither ID can be reused between the check and the signal.
   (On a system without `waitid(WNOWAIT)` the child is reaped at once and
   that guarantee falls back to the identity checks.)
