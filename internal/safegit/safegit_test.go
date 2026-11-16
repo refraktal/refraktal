@@ -15,11 +15,13 @@ import (
 
 func TestCommandStaticProtections(t *testing.T) {
 	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nprintf '%s\\n' \"GIT_NO_LAZY_FETCH=$GIT_NO_LAZY_FETCH\" \"$@\"\n"), 0o755); err != nil {
+	stub := "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = --get-regexp ]; then exit 1; fi\ndone\nprintf '%s\\n' \"GIT_NO_LAZY_FETCH=$GIT_NO_LAZY_FETCH\" \"GIT_ALLOW_PROTOCOL=${GIT_ALLOW_PROTOCOL-unset}\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	for _, command := range []string{"rev-parse", "ls-files", "check-attr"} {
+	t.Setenv("GIT_ALLOW_PROTOCOL", "ext:file:git:ssh:http:https:ftp:ftps:refraktaltest")
+	for _, command := range []string{"rev-parse", "ls-files", "check-attr", "diff", "show", "log", "status"} {
 		t.Run(command, func(t *testing.T) {
 			out, err := safegit.Command(context.Background(), bin, command).Output()
 			if err != nil {
@@ -29,12 +31,20 @@ func TestCommandStaticProtections(t *testing.T) {
 			if !slices.Contains(args, "GIT_NO_LAZY_FETCH=1") {
 				t.Errorf("lazy fetch is not disabled in %q", args)
 			}
+			if !slices.Contains(args, "GIT_ALLOW_PROTOCOL=/") {
+				t.Errorf("protocol allowlist is not pinned to the unusable slash sentinel in %q", args)
+			}
 			if !slices.Contains(args, "--no-replace-objects") {
 				t.Errorf("missing --no-replace-objects in %q", args)
 			}
 			for _, setting := range []string{
 				"core.hooksPath=/dev/null", "core.fsmonitor=false", "core.pager=cat",
 				"core.sshCommand=false", "diff.external=", "commit.gpgSign=false", "tag.gpgSign=false", "protocol.allow=never",
+				"protocol.ext.allow=never", "protocol.fd.allow=never", "protocol.file.allow=never",
+				"protocol.git.allow=never", "protocol.ssh.allow=never",
+				"protocol.http.allow=never", "protocol.https.allow=never",
+				"protocol.ftp.allow=never", "protocol.ftps.allow=never",
+				"help.autocorrect=0", "alias.remote-/.command=remote-/",
 			} {
 				i := slices.Index(args, setting)
 				if i < 1 || args[i-1] != "-c" {

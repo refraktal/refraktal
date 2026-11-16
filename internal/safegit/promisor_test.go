@@ -24,6 +24,49 @@ func promisorGit(t *testing.T, dir string, args ...string) string {
 }
 
 func TestWorktreeSetupDoesNotExecutePromisorRemote(t *testing.T) {
+	testWorktreeSetupDoesNotExecutePromisorRemote(t, "ext")
+}
+
+func TestWorktreeSetupDoesNotExecutePromisorRemoteWithoutNoLazyFetch(t *testing.T) {
+	withoutNoLazyFetch(t)
+	testWorktreeSetupDoesNotExecutePromisorRemote(t, "ext")
+}
+
+func TestWorktreeSetupDoesNotExecuteCustomPromisorRemoteWithoutNoLazyFetch(t *testing.T) {
+	t.Setenv("GIT_ALLOW_PROTOCOL", "ext:refraktaltest")
+	withoutNoLazyFetch(t)
+	for _, remote := range []struct {
+		name, protocol string
+	}{
+		{"named", "refraktaltest"},
+		{"empty", ""},
+		{"slash-alias", "/"},
+	} {
+		t.Run(remote.name, func(t *testing.T) {
+			testWorktreeSetupDoesNotExecutePromisorRemote(t, remote.protocol)
+		})
+	}
+}
+
+// withoutNoLazyFetch simulates Git without lazy-fetch suppression by removing
+// the environment variable just before the real Git starts. The seam exists
+// only in tests; safegit must always set GIT_NO_LAZY_FETCH in production.
+func withoutNoLazyFetch(t *testing.T) {
+	t.Helper()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	body := "#!/bin/sh\nunset GIT_NO_LAZY_FETCH\nexec '" + strings.ReplaceAll(git, "'", "'\\''") + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func testWorktreeSetupDoesNotExecutePromisorRemote(t *testing.T, protocol string) {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -38,13 +81,41 @@ func TestWorktreeSetupDoesNotExecutePromisorRemote(t *testing.T) {
 	blob := promisorGit(t, dir, "rev-parse", "HEAD:data.txt")
 	marker := filepath.Join(dir, "REMOTE-RAN")
 	helper := filepath.Join(dir, "helper.sh")
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\ntouch '"+marker+"'\nexit 1\n"), 0700); err != nil {
+	remoteURL := "ext::/bin/sh " + helper
+	if protocol == "/" {
+		remoteURL = "fixture"
+	} else if protocol != "ext" {
+		bin := t.TempDir()
+		helper = filepath.Join(bin, "git-remote-"+protocol)
+		remoteURL = protocol + "::fixture"
+		t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+	helperScript := []byte("#!/bin/sh\ntouch '" + marker + "'\nexit 1\n")
+	if err := os.WriteFile(helper, helperScript, 0700); err != nil {
 		t.Fatal(err)
 	}
-	promisorGit(t, dir, "config", "remote.origin.url", "ext::/bin/sh "+helper)
+	promisorGit(t, dir, "config", "remote.origin.url", remoteURL)
 	promisorGit(t, dir, "config", "remote.origin.promisor", "true")
 	promisorGit(t, dir, "config", "remote.origin.partialclonefilter", "blob:none")
-	promisorGit(t, dir, "config", "protocol.ext.allow", "always")
+	policy := "protocol.allow"
+	if protocol != "" {
+		policy = "protocol." + protocol + ".allow"
+	}
+	promisorGit(t, dir, "config", policy, "always")
+	if protocol == "/" {
+		// An empty alias override can fall through to this executable. The
+		// safe self-alias must reject recursion before dispatching anything.
+		bin := t.TempDir()
+		if err := os.WriteFile(filepath.Join(bin, "git-"), helperScript, 0700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		promisorGit(t, dir, "config", "remote.origin.vcs", protocol)
+		alias := "!'" + strings.ReplaceAll(helper, "'", "'\\''") + "'"
+		promisorGit(t, dir, "config", "alias.remote-/.command", alias)
+		promisorGit(t, dir, "config", "alias.remote-", alias)
+		promisorGit(t, dir, "config", "help.autocorrect", "-1")
+	}
 	if err := os.Remove(filepath.Join(dir, ".git", "objects", blob[:2], blob[2:])); err != nil {
 		t.Fatal(err)
 	}
