@@ -125,7 +125,9 @@ Refraktal sets each child's mode explicitly and answers the permission
 requests that reach it by policy. A permission request requires an active,
 uncancelled turn for its session; without one, the client answers `cancelled`
 without consulting the policy. Pending decisions are cancelled when that turn
-ends or is cancelled. Never use `auto`, `acceptEdits`, `agent`,
+ends or is cancelled. A queued response checks cancellation after acquiring
+writer ownership, immediately before sending its decision. Never use `auto`,
+`acceptEdits`, `agent`,
 `bypassPermissions` or `agent-full-access` for children.
 
 | Harness | Mode | Behaviour observed |
