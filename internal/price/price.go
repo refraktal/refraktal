@@ -141,9 +141,9 @@ func DefaultCachePath() (string, error) {
 }
 
 // Load returns the cached table if it is fresh; otherwise it fetches it and
-// updates the cache. If the fetch fails it falls back to a stale cache, and
-// failing that to an empty table, in which every model is unpriced. The
-// error, if any, is a warning: Load always returns a usable table.
+// updates the cache. If the fetch fails it falls back to a valid stale cache;
+// without one, every model is unpriced. The error, if any, is a warning: Load
+// always returns a usable table.
 func Load(ctx context.Context, o LoadOptions) (Table, error) {
 	if o.URL == "" {
 		o.URL = DefaultURL
@@ -162,10 +162,16 @@ func Load(ctx context.Context, o LoadOptions) (Table, error) {
 		o.CachePath = p
 	}
 	cached, cerr := os.ReadFile(o.CachePath)
-	if fi, err := os.Stat(o.CachePath); cerr == nil && err == nil && o.Now().Sub(fi.ModTime()) < MaxAge {
-		if t, err := Parse(cached); err == nil {
-			t.Source = "cache"
-			return t, nil
+	var snapshot Table
+	if cerr == nil {
+		snapshot, cerr = Parse(cached)
+		if cerr != nil {
+			cerr = fmt.Errorf("invalid cached copy: %w", cerr)
+		} else {
+			if fi, err := os.Stat(o.CachePath); err == nil && o.Now().Sub(fi.ModTime()) < MaxAge {
+				snapshot.Source = "cache"
+				return snapshot, nil
+			}
 		}
 	}
 	b, ferr := fetch(ctx, o)
@@ -181,13 +187,11 @@ func Load(ctx context.Context, o LoadOptions) (Table, error) {
 		}
 	}
 	if cerr == nil {
-		if t, err := Parse(cached); err == nil {
-			t.Source = "stale cache"
-			return t, fmt.Errorf("price table: fetch failed (%v); using the stale cached copy", ferr)
-		}
+		snapshot.Source = "stale cache"
+		return snapshot, fmt.Errorf("price table: fetch failed (%v); using the stale cached copy", ferr)
 	}
 	return Table{Source: "none", prices: map[string]Price{}},
-		fmt.Errorf("price table: fetch failed (%v) and no cached copy: every model is unpriced", ferr)
+		fmt.Errorf("price table: fetch failed (%v) and no valid cached copy (%v): every model is unpriced", ferr, cerr)
 }
 
 func fetch(ctx context.Context, o LoadOptions) ([]byte, error) {
@@ -211,11 +215,26 @@ func writeCache(path string, b []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	defer os.Remove(f.Name())
+	defer f.Close()
+	// Publish the public price table with the cache's previous 0644 mode.
+	if err := f.Chmod(0o644); err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
 
 // valid reports whether every price present is finite and not negative.

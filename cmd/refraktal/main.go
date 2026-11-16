@@ -176,6 +176,7 @@ func doctor(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if *asJSON {
 		if err := refraktal.WriteDoctorJSON(stdout, rep); err != nil {
 			fmt.Fprintf(stderr, "refraktal doctor: %v\n", err)
+			return refraktal.ExitNothingUsable
 		}
 	} else {
 		refraktal.WriteDoctorText(stdout, rep)

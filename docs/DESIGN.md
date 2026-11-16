@@ -94,9 +94,20 @@ cancels and exits 2 (`timed_out`).
     response's `usage`. Refraktal prices them from LiteLLM's
     `model_prices_and_context_window.json`, cached at
     `os.UserCacheDir()/refraktal/prices.json` and fetched again after 24
-    hours (a failed fetch falls back to the stale copy, then to "everything
-    unpriced"), with per-model overrides in config (US dollars per million
-    tokens). The model comes from the session's `model` config option. Keys
+    hours. A refresh is parsed before publication, written to a unique temporary
+    file in the cache folder, synced, closed, then atomically renamed over
+    `prices.json`; failures remove the temporary file. Published files use mode
+    `0644`. Concurrent refreshes publish complete tables without a file lock:
+    a reader sees either the complete earlier or later table, and the last
+    successful rename wins. A failed fetch uses the valid stale cache file.
+    Invalid JSON or a table with no priced models is not a valid cache; if the
+    fetch also fails, a warning names the invalid cached copy and every model
+    is unpriced. A successful fetch replaces a corrupt cache only after the
+    fetched table passes parsing. A failed parse never replaces a good file.
+    No backup file is kept, and the cache directory is not synced for
+    power-loss durability.
+    Per-model overrides in config use US dollars per million tokens.
+    The model comes from the session's `model` config option. Keys
     tried: Codex `<model>`, Antigravity `gemini/<model>`.
   - Token accounting: `inputTokens` excludes cached tokens; cached reads and
     writes are priced at their own rates (input rate if the table has none);
@@ -896,9 +907,28 @@ actual spend and retained reservations are separate fields in text and JSON.
   project's hooks at session start: `doctor` must never run a repository's
   code. (`run` works in the repository by design, so this applies to `doctor`
   only.)
+- Before any harness prepares, `doctor` resolves the neutral folder's real
+  path, including symlinks, and checks it and every ancestor through the
+  filesystem root for a `.git` marker. A directory or a gitfile, as used by
+  worktrees and submodules, makes the location unusable. Each new session
+  folder is checked too, and the harness receives that same resolved path.
+  No Git command or repository configuration is used for these checks.
+- If the shared neutral folder has a repository ancestor, or its path cannot
+  be resolved or inspected, no harness prepares: each reports `unavailable`
+  with the folder and remedy, and doctor exits 3. Cleanup and the Decider
+  check still run. Point `XDG_CACHE_HOME` outside any repository; on macOS,
+  `os.UserCacheDir()` uses `$HOME/Library/Caches` instead, so that location
+  must be outside any repository. There are no new flags and no fallback to
+  `/tmp` or `$TMPDIR`.
+- Using the resolved path prevents a later change to the configured symlink
+  from redirecting the session. These path checks are not atomic against
+  concurrent replacement of real ancestors or creation of `.git` after the
+  check.
 - A harness is `ok`, `logged_out` (`session/new` refused for
   authentication), `unavailable` (not installed, or its adapter could not be
   prepared) or `error`. Exit code 3 when no harness is `ok`.
+  `doctor --json` also exits 3 if writing the JSONL report fails; it reports
+  the write error on stderr.
 
 ## Routing
 
