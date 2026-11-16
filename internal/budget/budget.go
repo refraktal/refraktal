@@ -77,9 +77,8 @@ type Settlement struct {
 }
 
 type grant struct {
-	g     Grant
 	spent float64
-	turns int // turns used, of g.Turns
+	turns int // turns used
 	open  bool
 }
 
@@ -165,7 +164,7 @@ func (l *Ledger) ReserveShare(n int) (Grant, error) {
 	}
 	l.nextID++
 	g := Grant{ID: l.nextID, USD: usd, Turns: turns, Deadline: l.deadline, Depth: l.lim.Depth - 1}
-	l.grants[g.ID] = &grant{g: g, open: true}
+	l.grants[g.ID] = &grant{open: true}
 	l.reserved += usd
 	l.held += turns
 	return g, nil

@@ -97,9 +97,8 @@ type Client struct {
 }
 
 type turnState struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	turn   Turn
+	ctx  context.Context
+	turn Turn
 }
 
 // New starts a client reading the agent's stdout from r and writing to its
@@ -180,10 +179,6 @@ func deadlineOf(ctx context.Context) time.Time {
 		return cd
 	}
 	return d
-}
-
-func (c *Client) send(method string, params any) (chan message, string, error) {
-	return c.sendBy(method, params, time.Now().Add(writeTimeout))
 }
 
 func (c *Client) sendBy(method string, params any, deadline time.Time) (chan message, string, error) {
@@ -446,7 +441,7 @@ func (c *Client) SetMode(ctx context.Context, sessionID, mode string) error {
 // the error is ErrCancelIgnored and the caller must shut the agent down.
 func (c *Client) Prompt(ctx context.Context, sessionID, text string) (Turn, error) {
 	tctx, tcancel := context.WithCancel(context.Background())
-	ts := &turnState{ctx: tctx, cancel: tcancel}
+	ts := &turnState{ctx: tctx}
 	c.mu.Lock()
 	if c.turns[sessionID] != nil {
 		c.mu.Unlock()
