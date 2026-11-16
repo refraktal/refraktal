@@ -13,24 +13,35 @@ gives them none.
 
 Licensed under the [Apache License 2.0](LICENSE). Website: https://refraktal.dev
 
+## Requirements
+
+- macOS or Linux, arm64 or amd64, and `git`.
+- Node.js (with `npm`): Refraktal installs the pinned ACP adapters for Claude
+  Code and Codex from npm on first use.
+- The harnesses you want to use, installed and logged in: `claude`, `codex`,
+  `agy`. `refraktal doctor` checks them.
+
 ## Install
 
-macOS or Linux, arm64 or amd64. Pick one:
+Releases are on [GitHub](https://github.com/refraktal/refraktal/releases).
+Pick one route; replace `v0.1.0` with the release you want.
 
 ```sh
-# The install script: verifies the release's SHA256SUMS, installs to ~/.local/bin, no sudo.
-curl -fsSL https://refraktal.dev/install | sh
-
-# Homebrew
-brew install refraktal/tap/refraktal
+# The install script, fetched from the release itself: verifies the release's
+# SHA256SUMS, downloads over HTTPS only, installs to ~/.local/bin, no sudo.
+curl -fsSL --proto '=https' https://github.com/refraktal/refraktal/releases/download/v0.1.0/install.sh | sh
 
 # Go 1.24 or later
-go install refraktal.dev/refraktal/cmd/refraktal@latest
+go install refraktal.dev/refraktal/cmd/refraktal@v0.1.0
 ```
 
-Then install and log in to the harnesses you want to use (`claude`, `codex`,
-`agy`); Refraktal installs the pinned ACP adapters for Claude Code and Codex
-itself, on first use.
+Or download the archive for your machine and `SHA256SUMS` from the release
+page, check that one archive, and unpack it:
+
+```sh
+grep ' refraktal_0.1.0_darwin_arm64.tar.gz$' SHA256SUMS | shasum -a 256 -c -   # Linux: sha256sum -c -
+tar -xzf refraktal_0.1.0_darwin_arm64.tar.gz refraktal && mv refraktal ~/.local/bin/
+```
 
 ## Quickstart
 

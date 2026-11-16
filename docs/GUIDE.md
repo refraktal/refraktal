@@ -132,4 +132,5 @@ never a harness's error text, auth messages or local paths.
 - **Two Refraktal runs on one repository at the same time** are not
   serialised against each other.
 - **macOS binaries are not signed or notarized.** The install script and
-  Homebrew do not mark them quarantined; a browser download would be.
+  `go install` do not mark them quarantined; an archive downloaded with a
+  browser would be (clear it with `xattr -d com.apple.quarantine refraktal`).
