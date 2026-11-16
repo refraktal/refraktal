@@ -168,4 +168,8 @@ type ChildReport struct {
 	Outcome string `json:"outcome"` // the child run's outcome
 	Exit    int    `json:"exit"`    // the child run's exit code
 	Run     string `json:"run"`     // the child's run folder
+	// Retained is US dollars the child's cancelled children keep reserved,
+	// beyond what they spent: the parent holds it against --usd without
+	// reporting it as spent.
+	Retained float64 `json:"retained_usd,omitempty"`
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,6 +80,27 @@ type runEnv struct {
 	log    *runlog.Log
 	base   string
 	notice func(string)
+
+	amu      sync.Mutex // this run's own figures (the ledger may be shared)
+	charged  float64
+	retained float64
+	turns    int
+}
+
+// account adds to this run's own figures.
+func (e *runEnv) account(charged, retained float64, turns int) {
+	e.amu.Lock()
+	defer e.amu.Unlock()
+	e.charged += charged
+	e.retained += retained
+	e.turns += turns
+}
+
+// figures copies this run's own figures into the result.
+func (e *runEnv) figures(res *RunResult) {
+	e.amu.Lock()
+	defer e.amu.Unlock()
+	res.Charged, res.Retained, res.RunTurns = e.charged, e.retained, e.turns
 }
 
 // childSpec says what kind of child to run.
@@ -242,6 +264,7 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 		e.log.Event("child_end", map[string]any{"harness": name, "outcome": c.Outcome, "error": errEvent(RunExhausted, c.Error)})
 		return c
 	}
+	e.account(0, 0, 1)
 	tctx, tcancel := context.WithDeadline(e.ctx, grant.Deadline)
 	turn, perr := s.client.Prompt(tctx, s.id, sp.prompt)
 	c.timedOut = errors.Is(tctx.Err(), context.DeadlineExceeded)
@@ -253,19 +276,35 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 	// as cancelled on its own (Codex does after a denial).
 	turn.Cancelled = turn.Cancelled || turn.StopReason == "cancelled"
 	var cost sessionCost // a fresh session: its first report is the whole cost
+	charged, childRetained := 0.0, 0.0
 	for _, ch := range cost.charges(h.Name(), c.Model, turn, e.prices) {
 		e.ledger.Charge(grant, ch)
+		if ch.Source != budget.Estimated {
+			charged += ch.USD
+		}
 		e.log.Event("charge", map[string]any{"harness": name, "charge": ch})
 		if ch.Source == budget.Unpriced {
 			e.notice(fmt.Sprintf("warning: no price for model %q; its tokens count as $0 against --usd", ch.Model))
 		}
 	}
 	if ch := turn.Child; ch != nil {
-		// A child Refraktal's own prompts count against --turns too.
+		// A child Refraktal's own prompts count against --turns too, and
+		// the reservations its cancelled children kept are held here, not
+		// reported as spent.
 		e.ledger.AddTurns(grant, ch.Turns)
+		e.account(0, 0, ch.Turns)
+		if ch.Retained > 0 && !math.IsNaN(ch.Retained) && !math.IsInf(ch.Retained, 0) {
+			e.ledger.Charge(grant, budget.Charge{USD: ch.Retained, Source: budget.Retained, Note: "kept by the child Refraktal's cancelled children"})
+			e.account(0, ch.Retained, 0)
+			childRetained = ch.Retained
+		}
 		e.log.Event("child_run", map[string]any{"harness": name, "turns": ch.Turns, "outcome": ch.Outcome, "exit": ch.Exit})
 	}
 	settle(turn.Cancelled)
+	e.account(charged, 0, 0)
+	if kept := c.Settlement.Spent - charged - childRetained; turn.Cancelled && kept > 0 {
+		e.account(0, kept, 0) // the reservation a cancelled child keeps
+	}
 	if st := c.Settlement; st.Overrun > 0 {
 		e.notice(fmt.Sprintf("the turn cost $%.4f, $%.4f beyond the --usd grant: --usd is checked before a turn, never inside one", st.Spent, st.Overrun))
 	}

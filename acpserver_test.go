@@ -38,6 +38,7 @@ type acpChildSpec struct {
 	Price      string     `json:"price"`
 	PriceCache string     `json:"price_cache"`
 	Flags      *budget.Limits
+	WallMS     int64 `json:"wall_ms,omitempty"` // Limits.Wall is not in its JSON
 }
 
 func (s acpChildSpec) harnesses() []harness.Harness {
@@ -63,6 +64,9 @@ func childACP(spec string) int {
 	lim := budget.Defaults
 	if s.Flags != nil {
 		lim = *s.Flags
+	}
+	if s.WallMS > 0 {
+		lim.Wall = time.Duration(s.WallMS) * time.Millisecond
 	}
 	o := ServeOptions{Run: RunOptions{Harness: s.Pin, Harnesses: s.harnesses(), Budget: &lim, LiveDir: s.Live, ConfigPath: s.Config,
 		WorktreeDir: s.WT, PriceURL: s.Price, PriceCache: s.PriceCache, Getenv: func(string) string { return "" }}}
@@ -418,5 +422,86 @@ func TestShowValuesCannotForgeLines(t *testing.T) {
 	}
 	if strings.ContainsRune(text.String(), '‮') {
 		t.Fatal("a bidi override reached the output")
+	}
+}
+
+// Review M7 (1): one ledger per acp server, seeded from the inherited grant
+// and shared by every prompt and session: the grant does not reset.
+func TestServeACPSharesOneLedger(t *testing.T) {
+	r := newRunRig(t)
+	c := serve(t, r.serveOptions(writer("claude", "out.txt=good"), map[string]string{BudgetEnv: `{"turns": 1}`}), nil)
+	id := open(t, c, r.repo)
+	if turn, _ := c.Prompt(context.Background(), id, "first"); turn.StopReason != "end_turn" {
+		t.Fatalf("first: %+v", turn)
+	}
+	os.Remove(filepath.Join(r.repo, "out.txt"))
+	other, _ := c.NewSession(context.Background(), r.repo, nil)
+	turn, _ := c.Prompt(context.Background(), other.ID, "second, in another session")
+	if turn.StopReason != "max_turn_requests" {
+		t.Fatalf("the grant's one turn was used, yet a second prompt ran: %+v", turn)
+	}
+	if b, _ := os.ReadFile(r.prompts); strings.Count(string(b), "prompt") != 1 {
+		t.Fatalf("prompts sent: %q", b)
+	}
+}
+
+// Review M7 (10): the cost reported upstream is what the run actually spent;
+// reservations kept by cancelled children go separately, so the parent can
+// hold them without reporting them as spent.
+func TestServeACPReportsActualCostAndRetainedSeparately(t *testing.T) {
+	r := newRunRig(t)
+	o := r.serveOptions(fake{name: "agy", agentMode: "hang"}, nil)
+	o.Run.Budget.Wall = 1500 * time.Millisecond // the turn times out: the child keeps its $5 reservation
+	c := serve(t, o, nil)
+	turn, _ := c.Prompt(context.Background(), open(t, c, r.repo), "x")
+	want := 200*1e-6 + 100*2e-6 // the call that finished before the cancel
+	if turn.Cost == nil || !near(turn.Cost.Amount, want) {
+		t.Fatalf("reported cost %+v, want the actual %v", turn.Cost, want)
+	}
+	if turn.Child == nil || !near(turn.Child.Retained, 5-want) {
+		t.Fatalf("retained %+v, want %v", turn.Child, 5-want)
+	}
+}
+
+// Without an inherited grant (a standalone server, say an editor's), each
+// prompt gets the flags afresh: --turns 1 allows one prompt per run.
+func TestStandaloneServeACPBudgetsPerPrompt(t *testing.T) {
+	r := newRunRig(t)
+	o := r.serveOptions(writer("claude", "out.txt=good"), nil)
+	o.Run.Budget.Turns = 1
+	c := serve(t, o, nil)
+	id := open(t, c, r.repo)
+	for i := 0; i < 2; i++ {
+		os.Remove(filepath.Join(r.repo, "out.txt"))
+		if turn, _ := c.Prompt(context.Background(), id, "x"); turn.StopReason != "end_turn" {
+			t.Fatalf("prompt %d: %+v", i, turn)
+		}
+	}
+}
+
+// Review M7 (10), the parent's side: a child Refraktal whose harness turn
+// was cancelled reports its actual cost as reported and the reservation it
+// kept as retained; the parent holds both against --usd but reports only
+// the first as spent.
+func TestParentHoldsAChildsRetainedReservation(t *testing.T) {
+	r := newRunRig(t)
+	spec := r.acpChildSpec("agy", fakeSpec{Name: "agy", Mode: "hang"})
+	spec.Flags, spec.WallMS = &budget.Limits{USD: 5, Turns: 5, Depth: 2}, 2500
+	res := r.run(t, fake{}, func(o *RunOptions) { o.Harness, o.Harnesses = "refraktal", []harness.Harness{r.refraktal(spec)} })
+	actual := 200*1e-6 + 100*2e-6
+	if !near(res.Budget.Reported, actual) || !near(res.Budget.Retained, 5-actual) || !near(res.Budget.Spent, 5) {
+		sr, _ := Show(r.repo, "")
+		var b strings.Builder
+		WriteShowText(&b, sr)
+		ev, _ := filepath.Glob(filepath.Join(r.repo, res.Run, "refraktal", "runs", "*", "events.jsonl"))
+		for _, f := range ev {
+			x, _ := os.ReadFile(f)
+			for _, l := range strings.Split(string(x), "\n") {
+				if strings.Contains(l, "run_end") || strings.Contains(l, "turn") || strings.Contains(l, "child_end") {
+					b.WriteString(l[:min(len(l), 300)] + "\n")
+				}
+			}
+		}
+		t.Fatalf("budget %+v\n%s", res.Budget, b.String())
 	}
 }

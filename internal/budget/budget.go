@@ -47,6 +47,9 @@ const (
 	Computed  Source = "computed"  // tokens priced from the price table
 	Unpriced  Source = "unpriced"  // no price for the model: counted as $0
 	Estimated Source = "estimated" // a guess for a call a cancel cut off; reporting only
+	// Retained is a child Refraktal's reservation kept by its own cancelled
+	// children: held against --usd, but not reported as spent.
+	Retained Source = "retained"
 )
 
 // Charge is one dollar figure for a child's turn.
@@ -114,6 +117,9 @@ func New(l Limits, now func() time.Time) (*Ledger, error) {
 	}
 	return &Ledger{lim: l, deadline: now().Add(l.Wall), now: now, grants: map[int]*grant{}}, nil
 }
+
+// Limits are the ledger's limits.
+func (l *Ledger) Limits() Limits { return l.lim }
 
 // Deadline is when --mins runs out.
 func (l *Ledger) Deadline() time.Time { return l.deadline }
@@ -253,9 +259,10 @@ func (l *Ledger) Settle(g Grant, cancelled bool) Settlement {
 type Summary struct {
 	Limits    Limits   `json:"limits"`
 	Mins      float64  `json:"mins"`
-	Spent     float64  `json:"spent_usd"`     // charged against --usd, including kept reservations
-	Reported  float64  `json:"reported_usd"`  // sum of reported and computed charges
-	Estimated float64  `json:"estimated_usd"` // sum of estimated charges, reporting only
+	Spent     float64  `json:"spent_usd"`              // charged against --usd, including kept reservations
+	Reported  float64  `json:"reported_usd"`           // sum of reported and computed charges
+	Estimated float64  `json:"estimated_usd"`          // sum of estimated charges, reporting only
+	Retained  float64  `json:"retained_usd,omitempty"` // held for children's kept reservations, not spent
 	Turns     int      `json:"turns"`
 	Charges   []Charge `json:"charges"`
 	Unpriced  []string `json:"unpriced,omitempty"` // models that had no price
@@ -273,6 +280,8 @@ func (l *Ledger) Summary() Summary {
 			s.Estimated += c.USD
 		case Unpriced:
 			s.Unpriced = append(s.Unpriced, c.Model)
+		case Retained:
+			s.Retained += c.USD
 		default:
 			s.Reported += c.USD
 		}

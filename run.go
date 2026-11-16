@@ -65,6 +65,9 @@ type RunOptions struct {
 	// Self is the path to this refraktal binary, for the refraktal harness (a
 	// child Refraktal over ACP). The CLI passes its own path. Empty: none.
 	Self string
+	// Ledger, if set, is a ledger shared with other runs (an acp server's,
+	// seeded from the parent's grant): Budget is then only its limits.
+	Ledger *budget.Ledger
 	// ParentRun, set when this run is a child Refraktal's, is the folder in
 	// the parent's run folder where this run's folder is made (so child runs
 	// nest inside the parent's). The acp server takes it from
@@ -110,6 +113,13 @@ type RunResult struct {
 	Judge      *Candidate         `json:"judge,omitempty"`
 	Notices    []string           `json:"notices,omitempty"`
 	Error      string             `json:"error,omitempty"`
+	// Charged, Retained and RunTurns are this run's own figures (on a
+	// shared ledger, Budget is the whole ledger's): the actual cost charged
+	// (reported and computed), the reservations its cancelled children kept
+	// beyond that, and the prompts it sent.
+	Charged  float64 `json:"charged_usd"`
+	Retained float64 `json:"retained_usd,omitempty"`
+	RunTurns int     `json:"run_turns"`
 	// LeftRunning and Unknown count processes still running after shutdown,
 	// and processes whose cleanup could not be confirmed, over every child.
 	LeftRunning int `json:"left_running"`
@@ -237,7 +247,10 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		res.Error = fmt.Sprintf("refusing to start: nested %d levels deep (%s), past --depth %d + 1", n, proc.NestEnv, o.Budget.Depth)
 		return res, nil
 	}
-	ledger, err := budget.New(*o.Budget, nil)
+	ledger, err := o.Ledger, error(nil)
+	if ledger == nil {
+		ledger, err = budget.New(*o.Budget, nil)
+	}
 	if err != nil {
 		var ex *budget.Exhausted
 		if errors.As(err, &ex) {
@@ -425,6 +438,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	if len(hs) > 1 {
 		env.fanOut(hs, scoreKey, &res)
 		res.Budget = ledger.Summary()
+		env.figures(&res)
 		log.Event("run_end", map[string]any{"outcome": res.Outcome, "winner": res.Harness, "files": res.Files, "branch": res.Branch,
 			"verdict": res.Verdict, "error": runlog.ErrorField(res.Outcome, res.Error), "budget": res.Budget})
 		return res, nil
@@ -472,6 +486,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 	env.drop(c)
 	res.Budget = ledger.Summary()
+	env.figures(&res)
 	log.Event("run_end", map[string]any{"outcome": res.Outcome, "harness": res.Harness, "files": res.Files, "branch": res.Branch,
 		"allowed": res.Allowed, "denied": res.Denied, "error": runlog.ErrorField(res.Outcome, res.Error), "budget": res.Budget,
 		"settlement": res.Settlement, "swept": c.swept, "left_running": res.LeftRunning, "unknown": res.Unknown})

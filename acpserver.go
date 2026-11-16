@@ -104,14 +104,19 @@ type rpcError struct {
 
 // server is one ACP connection.
 type server struct {
-	o    ServeOptions
-	ctx  context.Context
-	wmu  sync.Mutex
-	w    *bufio.Writer
-	mu   sync.Mutex
-	next int
-	sess map[string]*serverSession
-	wg   sync.WaitGroup
+	o ServeOptions
+	// lmu guards ledger: one per server, seeded from the inherited grant on
+	// the first prompt and shared by every prompt and session after it.
+	lmu    sync.Mutex
+	ledger *budget.Ledger
+	lerr   error
+	ctx    context.Context
+	wmu    sync.Mutex
+	w      *bufio.Writer
+	mu     sync.Mutex
+	next   int
+	sess   map[string]*serverSession
+	wg     sync.WaitGroup
 }
 
 type serverSession struct {
@@ -320,7 +325,7 @@ func (s *server) prompt(m rpc) {
 		cancelled := ctx.Err() != nil
 		s.mu.Lock()
 		ss.cancel = nil
-		ss.spent += res.Budget.Spent
+		ss.spent += res.Charged // what the run actually spent, not its kept reservations
 		spent := ss.spent
 		s.mu.Unlock()
 		if err != nil {
@@ -331,7 +336,8 @@ func (s *server) prompt(m rpc) {
 		// parent charges the difference from the previous report.
 		s.update(p.SessionID, map[string]any{"sessionUpdate": "usage_update", "cost": map[string]any{"amount": spent, "currency": "USD"}})
 		s.reply(m.ID, map[string]any{"stopReason": stopReason(res, cancelled),
-			"_meta": map[string]any{"refraktal": acp.ChildReport{Turns: res.Budget.Turns, Outcome: res.Outcome, Exit: res.ExitCode(), Run: res.Run}}})
+			"_meta": map[string]any{"refraktal": acp.ChildReport{Turns: res.RunTurns, Outcome: res.Outcome, Exit: res.ExitCode(), Run: res.Run,
+				Retained: res.Retained}}})
 	}()
 }
 
@@ -339,11 +345,7 @@ func (s *server) prompt(m rpc) {
 // parent's grant and the run folder nested in the parent's.
 func (s *server) run(ctx context.Context, sessionID, cwd, task string) (RunResult, error) {
 	o := s.o.Run
-	flags := budget.Defaults
-	if o.Budget != nil {
-		flags = *o.Budget
-	}
-	lim, err := childLimits(flags, s.o.Getenv(BudgetEnv), s.o.Now())
+	ledger, lim, err := s.sharedLedger()
 	if err != nil {
 		var ex *budget.Exhausted
 		if errors.As(err, &ex) {
@@ -351,12 +353,43 @@ func (s *server) run(ctx context.Context, sessionID, cwd, task string) (RunResul
 		}
 		return RunResult{Outcome: RunUnusable}, err
 	}
-	o.Budget, o.Task, o.Dir, o.NoApply, o.Dry = &lim, task, cwd, false, false
+	o.Budget, o.Ledger, o.Task, o.Dir, o.NoApply, o.Dry = &lim, ledger, task, cwd, false, false
 	if pr := s.o.Getenv(ParentRunEnv); pr != "" {
 		o.ParentRun = pr
 	}
 	o.OnNotice = func(n string) { s.chunk(sessionID, "notice: "+n+"\n") }
 	return Run(ctx, o)
+}
+
+// sharedLedger is the server's one ledger when a parent granted a budget:
+// the acp flags shrunk to the inherited grant, made on the first prompt.
+// Every prompt and session draws on it, so the grant never resets. Without
+// a grant it returns no ledger: each run makes its own from the flags.
+func (s *server) sharedLedger() (*budget.Ledger, budget.Limits, error) {
+	s.lmu.Lock()
+	defer s.lmu.Unlock()
+	flags := budget.Defaults
+	if s.o.Run.Budget != nil {
+		flags = *s.o.Run.Budget
+	}
+	if strings.TrimSpace(s.o.Getenv(BudgetEnv)) == "" {
+		// No parent: a standalone server (an editor's) gives each prompt the
+		// flags afresh, so --mins is per prompt, not per server lifetime.
+		return nil, flags, nil
+	}
+	if s.ledger == nil && s.lerr == nil {
+		lim, err := childLimits(flags, s.o.Getenv(BudgetEnv), s.o.Now())
+		if err == nil {
+			s.ledger, s.lerr = budget.New(lim, nil)
+		} else {
+			s.lerr = err
+		}
+		flags = lim
+	}
+	if s.lerr != nil {
+		return nil, flags, s.lerr
+	}
+	return s.ledger, s.ledger.Limits(), nil
 }
 
 // summary is the final message of a prompt: the run's outcome, then the
