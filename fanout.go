@@ -469,6 +469,12 @@ var errCancelled = errors.New("cancelled before the result could be applied; it 
 // testBeforeApply, set by tests, runs just before the apply's deadline check.
 var testBeforeApply func(deadline time.Time)
 
+// failedWithChanges: the candidate's turn or collect failed, and it changed
+// something. Its work is never deleted.
+func (c *Candidate) failedWithChanges() bool {
+	return c.Outcome == candFailed && len(c.Files) > 0
+}
+
 // keep marks a candidate's worktree as kept for the user.
 func (c *Candidate) keep() {
 	if c.wt != nil {
@@ -543,13 +549,27 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 	}
 	res.Candidates = nil
 	res.Harness = "" // set only for a winner, never the pinned list
+	// A candidate that failed after making changes (max_tokens, an ACP
+	// error, a refused or failed collect) is always kept, and a run that
+	// ends with no applicable winner while one exists ends failed (exit 1),
+	// never as no changes or a plain no winner.
+	failedWithChanges := 0
+	for _, c := range cands {
+		if c.failedWithChanges() {
+			failedWithChanges++
+		}
+	}
 	finish := func(outcome, why string, keepAll bool) {
+		if failedWithChanges > 0 && (outcome == RunNoChanges || outcome == RunNoWinner) {
+			msg := fmt.Sprintf("%d candidate(s) failed after making changes (kept on their branches) and no candidate produced an applicable result", failedWithChanges)
+			outcome, why = RunFailed, strings.TrimPrefix(why+"; "+msg, "; ")
+		}
 		res.Outcome = outcome
 		if why != "" {
 			res.Error = why
 		}
 		for _, c := range cands {
-			if c.collectFailed || keepAll && (len(c.Files) > 0 || e.o.NoApply) {
+			if c.collectFailed || c.failedWithChanges() || keepAll && (len(c.Files) > 0 || e.o.NoApply) {
 				c.keep()
 			}
 			e.drop(c)

@@ -630,6 +630,12 @@ candidates that did. This is reported ahead of `no_changes`.
 - **A failed collect keeps the work.** If collecting a candidate fails (a
   stale `index.lock`, say), its worktree and branch are kept and reported,
   whatever the run's outcome; a failed collect never deletes work.
+- **A candidate that failed with changes is kept.** A candidate whose turn
+  or collect failed after it changed files (`max_tokens`, an ACP error, a
+  result refused for leaving the session folder) keeps its worktree and
+  branch whatever the run's outcome. A fan-out that ends with no applicable
+  winner while such a candidate exists ends `failed` (exit 1), never
+  `no_changes` or `no_winner`: partial work was produced and not used.
 - **A cancel stops before apply.** A cancel (Ctrl-C, or an ACP client's
   `session/cancel`) that arrives during judging or collection stops before
   the apply: the run fails (exit 1) and the result stays on its branch.
