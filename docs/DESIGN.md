@@ -528,7 +528,9 @@ changes. In order:
    (a notice says so).
    - A candidate whose diff touches the check's own definition, whatever the
      check command is (a `make test` can run `npm test`, `pytest` or `cargo
-     test`): any of the three makefiles; a test-definition file
+     test`), in any folder (matched by base name: `make -C sub`, a
+     monorepo's `web/package.json`): any of the three makefiles; a
+     test-definition file
      (`package.json`, `pyproject.toml`, `setup.cfg`, `setup.py`, `tox.ini`,
      `pytest.ini`, `noxfile.py`, `conftest.py`, `Cargo.toml`, `Rakefile`,
      `Gemfile`, `build.gradle`, `build.gradle.kts`, `pom.xml`,

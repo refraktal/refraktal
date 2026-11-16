@@ -196,3 +196,18 @@ func TestJudgeRefusedForBudgetIsNotNamed(t *testing.T) {
 		t.Fatalf("%+v verdict %+v", res, res.Verdict)
 	}
 }
+
+// A test-definition file in a subfolder (a monorepo's web/package.json, a
+// make -C sub test) is flagged too: matched by its base name.
+func TestNestedTestDefinitionsAreFlagged(t *testing.T) {
+	p := checkPlan{Steps: []checkStep{{"test", []string{"make", "test"}}}, Source: "config"}
+	for _, f := range []string{"web/package.json", "services/api/pyproject.toml", "crates/x/Cargo.toml", "sub/Makefile", "a/b/GNUmakefile"} {
+		if why := p.touchesDefinition([]string{f}, nil); why == "" {
+			t.Errorf("an edit to %s was not flagged", f)
+		}
+	}
+	nested := []byte("diff --git a/tools/go.mod b/tools/go.mod\n--- a/tools/go.mod\n+++ b/tools/go.mod\n@@ -1 +1 @@\n-go 1.24\n+go 1.26\n")
+	if why := p.touchesDefinition([]string{"tools/go.mod"}, nested); why == "" {
+		t.Error("a nested go.mod's go line change was not flagged")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -174,15 +175,15 @@ func (p checkPlan) touchesDefinition(files []string, diff []byte) string {
 			return "changes CI files (" + f + ")"
 		case p.config != "" && f == p.config:
 			return "changes the config file that defines the check"
-		case slices.Contains(makefiles, f):
+		case slices.Contains(makefiles, path.Base(f)):
 			return "changes a makefile (" + f + ")"
-		case slices.Contains(testDefinitions, f):
+		case slices.Contains(testDefinitions, path.Base(f)): // in any folder: make -C, a monorepo
 			// Whatever the check command is: make test may run npm test,
 			// pytest or cargo test, which read these.
 			return "changes " + f + ", which can define how tests run"
 		case testFile(f):
 			return "changes test files (" + f + ")"
-		case f == "go.mod" && goModToolchainChanged(diff):
+		case path.Base(f) == "go.mod" && goModToolchainChanged(diff):
 			return "changes the go or toolchain line of go.mod"
 		}
 	}
@@ -197,7 +198,7 @@ func goModToolchainChanged(diff []byte) bool {
 	in := false
 	for _, l := range strings.Split(string(diff), "\n") {
 		if strings.HasPrefix(l, "diff --git ") {
-			in = strings.HasSuffix(l, " b/go.mod")
+			in = strings.HasSuffix(l, "/go.mod") // any go.mod, at the root (b/go.mod) or nested
 			continue
 		}
 		if in && !strings.HasPrefix(l, "+++") && !strings.HasPrefix(l, "---") && goLine.MatchString(l) {
