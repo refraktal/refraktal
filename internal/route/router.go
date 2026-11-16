@@ -40,6 +40,9 @@ func LoadKey(root string, getenv func(string) string) (key, source string) {
 	if k := strings.TrimSpace(getenv(KeyEnv)); k != "" {
 		return k, "environment"
 	}
+	if _, err := os.Stat(filepath.Join(root, ".env")); err != nil {
+		return "", ""
+	}
 	if !untrackedDotEnv(root) {
 		return "", ""
 	}
@@ -204,9 +207,15 @@ func (r Router) store(hash string, d Decision) {
 // Route answers the routing questions (from the cache, Gemini, or the
 // fallback), applies the policy, picks the harness and logs the decision.
 func (r Router) Route(ctx context.Context, in Input) (Result, error) {
-	hash := requestHash(in)
+	var hash string
+	var d Decision
+	var cached bool
+	if r.o.APIKey != "" && r.o.CacheDir != "-" && r.o.CacheDir != "" {
+		hash = requestHash(in)
+		d, cached = r.cached(hash)
+	}
 	var res Result
-	if d, ok := r.cached(hash); ok && r.o.APIKey != "" {
+	if cached {
 		d.LatencyMS = 0
 		res.Decision, res.Cached = d, true
 	} else {
@@ -220,7 +229,9 @@ func (r Router) Route(ctx context.Context, in Input) (Result, error) {
 			return res, err
 		}
 		res.Decision = d
-		r.store(hash, d)
+		if hash != "" {
+			r.store(hash, d)
+		}
 	}
 	res.Outcome = Policy(res.Decision, *r.o.Thresholds)
 	res.Run, res.Notes = pick(res.Decision, res.Outcome)
