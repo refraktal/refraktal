@@ -3,7 +3,10 @@
 # release you want (it is attached to every release, and at the tag in the
 # repository), for example:
 #
-#   curl -fsSL --proto '=https' https://github.com/refraktal/refraktal/releases/download/v0.1.0/install.sh | sh
+#   curl -fsSL --proto '=https' https://github.com/refraktal/refraktal/releases/download/v0.1.0/install.sh | REFRAKTAL_VERSION=v0.1.0 sh
+#
+# (Without REFRAKTAL_VERSION it installs the latest release, which need not
+# be the one the script came from.)
 #
 # It downloads the archive for this machine (macOS or Linux, arm64 or amd64)
 # and the release's SHA256SUMS over HTTPS only, refuses to install unless the

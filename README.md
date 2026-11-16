@@ -24,23 +24,26 @@ Licensed under the [Apache License 2.0](LICENSE). Website: https://refraktal.dev
 ## Install
 
 Releases are on [GitHub](https://github.com/refraktal/refraktal/releases).
-Pick one route; replace `v0.1.0` with the release you want.
+Pick one route; replace `v0.1.0` (in both places) with the release you want.
 
 ```sh
-# The install script, fetched from the release itself: verifies the release's
-# SHA256SUMS, downloads over HTTPS only, installs to ~/.local/bin, no sudo.
-curl -fsSL --proto '=https' https://github.com/refraktal/refraktal/releases/download/v0.1.0/install.sh | sh
+# The install script, fetched from the release itself and pinned to it:
+# verifies the release's SHA256SUMS, downloads over HTTPS only, installs to
+# ~/.local/bin, no sudo.
+curl -fsSL --proto '=https' https://github.com/refraktal/refraktal/releases/download/v0.1.0/install.sh | REFRAKTAL_VERSION=v0.1.0 sh
 
 # Go 1.24 or later
 go install refraktal.dev/refraktal/cmd/refraktal@v0.1.0
 ```
 
 Or download the archive for your machine and `SHA256SUMS` from the release
-page, check that one archive, and unpack it:
+page, then check that one archive and unpack it. The steps are chained, so a
+checksum mismatch stops before anything is unpacked:
 
 ```sh
-grep ' refraktal_0.1.0_darwin_arm64.tar.gz$' SHA256SUMS | shasum -a 256 -c -   # Linux: sha256sum -c -
-tar -xzf refraktal_0.1.0_darwin_arm64.tar.gz refraktal && mv refraktal ~/.local/bin/
+grep ' refraktal_0.1.0_darwin_arm64.tar.gz$' SHA256SUMS | shasum -a 256 -c - &&   # Linux: sha256sum -c -
+  tar -xzf refraktal_0.1.0_darwin_arm64.tar.gz refraktal &&
+  mkdir -p ~/.local/bin && mv refraktal ~/.local/bin/
 ```
 
 ## Quickstart
@@ -62,6 +65,12 @@ Run logs are in `.refraktal/runs/` in the repository, which is gitignored.
 
 Exit codes: 0 applied (or kept with `--no-apply`), 1 no candidate passed, 2 a
 budget ran out, 3 nothing usable.
+
+**Budgets.** `--usd` is checked before each turn, never inside one (no harness
+reports cost mid-turn). So a single-harness run can exceed a tiny `--usd` by
+that one turn: it still exits 0, and the overrun is reported. `--mins` is the
+only hard stop inside a turn. The [guide](docs/GUIDE.md#budgets) has the
+details.
 
 ## Commands
 

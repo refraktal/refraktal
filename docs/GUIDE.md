@@ -45,6 +45,12 @@ Harness names are `claude`, `codex`, `agy` and `refraktal`.
 | `--mins N` | wall-clock minutes for the whole run, setup included. The only hard stop inside a turn: when it runs out, the turn is cancelled, the harness shut down, and its process tree killed. Never unlimited; at most 1440. | 30 |
 | `--depth N` | how many levels of Refraktal may nest below this run | 2 |
 
+Because `--usd` is checked only before a turn, a single-harness run with a
+tiny `--usd` (say `--usd 0.0001`) still runs its one turn, exits 0 and
+reports the overrun; `--usd 0` refuses to start (exit 2). With several
+candidates, the turns they start can overrun the same way, and a judge that
+then finds the budget spent cannot start (exit 2, the candidates kept).
+
 Each budget only shrinks down the tree. Parallel candidates split `--usd`
 and `--turns`: each takes what is left divided by the children still to
 start, and what it does not use comes back when it finishes. Costs are
