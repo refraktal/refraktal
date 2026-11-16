@@ -28,9 +28,7 @@ func startTorture(t *testing.T, s acptest.TortureSpec, role string, sessions boo
 	sp := Spec{Argv: argv, Env: env, PollEvery: time.Hour, SessionPollEvery: time.Hour,
 		LiveDir: filepath.Join(s.Dir, "live")}
 	if role == "cycle" {
-		// Exercise both background pollers at production defaults. Faster
-		// tickers make four workers compete on hundreds of global ps scans
-		// per second (an occupied session needs two), before shutdown's scans.
+		// Exercise both background pollers at production defaults.
 		sp.PollEvery, sp.SessionPollEvery = 0, 0
 	}
 	if sessions {
@@ -194,16 +192,28 @@ func TestTortureStartKillCycles(t *testing.T) {
 					}
 					// Inventory is written after exec. The leaf stays a direct
 					// child until the shared safety expiry, so one successful
-					// post-ready scan must enroll it. Repeated Poll calls only
-					// add global ps load; List already bounds its own command.
+					// post-ready scan must enroll it.
 					start := time.Now()
 					err := c.tracker.Poll()
 					elapsed := time.Since(start)
 					tracked := c.Tracked()
-					if err != nil || len(tracked) != 1 || tracked[0].PID != inventory[leaf].PID || tracked[0].PPID != c.PID() {
+					// On Linux, Go's pidfd probe (doCheckClonePidfd, via
+					// checkPidfdOnce) uses CLONE_VFORK|CLONE_VM|CLONE_PIDFD.
+					// Its child exits without exec, so the tracker may also see a
+					// short-lived child of the root with the root's argv.
+					trackedLeaf := slices.IndexFunc(tracked, func(p Proc) bool {
+						return p.PID == inventory[leaf].PID
+					})
+					if err != nil || trackedLeaf < 0 || tracked[trackedLeaf].PPID != c.PID() {
 						tortureCycleDiagnostics(t, s, c, inventory[leaf].PID, elapsed)
-						t.Fatalf("cycle %d: post-ready Poll took %s: error=%v, tracked PIDs=%v, want only leaf %d of root %d",
+						t.Fatalf("cycle %d: post-ready Poll took %s: error=%v, tracked PIDs=%v, want leaf %d of root %d tracked",
 							i, elapsed, err, pids(tracked), inventory[leaf].PID, c.PID())
+					}
+					for _, p := range tracked {
+						if p.PPID != c.PID() {
+							tortureCycleDiagnostics(t, s, c, inventory[leaf].PID, elapsed)
+							t.Fatalf("cycle %d: tracked PID %d has PPID %d, want root %d", i, p.PID, p.PPID, c.PID())
+						}
 					}
 					tortureReport(t, c.Shutdown(5*time.Millisecond))
 					tortureGone(t, s)
