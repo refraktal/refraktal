@@ -927,6 +927,8 @@ actual spend and retained reservations are separate fields in text and JSON.
 - A harness is `ok`, `logged_out` (`session/new` refused for
   authentication), `unavailable` (not installed, or its adapter could not be
   prepared) or `error`. Exit code 3 when no harness is `ok`.
+  `doctor --json` also exits 3 if writing the JSONL report fails; it reports
+  the write error on stderr.
 
 ## Routing
 
