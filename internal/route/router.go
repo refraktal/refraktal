@@ -112,7 +112,8 @@ type Result struct {
 	Decision Decision `json:"decision"`
 	Outcome  Outcome  `json:"policy"`
 	Cached   bool     `json:"cached"`
-	Harness  string   `json:"harness"` // the Refraktal harness to run
+	Harness  string   `json:"harness"`   // the first Refraktal harness to run
+	Run      []string `json:"harnesses"` // every Refraktal harness to run, in order
 	Notes    []string `json:"notes,omitempty"`
 }
 
@@ -222,7 +223,10 @@ func (r Router) Route(ctx context.Context, in Input) (Result, error) {
 		r.store(hash, d)
 	}
 	res.Outcome = Policy(res.Decision, *r.o.Thresholds)
-	res.Harness, res.Notes = pick(res.Decision, res.Outcome)
+	res.Run, res.Notes = pick(res.Decision, res.Outcome)
+	if len(res.Run) > 0 {
+		res.Harness = res.Run[0]
+	}
 	if r.o.LogPath != "" {
 		rec := NewRecord("", r.o.Now(), in, res.Decision, *r.o.Thresholds, res.Outcome)
 		rec.RunID = r.o.RunID
@@ -235,31 +239,39 @@ func (r Router) Route(ctx context.Context, in Input) (Result, error) {
 	return res, nil
 }
 
-// pick chooses the one harness to run until fan-out lands (M6): the routed
-// harness, the top of a fan-out, or for an escalation the most probable
-// harness; a label without a Refraktal harness is skipped.
-func pick(d Decision, o Outcome) (string, []string) {
+// pick chooses the harnesses to run, in order: the routed harness, the
+// fan-out's harnesses, or for an escalation the most probable harness
+// (planning is M7). A label without a Refraktal harness (refraktal, until
+// M7) is skipped and the next most probable harness takes its place.
+func pick(d Decision, o Outcome) ([]string, []string) {
 	var notes []string
-	order := o.Harnesses
+	order, width := o.Harnesses, 1
 	switch o.Action {
 	case ActionFanOut:
-		notes = append(notes, fmt.Sprintf("the router advised fanning out to %d harnesses (%s); running the top one until fan-out lands", o.Width, o.Reason))
+		width = max(1, o.Width)
 	case ActionEscalate:
 		notes = append(notes, "the router escalated ("+o.Reason+"); running the most probable harness until planning lands")
-	}
-	if o.Action == ActionEscalate {
 		order = nil
 	}
-	order = append(append([]string{}, order...), byProbability(d)...) // then every harness by probability
-	for _, label := range order {
-		if name := ProductName(label); name != "" {
-			if label != order[0] {
-				notes = append(notes, fmt.Sprintf("the router chose %s, which cannot run yet; using %s", order[0], label))
-			}
-			return name, notes
+	var out []string
+	add := func(label string) {
+		if name := ProductName(label); name != "" && !contains(out, name) && len(out) < width {
+			out = append(out, name)
 		}
 	}
-	return "", append(notes, "no harness available")
+	for _, label := range order {
+		if ProductName(label) == "" {
+			notes = append(notes, fmt.Sprintf("the router chose %s, which cannot run yet; using the next most probable harness", label))
+		}
+		add(label)
+	}
+	for _, label := range byProbability(d) { // fill up, every harness by probability
+		add(label)
+	}
+	if len(out) == 0 {
+		return nil, append(notes, "no harness available")
+	}
+	return out, notes
 }
 
 func byProbability(d Decision) []string {

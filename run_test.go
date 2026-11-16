@@ -498,8 +498,11 @@ func TestRunDry(t *testing.T) {
 
 func TestRunFanAndHarnessOverride(t *testing.T) {
 	r := newRunRig(t)
-	if _, err := Run(context.Background(), RunOptions{Task: "x", Fan: 2, Dir: r.repo}); err == nil || !strings.Contains(err.Error(), "M6") {
-		t.Fatalf("--fan 2: %v", err)
+	if _, err := Run(context.Background(), RunOptions{Task: "x", Harness: "claude,codex", Fan: 1, Dir: r.repo, Harnesses: allFakes()}); err == nil || !strings.Contains(err.Error(), "--fan 1") {
+		t.Fatalf("--fan 1 with two pinned harnesses: %v", err)
+	}
+	if _, err := Run(context.Background(), RunOptions{Task: "x", Harness: "claude,claude", Dir: r.repo, Harnesses: allFakes()}); err == nil {
+		t.Fatal("a harness named twice was accepted")
 	}
 	srv, hits := geminiServer(t)
 	res := r.run(t, fake{name: "agy", agentMode: "turn"}, func(o *RunOptions) {

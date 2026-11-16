@@ -21,9 +21,10 @@ import (
 // inherits them behaves as if it were nested inside that session.
 var sessionMarkers = []string{"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT",
 	// API keys: a harness or tool must not silently bill a key instead of the
-	// subscription. A nested Refraktal gets the routing key only by explicit
-	// opt-in (REFRAKTAL_PASS_GEMINI_KEY=1; docs/DESIGN.md).
-	"GEMINI_API_KEY", "GOOGLE_API_KEY"}
+	// subscription. A harness gets a key only by explicit opt-in (pass_env in
+	// the config; a nested Refraktal's routing key by
+	// REFRAKTAL_PASS_GEMINI_KEY=1; docs/DESIGN.md).
+	"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"}
 
 // ScrubEnv returns env without the parent's session markers and API keys.
 func ScrubEnv(env []string) []string {
@@ -35,9 +36,13 @@ func ScrubEnv(env []string) []string {
 
 // Spec says how to start a child.
 type Spec struct {
-	Argv      []string
-	Dir       string
-	Env       []string      // KEY=VALUE pairs added to the scrubbed parent environment
+	Argv []string
+	Dir  string
+	Env  []string // KEY=VALUE pairs added to the scrubbed parent environment
+	// BaseEnv, if set, replaces the scrubbed parent environment, such as
+	// safegit.Env() for check commands. Session markers and API keys are
+	// scrubbed from it too.
+	BaseEnv   []string
 	Stderr    io.Writer     // nil discards it
 	PollEvery time.Duration // how often to look for new descendants; default 200 ms
 
@@ -111,7 +116,11 @@ func Start(s Spec) (*Child, error) {
 	}
 	cmd := exec.Command(s.Argv[0], s.Argv[1:]...)
 	cmd.Dir, cmd.Stdin, cmd.Stdout, cmd.Stderr = s.Dir, inR, outW, s.Stderr
-	cmd.Env = append(append(ScrubEnv(os.Environ()), s.Env...), NestEnv+"="+strconv.Itoa(Nest()+1))
+	base := ScrubEnv(os.Environ())
+	if s.BaseEnv != nil {
+		base = ScrubEnv(s.BaseEnv)
+	}
+	cmd.Env = append(append(base, s.Env...), NestEnv+"="+strconv.Itoa(Nest()+1))
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // a session of its own, and so a process group of its own
 	cmd.WaitDelay = 2 * time.Second                      // a descendant holding stderr open must not hang Wait
 	err = cmd.Start()
@@ -369,6 +378,17 @@ func (c *Child) PID() int { return c.cmd.Process.Pid }
 // Exited is closed once the child has exited. Its PID stays reserved until
 // Shutdown reaps it, so always call Shutdown.
 func (c *Child) Exited() <-chan struct{} { return c.exited }
+
+// ExitCode is the child's exit status once Shutdown has reaped it: -1 if it
+// was killed by a signal or is not reaped yet.
+func (c *Child) ExitCode() int {
+	select {
+	case <-c.reaped:
+		return c.cmd.ProcessState.ExitCode()
+	default:
+		return -1
+	}
+}
 
 // Tracked returns every descendant seen so far.
 func (c *Child) Tracked() []Proc { return c.tracker.Tracked() }

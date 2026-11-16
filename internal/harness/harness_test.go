@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -252,5 +253,50 @@ func TestAgyCreatesGeminiDirThroughPinnedRoot(t *testing.T) {
 	}
 	if fi, err := os.Stat(filepath.Join(held, "gemini-dir")); err != nil || !fi.IsDir() {
 		t.Errorf("gemini dir missing from pinned folder: %v", err)
+	}
+}
+
+// Review (2): each harness's own read-only mode, from the modes the spike
+// recorded (docs/DESIGN.md): the judge runs in it.
+func TestReadOnlyModes(t *testing.T) {
+	want := map[string]string{"claude": "default", "codex": "read-only", "agy": "plan"}
+	for _, h := range Defaults(t.TempDir()) {
+		if got := h.ReadOnlyMode(); got != want[h.Name()] {
+			t.Errorf("%s: read-only mode %q, want %q", h.Name(), got, want[h.Name()])
+		}
+	}
+}
+
+// A Claude judge's session disallows every writing tool in the SDK options,
+// so an allow rule in the user's or the repository's settings cannot run one
+// without reaching the read-only policy, and has no MCP tools even when the
+// config inherits the user's MCP servers.
+func TestClaudeJudgeDisallowsWritingTools(t *testing.T) {
+	for _, mcp := range []string{MCPIsolated, MCPInherit} {
+		var l Launch
+		if err := isolateClaude(context.Background(), Options{MCP: mcp, ReadOnly: true}, "", &l); err != nil {
+			t.Fatal(err)
+		}
+		var m struct {
+			ClaudeCode struct {
+				Options struct {
+					Strict     bool     `json:"strictMcpConfig"`
+					Disallowed []string `json:"disallowedTools"`
+				} `json:"options"`
+			} `json:"claudeCode"`
+		}
+		if err := json.Unmarshal(l.Meta, &m); err != nil {
+			t.Fatalf("%s: meta %s: %v", mcp, l.Meta, err)
+		}
+		o := m.ClaudeCode.Options
+		// A judge never has MCP tools, whatever the mcp setting: strict always.
+		if strings.Join(o.Disallowed, ",") != "Bash,BashOutput,KillShell,Edit,MultiEdit,Write,NotebookEdit,Task,Agent,SlashCommand" || !o.Strict {
+			t.Errorf("%s: options %+v", mcp, o)
+		}
+	}
+	var l Launch
+	isolateClaude(context.Background(), Options{MCP: MCPIsolated}, "", &l)
+	if strings.Contains(string(l.Meta), "disallowedTools") {
+		t.Error("a candidate's session disallowed tools")
 	}
 }

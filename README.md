@@ -16,7 +16,8 @@ Licensed under the [Apache License 2.0](LICENSE).
 Without `--harness`, Refraktal asks Google's Gemini Decisions API which harness
 should take the task, if `GEMINI_API_KEY` is set (in the environment or a
 gitignored `.env`); otherwise it routes with local rules. On Google's free
-tier, Google uses the data in these requests (your task text and a short
-description of the repository) to improve its products. Use `--harness` or
-leave the key unset to keep task text local.
+tier, Google uses the data in these requests (your task text, a short
+description of the repository and, when several harnesses' results are
+compared, each candidate's diff, up to 32 KiB) to improve its products. Use
+`--harness` or leave the key unset to keep task text and diffs local.
 

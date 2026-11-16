@@ -145,3 +145,46 @@ func TestNonFiniteAndHugeBudgetsAreRejected(t *testing.T) {
 		}
 	}
 }
+
+// M6: parallel children split what is left; each share is taken from what
+// is left when that child starts, divided by the children still to start.
+func TestReserveShareSplitsAcrossChildren(t *testing.T) {
+	l, _ := New(Limits{USD: 9, Turns: 10, Wall: time.Minute}, nil)
+	var gs []Grant
+	for n := 3; n >= 1; n-- {
+		g, err := l.ReserveShare(n)
+		if err != nil || !near(g.USD, 3) {
+			t.Fatalf("share with %d to start: %v %v", n, g.USD, err)
+		}
+		gs = append(gs, g)
+	}
+	if err := l.Check(); !exhausted(err, "usd") {
+		t.Fatalf("all reserved: %v", err)
+	}
+	// One child spends $1 and settles: the $2 it did not use is free again,
+	// and a judge started afterwards gets all of it.
+	l.BeginTurn(gs[0])
+	l.Charge(gs[0], Charge{USD: 1, Source: Computed})
+	l.Settle(gs[0], false)
+	if j, err := l.ReserveShare(1); err != nil || !near(j.USD, 2) {
+		t.Fatalf("judge grant %v %v", j.USD, err)
+	}
+	// --turns belong to the whole run, not to a share.
+	if gs[1].Turns != 10 {
+		t.Fatalf("turns were split: %d", gs[1].Turns)
+	}
+}
+
+// Review (8): before every prompt the run-wide settled spend is checked too,
+// so a child holding an untouched reservation stops once the run is spent.
+func TestBeginTurnStopsWhenTheRunIsSpent(t *testing.T) {
+	l, _ := New(Limits{USD: 4, Turns: 10, Wall: time.Minute}, nil)
+	a, _ := l.ReserveShare(2)
+	b, _ := l.ReserveShare(1)
+	l.BeginTurn(a)
+	l.Charge(a, Charge{USD: 5, Source: Reported}) // a turn cannot be stopped for cost: an overrun
+	l.Settle(a, false)
+	if err := l.BeginTurn(b); !exhausted(err, "usd") {
+		t.Fatalf("the run spent $5 of $4, yet a held reservation may still start a turn: %v", err)
+	}
+}

@@ -90,10 +90,10 @@ func doctor(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	harnessName := fs.String("harness", "", "run on this harness: claude, codex or agy (default: the router chooses)")
+	harnessName := fs.String("harness", "", "run on these harnesses: claude, codex or agy, comma-separated to fan out (default: the router chooses)")
 	noApply := fs.Bool("no-apply", false, "leave the result on the worktree's branch")
 	asJSON := fs.Bool("json", false, "JSONL on stdout")
-	fan := fs.Int("fan", 0, "fan-out width: 1 for one harness (wider fan-out arrives in M6)")
+	fan := fs.Int("fan", 0, "cap the router's fan-out width (1: one harness; 0: no cap)")
 	dry := fs.Bool("dry", false, "plan and route only: no worktree, no harness")
 	d := budget.Defaults
 	usd := fs.Float64("usd", d.USD, "dollar budget, checked before each turn (notional on subscriptions)")
@@ -112,8 +112,8 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 		args = fs.Args()[1:]
 	}
 	switch {
-	case *fan > 1 || *fan < 0:
-		fmt.Fprintln(stderr, "refraktal run: fan-out to several harnesses arrives in M6; use --fan 1 or leave it to the router")
+	case *fan < 0:
+		fmt.Fprintln(stderr, "refraktal run: --fan must not be negative")
 		return refraktal.ExitNothingUsable
 	case math.IsNaN(*usd) || math.IsInf(*usd, 0) || math.IsNaN(*mins) || math.IsInf(*mins, 0):
 		fmt.Fprintln(stderr, "refraktal run: --usd and --mins must be finite numbers")
@@ -123,9 +123,6 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 		return refraktal.ExitNothingUsable
 	case *usd < 0 || *turns < 0 || *mins <= 0:
 		fmt.Fprintln(stderr, "refraktal run: --usd and --turns must not be negative, and --mins must be more than 0")
-		return refraktal.ExitNothingUsable
-	case strings.Contains(*harnessName, ","):
-		fmt.Fprintln(stderr, "refraktal run: one harness at a time until fan-out lands")
 		return refraktal.ExitNothingUsable
 	}
 	task, err := readTask(words, stdin)
@@ -158,7 +155,7 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 		return res.ExitCode()
 	}
 	if res.Outcome == refraktal.RunPlanned {
-		fmt.Fprintf(stdout, "plan: run %s", res.Harness)
+		fmt.Fprintf(stdout, "plan: run %s", strings.Join(res.Plan, ", "))
 		if rt := res.Route; rt != nil {
 			d := rt.Decision
 			fmt.Fprintf(stdout, " (router: %s, task kind %s, harness confidence %.2f, policy %s)", d.Decider, d.TaskKind.Value, d.Harness.Confidence, rt.Outcome.Action)
@@ -170,7 +167,39 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 		fmt.Fprintln(stdout, res.Reply)
 		fmt.Fprintln(stdout)
 	}
-	fmt.Fprintf(stdout, "%s: %s", res.Harness, res.Outcome)
+	for _, c := range res.Candidates {
+		fmt.Fprintf(stdout, "candidate %s (%s): %s", c.Label, c.Harness, c.Outcome)
+		if c.Applies != nil && !*c.Applies {
+			fmt.Fprint(stdout, ", does not apply")
+		}
+		for _, k := range c.Checks {
+			fmt.Fprintf(stdout, ", %s %s", k.Name, k.Status)
+		}
+		if c.Score != nil {
+			fmt.Fprintf(stdout, ", pre-score %.2f", *c.Score)
+		}
+		if c.Flagged != "" {
+			fmt.Fprintf(stdout, ", flagged: %s", c.Flagged)
+		}
+		if c.Branch != "" {
+			fmt.Fprintf(stdout, ", branch %s", c.Branch)
+		}
+		fmt.Fprintln(stdout)
+	}
+	if v := res.Verdict; v != nil {
+		fmt.Fprintf(stdout, "verdict: %s by %s (%s)", cmpOr(v.Winner, "no winner"), v.Method, v.Reason)
+		if v.Judge != "" {
+			fmt.Fprintf(stdout, "; judge %s", v.Judge)
+			if v.JudgedOwn {
+				fmt.Fprint(stdout, " (judged its own candidate)")
+			}
+		}
+		if len(v.JudgesTried) > 0 {
+			fmt.Fprintf(stdout, "; could not start %s", strings.Join(v.JudgesTried, ", "))
+		}
+		fmt.Fprintln(stdout)
+	}
+	fmt.Fprintf(stdout, "%s: %s", cmpOr(res.Harness, "run"), res.Outcome)
 	if len(res.Files) > 0 {
 		fmt.Fprintf(stdout, ", %d files: %s", len(res.Files), strings.Join(res.Files, " "))
 	}
@@ -224,4 +253,11 @@ func selfPath() string {
 		return ""
 	}
 	return p
+}
+
+func cmpOr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }

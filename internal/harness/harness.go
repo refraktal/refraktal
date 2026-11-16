@@ -30,6 +30,13 @@ const (
 type Harness interface {
 	Name() string
 	Mode() string // the permission mode set on every session (docs/DESIGN.md)
+	// ReadOnlyMode is the mode a judge's session runs in, under the read-only
+	// policy: Codex read-only (codex-acp then sends a read-only sandbox, and
+	// asks before writing), Antigravity plan (no action; its plan file goes
+	// to its per-run state folder), Claude default with its writing tools
+	// disallowed (Options.ReadOnly). Claude's plan mode is not used: it
+	// writes a plan file into ~/.claude/plans without asking.
+	ReadOnlyMode() string
 	// Prepare finds or installs what is needed to launch the harness.
 	Prepare(ctx context.Context, o Options) (Launch, error)
 }
@@ -42,6 +49,7 @@ type Options struct {
 	MCP         string   // "isolated" or "inherit" (config.MCPIsolated, config.MCPInherit)
 	Executable  string   // optional: the binary to run (see config.Harness.Executable)
 	TmpDir      string   // optional: a private TMPDIR for the child (used for Codex)
+	ReadOnly    bool     // a judge's session: the harness must not write (Claude: disallowed tools)
 }
 
 func (o Options) inherit() bool { return o.MCP == MCPInherit }
@@ -66,10 +74,10 @@ type Launch struct {
 // Adapters are installed under cacheDir.
 func Defaults(cacheDir string) []Harness {
 	return []Harness{
-		&adapted{name: "claude", mode: "default", cli: "claude", exeEnv: "CLAUDE_CODE_EXECUTABLE",
+		&adapted{name: "claude", mode: "default", roMode: "default", cli: "claude", exeEnv: "CLAUDE_CODE_EXECUTABLE",
 			pkg: "@agentclientprotocol/claude-agent-acp", version: "0.107.0", bin: "claude-agent-acp",
 			bundled: "@anthropic-ai/claude-agent-sdk-*/claude", cache: cacheDir, isolate: isolateClaude},
-		&adapted{name: "codex", mode: "workspace-write", cli: "codex", exeEnv: "CODEX_PATH",
+		&adapted{name: "codex", mode: "workspace-write", roMode: "read-only", cli: "codex", exeEnv: "CODEX_PATH",
 			pkg: "@agentclientprotocol/codex-acp", version: "2.6.0", bin: "codex-acp",
 			bundled: "@openai/codex-*/vendor/*/bin/codex", cache: cacheDir, isolate: configureCodex},
 		agy{},
@@ -89,6 +97,7 @@ func DefaultCacheDir() (string, error) {
 // its own harness binary.
 type adapted struct {
 	name, mode   string
+	roMode       string // ReadOnlyMode
 	cli          string // the harness's own CLI, for the installed version
 	exeEnv       string // the adapter's variable for running another harness binary
 	pkg, version string
@@ -101,8 +110,9 @@ type adapted struct {
 	isolate func(ctx context.Context, o Options, harnessBin string, l *Launch) error
 }
 
-func (a *adapted) Name() string { return a.name }
-func (a *adapted) Mode() string { return a.mode }
+func (a *adapted) Name() string         { return a.name }
+func (a *adapted) Mode() string         { return a.mode }
+func (a *adapted) ReadOnlyMode() string { return a.roMode }
 
 func (a *adapted) Prepare(ctx context.Context, o Options) (Launch, error) {
 	l := Launch{Adapter: a.pkg + "@" + a.version, Installed: installedVersion(ctx, a.cli), MCP: MCPIsolated}
@@ -138,11 +148,31 @@ func (a *adapted) Prepare(ctx context.Context, o Options) (Launch, error) {
 // still load: the adapter asks for user, project and local setting sources.
 func isolateClaude(_ context.Context, o Options, _ string, l *Launch) error {
 	l.ShellPrefixVar = "CLAUDE_CODE_SHELL_PREFIX"
-	if !o.inherit() {
-		l.Meta = json.RawMessage(`{"claudeCode":{"options":{"strictMcpConfig":true}}}`)
+	opts := map[string]any{}
+	if !o.inherit() || o.ReadOnly {
+		opts["strictMcpConfig"] = true // a judge never has MCP tools, even with mcp: inherit
+	}
+	if o.ReadOnly {
+		// A judge: no tool that writes, runs commands or delegates, so an
+		// allow rule in the user's or the repository's settings cannot run
+		// one without asking (which the read-only policy would deny anyway).
+		opts["disallowedTools"] = claudeActingTools
+	}
+	if len(opts) > 0 {
+		b, err := json.Marshal(map[string]any{"claudeCode": map[string]any{"options": opts}})
+		if err != nil {
+			return err
+		}
+		l.Meta = b
 	}
 	return nil
 }
+
+// claudeActingTools are Claude Code's tools that change files, run or control
+// commands, or delegate to a subagent or slash command (which could use the
+// others).
+var claudeActingTools = []string{"Bash", "BashOutput", "KillShell", "Edit", "MultiEdit", "Write", "NotebookEdit",
+	"Task", "Agent", "SlashCommand"}
 
 // configureCodex sets the child's private TMPDIR, which Codex uses as its
 // writable temp root instead of the user's, and builds CODEX_CONFIG, which
@@ -258,8 +288,9 @@ func lastLine(b []byte) string {
 // agy is Antigravity, which speaks ACP natively.
 type agy struct{}
 
-func (agy) Name() string { return "agy" }
-func (agy) Mode() string { return "default" }
+func (agy) Name() string         { return "agy" }
+func (agy) Mode() string         { return "default" }
+func (agy) ReadOnlyMode() string { return "plan" }
 
 // Prepare isolates Antigravity with a fresh --gemini-dir inside the scratch
 // folder. That hides all of ~/.gemini (MCP servers, settings, history) for

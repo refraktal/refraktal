@@ -49,6 +49,9 @@ func TestMain(m *testing.M) {
 	// which carries the helper switch for its shell prefix: check it first.
 	acptest.RunIfAgent()
 	proc.MaybeShellPrefix()
+	if len(os.Args) > 1 && os.Args[1] == fakeCheckArg {
+		os.Exit(fakeCheck(os.Args[2:]))
+	}
 	os.Exit(m.Run())
 }
 
@@ -61,8 +64,9 @@ type fake struct {
 	prefixVar            string   // the shell-prefix variable the fake harness declares
 }
 
-func (f fake) Name() string { return f.name }
-func (f fake) Mode() string { return "default" }
+func (f fake) Name() string         { return f.name }
+func (f fake) Mode() string         { return "default" }
+func (f fake) ReadOnlyMode() string { return "plan" }
 func (f fake) Prepare(_ context.Context, o harness.Options) (harness.Launch, error) {
 	if f.prepErr != nil {
 		return harness.Launch{Installed: ""}, f.prepErr
@@ -293,8 +297,9 @@ type inspectingHarness struct {
 	prepare func(harness.Options) (harness.Launch, error)
 }
 
-func (inspectingHarness) Name() string { return "claude" }
-func (inspectingHarness) Mode() string { return "default" }
+func (inspectingHarness) Name() string         { return "claude" }
+func (inspectingHarness) Mode() string         { return "default" }
+func (inspectingHarness) ReadOnlyMode() string { return "plan" }
 func (h inspectingHarness) Prepare(_ context.Context, o harness.Options) (harness.Launch, error) {
 	return h.prepare(o)
 }

@@ -375,10 +375,15 @@ process-group kill does not reach them.
   means defaults; unknown fields and bad values are errors. Only the user's
   own config is read: a repository cannot change how its children are
   isolated.
+- `checks`: per repository path (`~` allowed), `{"build": [argv],
+  "test": [argv], "timeout_mins": N}`, the commands judging runs in each
+  candidate. `judge`: `{"margin": 0.10}`.
 - Per harness (`claude`, `codex`, `agy`): `mcp` (`isolated`, the default, or
-  `inherit`) and `executable` (the CLI an adapter runs instead of its bundled
+  `inherit`), `executable` (the CLI an adapter runs instead of its bundled
   one, through `CLAUDE_CODE_EXECUTABLE` or `CODEX_PATH`, or the `agy`
-  binary).
+  binary) and `pass_env` (provider API keys this harness may receive, from
+  `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
+  `GOOGLE_API_KEY`; default none).
 
 ## Run (one harness, M3)
 
@@ -451,6 +456,128 @@ process-group kill does not reach them.
   result did not apply; 2 a budget ran out (before the turn, or `--mins`
   during it); 3 the harness could not be started or logged in.
 
+## Fan-out and judging (M6)
+
+**Fan-out** runs different harnesses, one child each, in parallel, each in a
+worktree of its own on branch `refraktal/<run id>-<harness>`.
+
+- Width: the router's choice, capped by `--fan` (`--fan 1` is one harness).
+  `--harness a,b` pins the set and skips the router. A route decision is
+  width 1; a fan-out decision runs the policy's harnesses in order; an
+  escalation runs the most probable harness (planning is M7).
+- With one candidate there is nothing to choose: it is applied as in M3, with
+  no checks or judge.
+
+Git's worktree-list commands (`worktree add`, `worktree remove`, `branch
+-D`) are serialised per repository within a run: in parallel, one can read
+another's half-written administrative folder and fail.
+
+**Budgets across children.** Each child reserves what is left divided by the
+children still to start, so parallel children split `--usd`. `--turns` and
+`--mins` belong to the whole run: every prompt counts against one `--turns`,
+and every child, check and the judge stop at the run's one deadline. The
+judge reserves what is left after the candidates settle, and its cost counts.
+Claude's reported cost is cumulative for a session: when a session gets more
+than one prompt, each turn is charged the difference from the previous report.
+Before every prompt the run-wide settled spend is checked too, so a child
+holding a reservation stops once another child's overrun has spent the run.
+Negative or non-finite usage and cost are rejected: a bad reported cost falls
+back to pricing the tokens, a negative token count is not priced (noted), and
+the ledger counts any such charge as $0.
+
+**Judging** happens when two or more candidates ended their turn normally with
+changes. In order:
+
+1. **Deterministic checks.** Each candidate's diff must apply cleanly to the
+   working tree (`git apply --check`). Then the repository's check runs in
+   the candidate's worktree. The check command comes from the config file
+   (`checks`, keyed by the repository's path), else from safe detection: a
+   makefile with a `test:` target (the first of `GNUmakefile`, `makefile`,
+   `Makefile`, as make would read, run explicitly with `make -f <file>
+   test`), a `go.mod` (`go build ./...`, then `go test ./...`), or a
+   `package.json` with a real `test` script (`npm test`). Detection reads only the base commit (the user's
+   `HEAD`), never a candidate's files, and the same command runs in every
+   candidate. When more than one kind is detected, or none, there is no check
+   (a notice says so).
+   - A candidate whose diff touches the check's own definition (any of the
+     three makefiles, `package.json`, the `go` or `toolchain` line of
+     `go.mod`, the config file when it is inside the repository, or CI files
+     under `.github/`) or the tests it runs (`*_test.go`, `test_*.py`,
+     `*_test.py`, `*.test.*`, `*.spec.*`, or anything under `test/`,
+     `tests/` or `__tests__/`) is **flagged** in the verdict and cannot win
+     on checks alone (with no check, nothing is flagged): its checks still run and a failure still rules it out, but a
+     pass counts as no check, and it can win only through the judge.
+   - Checks run untrusted candidate code, so they run like a harness child:
+     in the candidate's worktree, in a session of their own under the process
+     tracker and session sweep, inside the run's `--mins` deadline with a
+     per-check limit (`timeout_mins`, default 10); a check never starts once
+     the deadline has passed. Their environment is an allow-list and nothing
+     else: `PATH`, `HOME`, `USER`, `LANG`, `LC_*`, `TERM`, the Go, npm and
+     cargo cache variables (`GOPATH`, `GOROOT`, `GOCACHE`, `GOMODCACHE`,
+     `GOFLAGS`, `npm_config_cache`, `CARGO_HOME`, `RUSTUP_HOME`), and
+     `TMPDIR` in the candidate's run folder. Their output goes only to the run folder
+     (`<harness>/check-<name>.log`). Known limit: this is process control,
+     not a sandbox. A check can write outside its worktree or use the
+     network, exactly as the candidate harness could during its turn (the
+     permission policy is a gate, not a sandbox); containers are not in v1.
+   - Candidates that pass rank above candidates with no check (or flagged);
+     a candidate that does not apply or fails a check cannot win.
+2. **System 1 pre-score**, only when the router ran with a key (never with
+   `--harness`, which keeps task text local): one Decisions call
+   per remaining candidate, asking whether the diff correctly and completely
+   carries out the task (P(yes)). It sends the task and the diff, truncated
+   to 32 KiB with a note that it was truncated. Without a key there is no
+   pre-score: the checks alone decide, and a tie between candidates in the
+   top rank is a close call.
+3. **Harness judge**, only for a close call: the top two pre-scores are
+   within the margin (`judge.margin` in the config, default 0.10), or there
+   is no pre-score and more than one candidate shares the top rank, or the
+   leader is flagged. The judge is a harness outside the close call when one
+   is available and usable: this run's harnesses that could be started,
+   then the other configured harnesses; one that cannot be started (not
+   installed, logged out) is skipped. Only when none is left does a
+   close-call candidate judge. The verdict records the judge, whether it
+   judged its own candidate (`judged_own`, also a notice) and any judges
+   that could not be started, in `--json`, the run log and, from M7,
+   `show`. It runs in a fresh worktree of its own with its own grant,
+   read-only twice over: in a judge mode per harness, and under the
+   read-only policy, which denies every edit, command and mode switch
+   (`switch_mode`: Claude otherwise asks to leave its mode). The modes,
+   from a live probe that ordered each harness in its judge setup to write
+   a file and run `touch`: Codex `read-only` (codex-acp sends a read-only
+   sandbox; Codex asked to run the command and was denied); Antigravity
+   `plan` (it took no action; its plan file goes to its own state folder in
+   the run's scratch); Claude `default` with `disallowedTools` (`Bash`,
+   `BashOutput`, `KillShell`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`,
+   `Task`, `Agent`, `SlashCommand`) and `strictMcpConfig` (no MCP tools,
+   even with `mcp: inherit`) in the session's SDK options, so no allow rule in the user's or the repository's settings can
+   run a writing tool unasked (live, Claude then attempted no tool at all;
+   without them it asked for the edit and the command, both denied).
+   Claude's `plan` mode is not used: it writes a plan file into
+   `~/.claude/plans` without asking, and asks to leave plan mode before
+   acting. A harness whose session does not offer its judge
+   mode cannot judge. After the turn the judge's worktree must be
+   unchanged (modified, untracked and ignored files alike); if not, its
+   answer is not used, the changed paths are recorded, and the checks
+   ranking decides. Its prompt holds the task and the candidates' diffs
+   under anonymous letters. Only the final line of its reply counts, and
+   only exactly `WINNER: <letter>` or `WINNER: none`. Its worktree is never
+   collected. A judge turn that did not end normally (cancelled,
+   `max_tokens`, an ACP error) picks no winner whatever it said: the checks
+   ranking decides, with a notice (a flagged candidate cannot win that
+   way).
+
+**Outcome.** The winner is applied (checked with `git apply --check` first)
+and every worktree is removed. Nothing is ever applied once `--mins` has
+expired, for one candidate or a fan-out winner: the run is `timed_out` and
+the result stays on its branch. With `--no-apply` every candidate with
+changes stays in its worktree and the branches are printed, the winner
+marked. No winner (every candidate failed, or the judge said none or could
+not answer) exits 1 with the candidates kept. `--mins` running out during
+the candidates or the judge exits 2 (`timed_out`) with the candidates kept;
+a budget spent before the judge could start, or before every candidate
+could run, exits 2 (`budget_exhausted`), reported ahead of `no_changes`.
+
 ## Doctor
 
 - The login check is a zero-token handshake: `initialize`, `session/new` with
@@ -498,10 +625,9 @@ A System 1 decision model chooses; harnesses are System 2.
   harnesses (`claude-code` → claude, `antigravity` → agy). `refraktal` cannot
   run as a harness until M7: the next most probable harness runs, with a
   notice.
-- Until fan-out (M6), a fan-out decision runs its top harness and an
-  escalation runs the most probable harness; both are reported as notices.
-  `--harness` skips the router; `--fan 1` forces one harness; wider `--fan` is
-  refused until M6. `--dry` routes and plans only (exit 0): no worktree, no
+- A fan-out decision runs its harnesses (see Fan-out and judging); an
+  escalation runs the most probable harness until planning (M7), with a
+  notice. `--harness` skips the router; `--fan N` caps the width. `--dry` routes and plans only (exit 0): no worktree, no
   harness.
 - The key comes from `GEMINI_API_KEY` in the environment, else the
   repository's `.env` only if git confirms a work tree and tracks no path
@@ -521,9 +647,14 @@ A System 1 decision model chooses; harnesses are System 2.
   provider's error body never reaches notices, output, records or doctor:
   only the HTTP status and a short digest.
 - **No API key reaches a subprocess.** Every harness child and every tool
-  runs without `GEMINI_API_KEY` or `GOOGLE_API_KEY` (so nothing silently
-  bills a key instead of the subscription), and Refraktal's git commands run
-  without them and without `GIT_*` variables, with fsmonitor and hooks off.
+  runs without `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or
+  `GOOGLE_API_KEY` (so no harness silently bills an API key instead of the
+  user's subscription); a harness's `pass_env` in the config opts it in to a
+  named key. Refraktal's git commands run without them and without `GIT_*`
+  variables, with fsmonitor and hooks off, and ignore replacement refs
+  (`--no-replace-objects`, `GIT_NO_REPLACE_OBJECTS=1`): a child shares the
+  repository's `.git` and could otherwise `git replace` the pinned base so
+  Refraktal reads a stub.
   Worktree and safegit share one sanitized environment through `proc.ScrubEnv`
   and the full static protections; driver-capable commands also share driver
   neutralisation and before/after checks, while `rev-parse`, `ls-files` and

@@ -39,7 +39,10 @@ func Env() []string {
 }
 
 // safe are the options every Refraktal git command runs with.
-var safe = []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "diff.external=",
+// --no-replace-objects: a child shares the repository's .git and could add
+// replacement refs (git replace <base> <stub>) that make Refraktal read a
+// different commit, tree or file than the one it pinned.
+var safe = []string{"--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "diff.external=",
 	"-c", "core.pager=cat", "-c", "core.sshCommand=false",
 	"-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false"}
 
@@ -50,7 +53,7 @@ func command(ctx context.Context, dir, gitDir string, args ...string) *exec.Cmd 
 	}
 	full = append(append(full, safe...), args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
-	cmd.Env = append(Env(), "GIT_TERMINAL_PROMPT=0",
+	cmd.Env = append(Env(), "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1",
 		"GIT_AUTHOR_NAME=Refraktal", "GIT_AUTHOR_EMAIL=refraktal@localhost",
 		"GIT_COMMITTER_NAME=Refraktal", "GIT_COMMITTER_EMAIL=refraktal@localhost")
 	return cmd

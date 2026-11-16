@@ -36,6 +36,9 @@ type sessionSpec struct {
 	prefixExe string
 	log       *runlog.Log
 	timeout   time.Duration // for initialize, session/new and set_mode
+	// readOnly sets the harness's own read-only mode instead of its usual
+	// one (a judge); a harness that does not offer it fails to open.
+	readOnly bool
 
 	onPermission func(context.Context, acp.PermissionRequest) string
 	onUpdate     func(acp.Update)
@@ -69,7 +72,7 @@ func openSession(ctx context.Context, sp sessionSpec) (*session, error) {
 	}
 	var err error
 	s.launch, err = sp.h.Prepare(ctx, harness.Options{Scratch: sp.scratch, ScratchRoot: sp.scratchRoot, Cwd: sp.cwd, MCP: sp.hcfg.MCP,
-		Executable: sp.hcfg.Executable, TmpDir: sp.tmpDir})
+		Executable: sp.hcfg.Executable, TmpDir: sp.tmpDir, ReadOnly: sp.readOnly})
 	if err != nil {
 		return s, &openError{StatusUnavailable, err}
 	}
@@ -128,8 +131,15 @@ func openSession(ctx context.Context, sp sessionSpec) (*session, error) {
 		return s, &openError{StatusError, err}
 	}
 	s.id, s.model = ses.ID, ses.Model()
-	if err := s.client.SetMode(hctx, s.id, sp.h.Mode()); err != nil {
-		return s, &openError{StatusError, fmt.Errorf("mode %s: %w", sp.h.Mode(), err)}
+	mode := sp.h.Mode()
+	if sp.readOnly {
+		mode = sp.h.ReadOnlyMode()
+		if !offers(ses, mode) {
+			return s, &openError{StatusUnavailable, fmt.Errorf("%s does not offer its read-only mode %q", sp.h.Name(), mode)}
+		}
+	}
+	if err := s.client.SetMode(hctx, s.id, mode); err != nil {
+		return s, &openError{StatusError, fmt.Errorf("mode %s: %w", mode, err)}
 	}
 	return s, nil
 }
@@ -159,6 +169,19 @@ func shutdownCounts(r proc.ShutdownReport) (alive, unknown int) {
 		}
 	}
 	return len(a), len(u)
+}
+
+// offers reports whether session/new listed the mode.
+func offers(ses acp.Session, mode string) bool {
+	if mode == "" || ses.Modes == nil {
+		return false
+	}
+	for _, m := range ses.Modes.Available {
+		if m.ID == mode {
+			return true
+		}
+	}
+	return false
 }
 
 func statusOf(err error) string {

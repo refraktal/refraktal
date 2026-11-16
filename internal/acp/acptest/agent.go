@@ -27,6 +27,16 @@
 //	          cwd, write ../outside.txt, and run git push (simulated: it writes
 //	          pushed.txt in the cwd); then end_turn
 //
+// In turn mode, ACPTEST_WRITE ("path=content|...") writes files in the cwd,
+// each after an edit permission request it must be allowed. A prompt that
+// starts "You are judging" is answered with ACPTEST_JUDGE when set: the reply
+// text, or "hang" to wait for session/cancel; "stop=<reason>\n<text>" ends
+// the turn with that stop reason, and stop=error with an ACP error.
+//
+// session/new offers the modes in ACPTEST_MODES (comma-separated; default
+// "default,plan,read-only"), and session/set_mode appends the mode set to
+// ACPTEST_PROMPTS plus ".modes".
+//
 // session/new reports the model in ACPTEST_MODEL (default fake-model). With
 // ACPTEST_NOCOST set, the turn reports tokens but no cost, as Codex and
 // Antigravity do. In hang mode the cancelled response carries usage for a
@@ -188,7 +198,7 @@ func (a *agent) handle(m message, line string) {
 		a.cwd = p.Cwd
 		if f := os.Getenv("ACPTEST_PROMPTS"); f != "" { // the shell-prefix variables this agent was given, for tests
 			os.WriteFile(f+".env", []byte("prefix="+os.Getenv("CLAUDE_CODE_SHELL_PREFIX")+" helper="+os.Getenv("REFRAKTAL_HELPER")+
-				" nest="+os.Getenv("REFRAKTAL_NEST")+"\n"), 0o600)
+				" nest="+os.Getenv("REFRAKTAL_NEST")+" keys="+keysSet()+"\n"), 0o600)
 		}
 		if f := os.Getenv("ACPTEST_PROMPTS"); f != "" { // also record each session folder, for tests
 			if fh, err := os.OpenFile(f+".cwd", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err == nil {
@@ -200,13 +210,27 @@ func (a *agent) handle(m message, line string) {
 		if model == "" {
 			model = "fake-model"
 		}
+		modes := []obj{}
+		for _, id := range strings.Split(cmpOr(os.Getenv("ACPTEST_MODES"), "default,plan,read-only"), ",") {
+			modes = append(modes, obj{"id": id, "name": id})
+		}
 		a.send(message{ID: m.ID, Result: obj{"sessionId": "fake-1",
-			"modes":         obj{"currentModeId": "default", "availableModes": []obj{{"id": "default", "name": "Default"}}},
+			"modes":         obj{"currentModeId": "default", "availableModes": modes},
 			"configOptions": []obj{{"id": "model", "category": "model", "currentValue": model}}}})
 		a.update(obj{"sessionUpdate": "available_commands_update", "availableCommands": []obj{{"name": "review", "description": "Review"}}})
 	case "session/set_mode":
+		var p struct {
+			ModeID string `json:"modeId"`
+		}
+		json.Unmarshal(m.Params, &p)
+		if f := os.Getenv("ACPTEST_PROMPTS"); f != "" { // record each mode set, for tests
+			if fh, err := os.OpenFile(f+".modes", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err == nil {
+				fh.WriteString(p.ModeID + "\n")
+				fh.Close()
+			}
+		}
 		a.send(message{ID: m.ID, Result: obj{}})
-		a.update(obj{"sessionUpdate": "current_mode_update", "currentModeId": "default"})
+		a.update(obj{"sessionUpdate": "current_mode_update", "currentModeId": p.ModeID})
 	case "session/prompt":
 		if a.mode == "bigframe" { // writes past the frame limit without a newline, then waits
 			chunk := make([]byte, 1<<20)
@@ -229,6 +253,17 @@ func (a *agent) handle(m message, line string) {
 				fh.WriteString("prompt\n")
 				fh.Close()
 			}
+		}
+		var pp struct {
+			Prompt []struct {
+				Text string `json:"text"`
+			} `json:"prompt"`
+		}
+		json.Unmarshal(m.Params, &pp)
+		judging := len(pp.Prompt) > 0 && strings.HasPrefix(pp.Prompt[0].Text, "You are judging")
+		if j := os.Getenv("ACPTEST_JUDGE"); judging && j != "" {
+			go a.judge(m.ID, j)
+			return
 		}
 		go a.prompt(m.ID)
 	case "session/cancel":
@@ -307,6 +342,7 @@ func (a *agent) prompt(id json.RawMessage) {
 		return
 	}
 	a.chunk("Hello")
+	a.writes()
 	a.update(obj{"sessionUpdate": "usage_update", "used": 1200, "size": 200000})
 	a.update(obj{"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Write note.txt", "kind": "edit", "status": "pending"})
 	a.chunk(" permission=" + a.permission())
@@ -321,6 +357,55 @@ func (a *agent) prompt(id json.RawMessage) {
 		"usage": obj{"totalTokens": 1500, "inputTokens": 1400, "outputTokens": 100, "cachedReadTokens": 1000}}})
 }
 
+// writes performs ACPTEST_WRITE ("path=content|path=content"), each only if
+// an edit permission for it is allowed.
+func (a *agent) writes() {
+	w := os.Getenv("ACPTEST_WRITE")
+	if w == "" {
+		return
+	}
+	for i, kv := range strings.Split(w, "|") {
+		path, content, _ := strings.Cut(kv, "=")
+		full := filepath.Join(a.cwd, path)
+		tool := obj{"toolCallId": fmt.Sprintf("e%d", i), "kind": "edit", "title": "Write " + path,
+			"rawInput": obj{"file_path": full, "content": content}, "locations": []obj{{"path": full}}}
+		answer := a.ask("session/request_permission", obj{"toolCall": tool, "options": []obj{
+			{"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+			{"optionId": "reject", "name": "Reject", "kind": "reject_once"}}})
+		if strings.Contains(answer, `"optionId":"allow"`) {
+			os.MkdirAll(filepath.Dir(full), 0o755)
+			os.WriteFile(full, []byte(content+"\n"), 0o644)
+		}
+	}
+}
+
+// judge answers a judging prompt: "hang" waits for session/cancel; anything
+// else is the reply. It tries ACPTEST_WRITE first, which a read-only judge
+// must be denied.
+func (a *agent) judge(id json.RawMessage, reply string) {
+	a.writes()
+	if f := os.Getenv("ACPTEST_JUDGE_RAWWRITE"); f != "" { // writes without asking: a sandbox that failed
+		os.WriteFile(filepath.Join(a.cwd, f), []byte("judge was here\n"), 0o644)
+	}
+	if reply == "hang" {
+		a.chunk("thinking")
+		<-a.cancel
+		a.send(message{ID: id, Result: obj{"stopReason": "cancelled"}})
+		return
+	}
+	stop := "end_turn"
+	if rest, ok := strings.CutPrefix(reply, "stop="); ok { // "stop=<reason>\n<reply>"
+		stop, reply, _ = strings.Cut(rest, "\n")
+	}
+	a.chunk(reply)
+	if stop == "error" {
+		a.send(message{ID: id, Error: obj{"code": -32603, "message": "internal error"}})
+		return
+	}
+	a.update(obj{"sessionUpdate": "usage_update", "used": 700, "size": 200000, "cost": obj{"amount": 0.002, "currency": "USD"}})
+	a.send(message{ID: id, Result: obj{"stopReason": stop, "usage": obj{"totalTokens": 700, "inputTokens": 600, "outputTokens": 100}}})
+}
+
 func (a *agent) permission() string {
 	return a.ask("session/request_permission", obj{
 		"toolCall": obj{"toolCallId": "t1"},
@@ -329,4 +414,22 @@ func (a *agent) permission() string {
 			{"optionId": "once", "name": "Allow", "kind": "allow_once"},
 			{"optionId": "no", "name": "Reject", "kind": "reject_once"},
 		}})
+}
+
+// keysSet names the provider API keys present in the agent's environment.
+func keysSet() string {
+	var set []string
+	for _, k := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"} {
+		if os.Getenv(k) != "" {
+			set = append(set, k)
+		}
+	}
+	return strings.Join(set, ",")
+}
+
+func cmpOr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }

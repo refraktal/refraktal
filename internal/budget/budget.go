@@ -15,6 +15,7 @@ package budget
 import (
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"time"
 )
@@ -116,17 +117,39 @@ func New(l Limits, now func() time.Time) (*Ledger, error) {
 func (l *Ledger) Deadline() time.Time { return l.deadline }
 
 // Reserve grants a child everything that is left.
-func (l *Ledger) Reserve() (Grant, error) {
+func (l *Ledger) Reserve() (Grant, error) { return l.ReserveShare(1) }
+
+// Check reports whether a child could be granted anything now.
+func (l *Ledger) Check() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.check(l.lim.USD - l.spent - l.reserved)
+}
+
+func (l *Ledger) check(usd float64) error {
+	switch {
+	case !l.now().Before(l.deadline):
+		return &Exhausted{"mins"}
+	case l.turns >= l.lim.Turns:
+		return &Exhausted{"turns"}
+	case usd <= 0:
+		return &Exhausted{"usd"}
+	}
+	return nil
+}
+
+// ReserveShare grants a child what is left divided by n, the children still
+// to start (this one included), so children started in parallel split it.
+// --turns and --mins are not split: they belong to the whole run.
+func (l *Ledger) ReserveShare(n int) (Grant, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	usd := l.lim.USD - l.spent - l.reserved
-	switch {
-	case !l.now().Before(l.deadline):
-		return Grant{}, &Exhausted{"mins"}
-	case l.turns >= l.lim.Turns:
-		return Grant{}, &Exhausted{"turns"}
-	case usd <= 0:
-		return Grant{}, &Exhausted{"usd"}
+	if err := l.check(usd); err != nil {
+		return Grant{}, err
+	}
+	if n > 1 {
+		usd /= float64(n)
 	}
 	l.nextID++
 	g := Grant{ID: l.nextID, USD: usd, Turns: l.lim.Turns - l.turns, Deadline: l.deadline, Depth: l.lim.Depth - 1}
@@ -150,6 +173,10 @@ func (l *Ledger) BeginTurn(g Grant) error {
 		return &Exhausted{"turns"}
 	case st.spent >= g.USD:
 		return &Exhausted{"usd"}
+	case l.spent+st.spent >= l.lim.USD:
+		// The run as a whole is spent (another child overran): a held
+		// reservation does not keep this child going.
+		return &Exhausted{"usd"}
 	}
 	l.turns++
 	return nil
@@ -160,6 +187,11 @@ func (l *Ledger) BeginTurn(g Grant) error {
 func (l *Ledger) Charge(g Grant, c Charge) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if math.IsNaN(c.USD) || math.IsInf(c.USD, 0) || c.USD < 0 {
+		// Never lower or poison spend: a bad figure counts as $0, flagged.
+		c.Note = strings.TrimPrefix(c.Note+"; invalid amount counted as $0", "; ")
+		c.USD = 0
+	}
 	l.charges = append(l.charges, c)
 	if st := l.grants[g.ID]; st != nil && c.Source != Estimated {
 		st.spent += c.USD

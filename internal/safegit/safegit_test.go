@@ -26,6 +26,9 @@ func TestCommandStaticProtections(t *testing.T) {
 				t.Fatal(err)
 			}
 			args := strings.Split(strings.TrimSpace(string(out)), "\n")
+			if !slices.Contains(args, "--no-replace-objects") {
+				t.Errorf("missing --no-replace-objects in %q", args)
+			}
 			for _, setting := range []string{
 				"core.hooksPath=/dev/null", "core.fsmonitor=false", "core.pager=cat",
 				"core.sshCommand=false", "diff.external=", "commit.gpgSign=false", "tag.gpgSign=false",
