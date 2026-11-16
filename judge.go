@@ -35,7 +35,19 @@ type CheckResult struct {
 	Exit   int    `json:"exit"`
 	MS     int64  `json:"ms"`
 	Swept  int    `json:"swept,omitempty"` // processes the session sweep killed afterwards
+	// LeftRunning and Unknown count the check's processes still running, or
+	// whose exit could not be confirmed, after its cleanup; its live record
+	// is then kept for a retry. CleanupFailed: the cleanup reported an error
+	// (its raw text goes only to the notices, never to the run log).
+	LeftRunning   int  `json:"left_running"`
+	Unknown       int  `json:"unknown"`
+	CleanupFailed bool `json:"cleanup_failed,omitempty"`
+	cleanupErr    string
 }
+
+// testCheckShutdown, when set, edits a check's shutdown report: a seam for
+// tests to simulate a survivor without defeating the real kill.
+var testCheckShutdown func(*proc.ShutdownReport)
 
 // checkStep is one command to run in each candidate.
 type checkStep struct {
@@ -213,7 +225,8 @@ func goModToolchainChanged(diff []byte) bool {
 // session sweep, no GIT_* variables or API keys, stopped at the deadline.
 // Its environment is env (checkEnv: an allow-list, nothing else). Its output
 // goes to logName in logRoot, the candidate's pinned folder in the run
-// folder.
+// folder. Its cleanup is reported as a candidate's is (left_running, unknown,
+// cleanup_failed); the caller makes the notice.
 func runCheck(ctx context.Context, dir string, env []string, logRoot *os.Root, logName, liveDir string, labels map[string]string, s checkStep, limit time.Duration) CheckResult {
 	r := CheckResult{Name: s.Name, Exit: -1}
 	start := time.Now()
@@ -251,8 +264,13 @@ func runCheck(ctx context.Context, dir string, env []string, logRoot *os.Root, l
 		timedOut = true
 	}
 	sr := c.Shutdown(2 * time.Second)
+	if testCheckShutdown != nil {
+		testCheckShutdown(&sr)
+	}
 	<-copied
 	r.Exit, r.MS, r.Swept = c.ExitCode(), time.Since(start).Milliseconds(), len(sr.Swept.Killed)
+	r.LeftRunning, r.Unknown = shutdownCounts(sr)
+	r.CleanupFailed, r.cleanupErr = sr.Err != "", sr.Err
 	switch {
 	case timedOut:
 		r.Status = CheckTimedOut
@@ -262,6 +280,24 @@ func runCheck(ctx context.Context, dir string, env []string, logRoot *os.Root, l
 		r.Status = CheckFailed
 	}
 	return r
+}
+
+// cleanupNotice is the notice for a check whose cleanup was incomplete or
+// failed, raw (with the error) and safe; ok is false when there is none.
+func (r CheckResult) cleanupNotice(harness string) (raw, safe string, ok bool) {
+	if r.LeftRunning == 0 && r.Unknown == 0 && !r.CleanupFailed {
+		return "", "", false
+	}
+	safe = fmt.Sprintf("%s check %s: cleanup incomplete: %d still running, %d unknown", harness, r.Name, r.LeftRunning, r.Unknown)
+	if r.CleanupFailed {
+		safe += ", cleanup error"
+	}
+	safe += "; live record kept for retry"
+	raw = safe
+	if r.cleanupErr != "" {
+		raw += " (" + r.cleanupErr + ")"
+	}
+	return raw, safe, true
 }
 
 // checkVars are the variables a check inherits; LC_* too. Everything else

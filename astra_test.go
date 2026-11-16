@@ -11,6 +11,7 @@ import (
 
 	"refraktal.dev/refraktal/internal/budget"
 	"refraktal.dev/refraktal/internal/harness"
+	"refraktal.dev/refraktal/internal/proc"
 )
 
 // lockIndex makes the next collect in dir fail, as a stale index.lock does:
@@ -209,5 +210,64 @@ func TestNestedTestDefinitionsAreFlagged(t *testing.T) {
 	nested := []byte("diff --git a/tools/go.mod b/tools/go.mod\n--- a/tools/go.mod\n+++ b/tools/go.mod\n@@ -1 +1 @@\n-go 1.24\n+go 1.26\n")
 	if why := p.touchesDefinition([]string{"tools/go.mod"}, nested); why == "" {
 		t.Error("a nested go.mod's go line change was not flagged")
+	}
+}
+
+// A check whose cleanup leaves a process running (or unconfirmed), or whose
+// cleanup errors, is reported as a candidate's is: counts on the check
+// result and in the checked event, shown by show, the raw error only in the
+// raw notice. The seam edits the shutdown report; the real kill still runs.
+func TestCheckCleanupIsReported(t *testing.T) {
+	const secret = "/private/secret-home/live/1-2.json.tmp"
+	testCheckShutdown = func(sr *proc.ShutdownReport) {
+		sr.Swept.Alive = append(sr.Swept.Alive, proc.Proc{PID: 1 << 30, Start: "x"})
+		sr.Kill.Unknown = append(sr.Kill.Unknown, proc.Proc{PID: 1<<30 + 1, Start: "y"})
+		sr.Err = "rename " + secret + ": no such file or directory"
+	}
+	defer func() { testCheckShutdown = nil }()
+	r := newRunRig(t)
+	r.checkConfig(t, "")
+	var safe []string
+	res := r.fan(t, []harness.Harness{writer("claude", "out.txt=good"), writer("codex", "out.txt=bad")},
+		func(o *RunOptions) { o.OnSafeNotice = func(n string) { safe = append(safe, n) } })
+	c := cand(res, "claude")
+	if len(c.Checks) == 0 || c.Checks[0].LeftRunning != 1 || c.Checks[0].Unknown != 1 || !c.Checks[0].CleanupFailed {
+		t.Fatalf("the check's incomplete cleanup was not reported: %+v", c.Checks)
+	}
+	events, _ := os.ReadFile(filepath.Join(r.repo, res.Run, "events.jsonl"))
+	if strings.Contains(string(events), secret) {
+		t.Error("the raw cleanup error reached the run log")
+	}
+	seen := false
+	for _, l := range strings.Split(string(events), "\n") {
+		var e struct {
+			Event, Harness string
+			Checks         []CheckResult
+		}
+		json.Unmarshal([]byte(l), &e)
+		if e.Event == "checked" && e.Harness == "claude" && len(e.Checks) > 0 &&
+			e.Checks[0].LeftRunning == 1 && e.Checks[0].Unknown == 1 && e.Checks[0].CleanupFailed {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Errorf("the checked event does not carry the cleanup counts:\n%s", events)
+	}
+	raw := strings.Join(res.Notices, "\n")
+	if !strings.Contains(raw, secret) || !strings.Contains(raw, "claude check test") {
+		t.Errorf("the raw notice is missing the cleanup error: %q", res.Notices)
+	}
+	sj := strings.Join(safe, "\n")
+	if strings.Contains(sj, secret) || !strings.Contains(sj, "claude check test: cleanup incomplete") {
+		t.Errorf("the safe notice is wrong: %q", safe)
+	}
+	sr, err := Show(r.repo, filepath.Base(res.Run))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text strings.Builder
+	WriteShowText(&text, sr)
+	if !strings.Contains(text.String(), "check test: 1 still running, 1 unknown, cleanup error") {
+		t.Errorf("show does not print the check's cleanup:\n%s", text.String())
 	}
 }

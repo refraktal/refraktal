@@ -65,6 +65,8 @@ type ShowChild struct {
 	Judge   bool     `json:"judge,omitempty"`
 	Files   []string `json:"files,omitempty"`
 	Turns   int      `json:"child_turns,omitempty"` // prompts a child Refraktal sent
+	// Cleanup: one line per check whose cleanup was incomplete or failed.
+	Cleanup []string `json:"check_cleanup,omitempty"`
 }
 
 // ShowCosts are the run's actual spend, retained reservations and turns.
@@ -343,6 +345,32 @@ func readRun(d *os.Root, name, dir string, depth int, w *walk) (ShowRun, error) 
 			}
 		case "checks":
 			r.Checks = str("source")
+		case "checked":
+			var checks []CheckResult
+			json.Unmarshal(e["checks"], &checks)
+			var lines []string
+			for _, ck := range checks {
+				if ck.LeftRunning == 0 && ck.Unknown == 0 && !ck.CleanupFailed {
+					continue
+				}
+				l := fmt.Sprintf("check %s: %d still running, %d unknown", clean(ck.Name), ck.LeftRunning, ck.Unknown)
+				if ck.CleanupFailed {
+					l += ", cleanup error"
+				}
+				lines = append(lines, l)
+			}
+			if len(lines) == 0 {
+				break
+			}
+			h, found := str("harness"), false
+			for i := range r.Child {
+				if !r.Child[i].Judge && r.Child[i].Harness == h {
+					r.Child[i].Cleanup, found = append(r.Child[i].Cleanup, lines...), true
+				}
+			}
+			if !found {
+				r.Child = append(r.Child, ShowChild{Harness: h, Cleanup: lines})
+			}
 		case "verdict":
 			json.Unmarshal(e["verdict"], &r.Verdict)
 			cleanMap(r.Verdict)
@@ -465,6 +493,7 @@ func mergeChildren(cs []ShowChild) []ShowChild {
 			if c.Turns > 0 {
 				out[i].Turns = c.Turns
 			}
+			out[i].Cleanup = append(out[i].Cleanup, c.Cleanup...)
 			continue
 		}
 		idx[key] = len(out)
@@ -542,6 +571,9 @@ func writeShow(w io.Writer, r ShowRun, in string) {
 			fmt.Fprintf(w, ", %d prompts in its own run", c.Turns)
 		}
 		fmt.Fprintln(w)
+		for _, l := range c.Cleanup {
+			fmt.Fprintf(w, "%s  %s; live record kept\n", in2, l)
+		}
 	}
 	if r.Checks != "" {
 		fmt.Fprintf(w, "%schecks: %s\n", in2, r.Checks)

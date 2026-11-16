@@ -628,6 +628,9 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 				r := runCheck(cctx, c.wt.Dir, env, c.root, "check-"+s.Name+".log", e.o.LiveDir,
 					map[string]string{"run": e.run.ID, "harness": c.Harness, "check": s.Name}, s, plan.Timeout)
 				c.Checks = append(c.Checks, r)
+				if raw, safe, ok := r.cleanupNotice(c.Harness); ok {
+					e.rawNotice(raw, safe)
+				}
 				if r.Status != CheckPassed {
 					break
 				}

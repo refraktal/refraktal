@@ -550,7 +550,14 @@ changes. In order:
      cargo cache variables (`GOPATH`, `GOROOT`, `GOCACHE`, `GOMODCACHE`,
      `GOFLAGS`, `npm_config_cache`, `CARGO_HOME`, `RUSTUP_HOME`), and
      `TMPDIR` in the candidate's run folder. Their output goes only to the run folder
-     (`<harness>/check-<name>.log`). Known limit: this is process control,
+     (`<harness>/check-<name>.log`). A check's cleanup is reported as a
+     candidate's is: each check result carries `left_running` and `unknown`
+     (processes still running, or whose exit could not be confirmed, after
+     its shutdown) and `cleanup_failed`, in the result and the `checked`
+     event, and `show` prints them under the candidate. Any of them makes a
+     notice and keeps the live record for a retry; the raw cleanup error
+     appears only in the raw notice, never in the run log or a safe notice.
+     Known limit: this is process control,
      not a sandbox. A check can write outside its worktree or use the
      network, exactly as the candidate harness could during its turn (the
      permission policy is a gate, not a sandbox); containers are not in v1.
