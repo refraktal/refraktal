@@ -70,9 +70,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 }
 
 // budgetFlags adds --usd, --turns, --mins and --depth to fs.
-func budgetFlags(fs *flag.FlagSet) func() (budget.Limits, error) {
+func budgetFlags(fs *flag.FlagSet, usdHelp string) func() (budget.Limits, error) {
 	d := budget.Defaults
-	usd := fs.Float64("usd", d.USD, "dollars (notional on subscriptions) the run may charge")
+	usd := fs.Float64("usd", d.USD, usdHelp)
 	turns := fs.Int("turns", d.Turns, "prompts Refraktal may send to harnesses")
 	mins := fs.Float64("mins", d.Wall.Minutes(), "wall-clock minutes; never unlimited")
 	depth := fs.Int("depth", d.Depth, "levels of Refraktal that may nest below this run")
@@ -94,7 +94,7 @@ func budgetFlags(fs *flag.FlagSet) func() (budget.Limits, error) {
 func acpCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("acp", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	limits := budgetFlags(fs)
+	limits := budgetFlags(fs, "dollars (notional on subscriptions) the run may charge")
 	if err := fs.Parse(args); err != nil {
 		return refraktal.ExitNothingUsable
 	}
@@ -189,27 +189,18 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 	asJSON := fs.Bool("json", false, "JSONL on stdout")
 	fan := fs.Int("fan", 0, "cap the router's fan-out width (1: one harness; 0: no cap)")
 	dry := fs.Bool("dry", false, "plan and route only: no worktree, no harness")
-	d := budget.Defaults
-	usd := fs.Float64("usd", d.USD, "dollar budget, checked before each turn (notional on subscriptions)")
-	turns := fs.Int("turns", d.Turns, "prompts Refraktal may send to harnesses")
-	mins := fs.Float64("mins", d.Wall.Minutes(), "wall-clock minutes; never unlimited")
-	depth := fs.Int("depth", d.Depth, "levels of Refraktal that may nest below this run")
+	limits := budgetFlags(fs, "dollar budget, checked before each turn (notional on subscriptions)")
 	words, err := parseTaskArgs(fs, args)
 	if err != nil {
 		return refraktal.ExitNothingUsable
 	}
-	switch {
-	case *fan < 0:
+	if *fan < 0 {
 		fmt.Fprintln(stderr, "refraktal run: --fan must not be negative")
 		return refraktal.ExitNothingUsable
-	case math.IsNaN(*usd) || math.IsInf(*usd, 0) || math.IsNaN(*mins) || math.IsInf(*mins, 0):
-		fmt.Fprintln(stderr, "refraktal run: --usd and --mins must be finite numbers")
-		return refraktal.ExitNothingUsable
-	case *mins > budget.MaxWall.Minutes():
-		fmt.Fprintf(stderr, "refraktal run: --mins must be at most %.0f\n", budget.MaxWall.Minutes())
-		return refraktal.ExitNothingUsable
-	case *usd < 0 || *turns < 0 || *mins <= 0:
-		fmt.Fprintln(stderr, "refraktal run: --usd and --turns must not be negative, and --mins must be more than 0")
+	}
+	lim, err := limits()
+	if err != nil {
+		fmt.Fprintf(stderr, "refraktal run: %v\n", err)
 		return refraktal.ExitNothingUsable
 	}
 	task, err := readTask(ctx, words, stdin)
@@ -221,7 +212,6 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 		return refraktal.ExitNothingUsable
 	}
 	enc := json.NewEncoder(stdout)
-	lim := budget.Limits{USD: *usd, Turns: *turns, Wall: time.Duration(*mins * float64(time.Minute)), Depth: *depth}
 	res, err := refraktal.Run(ctx, refraktal.RunOptions{Task: task, Harness: *harnessName, NoApply: *noApply, Budget: &lim,
 		Dry: *dry, Fan: *fan,
 		ShellPrefix: selfPath(), Self: selfPath(),
