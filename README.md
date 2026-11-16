@@ -67,9 +67,11 @@ Exit codes: 0 applied (or kept with `--no-apply`), 1 no candidate passed, 2 a
 budget ran out, 3 nothing usable.
 
 **Budgets.** `--usd` is checked before each turn, never inside one (no harness
-reports cost mid-turn). So a single-harness run can exceed a tiny `--usd` by
-that one turn: it still exits 0, and the overrun is reported. `--mins` is the
-only hard stop inside a turn. The [guide](docs/GUIDE.md#budgets) has the
+reports cost mid-turn). So each running harness can exceed its share of
+`--usd` by at most its final turn's cost: a single-harness run by one turn, a
+fan-out of N candidates by up to N final turns (plus the judge's). The run
+still exits as it would, and each overrun is reported. `--mins` is the only
+hard stop inside a turn. The [guide](docs/GUIDE.md#budgets) has the
 details.
 
 ## Commands

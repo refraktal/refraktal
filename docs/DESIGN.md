@@ -82,7 +82,12 @@ cancels and exits 2 (`timed_out`).
 - **`--turns`** counts prompts Refraktal sends to harnesses, across the tree.
   Not an agent's internal iterations.
 - **`--usd`** is checked before each turn starts, never inside one: no harness
-  reports cost mid-turn.
+  reports cost mid-turn. So each grant (each running harness: a candidate,
+  the judge, a child Refraktal's own harnesses within its grant) can cross
+  its share once, by its final turn's cost. The run-wide bound is
+  spent + reserved <= `--usd` + the sum of each grant's final-turn overrun:
+  a fan-out of N candidates can exceed `--usd` by up to N final turns (plus
+  the judge's), never by "one turn" for the whole run.
   - Claude reports a cumulative session cost: a turn's cost is the new figure
     minus the previous one.
   - Codex and Antigravity report tokens only, per turn, on the prompt
@@ -508,6 +513,9 @@ Claude's reported cost is cumulative for a session: when a session gets more
 than one prompt, each turn is charged the difference from the previous report.
 Before every prompt the run-wide settled spend is checked too, so a child
 holding a reservation stops once another child's overrun has spent the run.
+That check bounds new turns, not ones already running: parallel children
+each cross their share by at most their final turn, so the overruns add (see
+`--usd` above).
 Negative or non-finite usage and cost are rejected: a bad reported cost falls
 back to pricing the tokens, a negative token count is not priced (noted), and
 the ledger counts any such charge as $0.

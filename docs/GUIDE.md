@@ -40,16 +40,21 @@ Harness names are `claude`, `codex`, `agy` and `refraktal`.
 
 | Flag | Budget | Default |
 |---|---|---|
-| `--usd N` | dollars the run may charge. On subscriptions they are notional: a budget unit, not a bill. Checked before each turn, never inside one (no harness reports cost mid-turn), so a turn can overrun; the overrun is reported. | 10 |
+| `--usd N` | dollars the run may charge. On subscriptions they are notional: a budget unit, not a bill. Checked before each turn, never inside one (no harness reports cost mid-turn), so each running harness can exceed its share by at most its final turn's cost; overruns are reported. | 10 |
 | `--turns N` | prompts Refraktal sends to harnesses, across the whole tree (a child Refraktal's prompts count) | 20 |
 | `--mins N` | wall-clock minutes for the whole run, setup included. The only hard stop inside a turn: when it runs out, the turn is cancelled, the harness shut down, and its process tree killed. Never unlimited; at most 1440. | 30 |
 | `--depth N` | how many levels of Refraktal may nest below this run | 2 |
 
-Because `--usd` is checked only before a turn, a single-harness run with a
-tiny `--usd` (say `--usd 0.0001`) still runs its one turn, exits 0 and
-reports the overrun; `--usd 0` refuses to start (exit 2). With several
-candidates, the turns they start can overrun the same way, and a judge that
-then finds the budget spent cannot start (exit 2, the candidates kept).
+Because `--usd` is checked only before a turn, each running harness can
+exceed its share by at most its final turn's cost. A single-harness run with
+a tiny `--usd` (say `--usd 0.0001`) still runs its one turn, exits 0 and
+reports the overrun; `--usd 0` refuses to start (exit 2). There is no single
+one-turn bound for a whole run: parallel candidates each hold a share and
+each can cross it once, so a fan-out of N candidates can exceed `--usd` by up
+to N final turns, plus the judge's final turn if it starts. A judge that
+finds the budget already spent cannot start (exit 2, the candidates kept).
+A child Refraktal's harnesses do the same within its grant, so the overruns
+add up down the tree.
 
 Each budget only shrinks down the tree. Parallel candidates split `--usd`
 and `--turns`: each takes what is left divided by the children still to

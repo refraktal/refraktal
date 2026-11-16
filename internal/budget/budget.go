@@ -3,7 +3,10 @@
 //
 //   - A child is granted at most what is left: a live child holds its whole
 //     grant, and a finished child returns what it did not spend.
-//   - --usd is checked before each turn, never inside one.
+//   - --usd is checked before each turn, never inside one, so each grant can
+//     cross its share once, by its final turn's cost: spent + reserved <=
+//     --usd + the sum of each grant's final-turn overrun (N parallel
+//     children: up to N final turns), not one turn for the whole run.
 //   - --turns counts prompts sent to harnesses.
 //   - --mins is wall-clock time from the start of the run.
 //   - --depth is how many more levels of Refraktal may nest below this one;
