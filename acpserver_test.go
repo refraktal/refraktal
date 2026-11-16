@@ -220,9 +220,39 @@ func TestServeACPCancel(t *testing.T) {
 	c := serve(t, r.serveOptions(fake{name: "agy", agentMode: "hang"}, nil), u.add)
 	id := open(t, c, r.repo)
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { time.Sleep(1500 * time.Millisecond); cancel() }()
+	defer cancel()
 	start := time.Now()
-	turn, err := c.Prompt(ctx, id, "x")
+	type result struct {
+		turn acp.Turn
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		turn, err := c.Prompt(ctx, id, "x")
+		done <- result{turn, err}
+	}()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(15 * time.Second)
+	defer deadline.Stop()
+	for !exists(r.prompts) {
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("the harness did not receive its prompt")
+		case got := <-done:
+			t.Fatalf("prompt ended before cancellation: %+v %v", got.turn, got.err)
+		}
+	}
+	cancel()
+	var turn acp.Turn
+	var err error
+	select {
+	case got := <-done:
+		turn, err = got.turn, got.err
+	case <-deadline.C:
+		t.Fatal("the running prompt ignored cancellation")
+	}
 	if turn.StopReason != "cancelled" || time.Since(start) > 15*time.Second {
 		t.Fatalf("turn %+v err %v after %s", turn, err, time.Since(start))
 	}
@@ -574,6 +604,18 @@ func TestServeACPClientThatStopsReading(t *testing.T) {
 	}
 }
 
+// readStarted reports when the server has entered its pending read.
+type readStarted struct {
+	io.Reader
+	ready chan struct{}
+	once  sync.Once
+}
+
+func (r *readStarted) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.ready) })
+	return r.Reader.Read(p)
+}
+
 // Review M7 (12): an idle server honours Ctrl-C (its context): the pending
 // read does not hold it.
 func TestIdleServeACPHonoursCancel(t *testing.T) {
@@ -581,8 +623,14 @@ func TestIdleServeACPHonoursCancel(t *testing.T) {
 	defer inW.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- ServeACP(ctx, inR, io.Discard, ServeOptions{}) }()
-	time.Sleep(100 * time.Millisecond)
+	in := &readStarted{Reader: inR, ready: make(chan struct{})}
+	defer cancel()
+	go func() { done <- ServeACP(ctx, in, io.Discard, ServeOptions{}) }()
+	select {
+	case <-in.ready:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the idle server did not start reading")
+	}
 	cancel()
 	select {
 	case <-done:
@@ -853,12 +901,32 @@ func TestShowErrorsAreClean(t *testing.T) {
 func TestShowSkipsDoctorChecks(t *testing.T) {
 	r := newRunRig(t)
 	res := r.run(t, fake{name: "codex", agentMode: "turn"}, nil)
-	time.Sleep(1100 * time.Millisecond) // run IDs sort by the second
 	rep, err := Doctor(context.Background(), DoctorOptions{Root: r.repo, LiveDir: r.live, Harnesses: []harness.Harness{},
 		Getenv: func(string) string { return "" }, Timeout: 5 * time.Second, Neutral: filepath.Join(t.TempDir(), "neutral"),
 		ConfigPath: r.config})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Selection uses event timestamps, independently of the random run IDs.
+	for i, run := range []string{res.Run, rep.Run} {
+		path := filepath.Join(r.repo, run, "events.jsonl")
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, rest, _ := strings.Cut(string(b), "\n")
+		var event map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(first), &event); err != nil {
+			t.Fatal(err)
+		}
+		event["t"], _ = json.Marshal(time.Date(2026, 1, 1, 0, 0, i, 0, time.UTC))
+		firstEvent, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, append(append(firstEvent, '\n'), []byte(rest)...), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	sr, err := Show(r.repo, "")
 	if err != nil || sr.ID != filepath.Base(res.Run) || sr.Outcome != RunNoChanges {
