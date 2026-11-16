@@ -86,25 +86,12 @@ func NewRun(root string) (Run, error) {
 	if err := ensureIgnore(base); err != nil {
 		return Run{}, err
 	}
-	for range 5 {
-		var r [3]byte
-		rand.Read(r[:])
-		id := time.Now().Format("20060102-150405") + "-" + hex.EncodeToString(r[:])
-		err := runs.Mkdir(id, 0o755)
-		if errors.Is(err, os.ErrExist) {
-			continue
-		}
-		if err != nil {
-			return Run{}, err
-		}
-		pinned, err := ensureDir(runs, id)
-		if err != nil {
-			return Run{}, err
-		}
-		rel := filepath.Join(".refraktal", "runs", id)
-		return Run{ID: id, Dir: filepath.Join(root, rel), Rel: rel, root: pinned}, nil
+	id, pinned, err := createRun(runs)
+	if err != nil {
+		return Run{}, err
 	}
-	return Run{}, errors.New("runlog: could not pick a unique run ID")
+	rel := filepath.Join(".refraktal", "runs", id)
+	return Run{ID: id, Dir: filepath.Join(root, rel), Rel: rel, root: pinned}, nil
 }
 
 // testAfterParentCheck, set by tests, runs between inspecting the parent
@@ -141,6 +128,17 @@ func NewRunUnder(parent string) (Run, error) {
 		return Run{}, err
 	}
 	defer runs.Close()
+	id, pinned, err := createRun(runs)
+	if err != nil {
+		return Run{}, err
+	}
+	dir := filepath.Join(parent, "runs", id)
+	return Run{ID: id, Dir: dir, Rel: dir, root: pinned}, nil
+}
+
+// createRun picks a unique ID and pins its newly created directory.
+// The caller owns the returned handle.
+func createRun(runs *os.Root) (string, *os.Root, error) {
 	for range 5 {
 		var r [3]byte
 		rand.Read(r[:])
@@ -150,16 +148,15 @@ func NewRunUnder(parent string) (Run, error) {
 			continue
 		}
 		if err != nil {
-			return Run{}, err
+			return "", nil, err
 		}
 		pinned, err := ensureDir(runs, id)
 		if err != nil {
-			return Run{}, err
+			return "", nil, err
 		}
-		dir := filepath.Join(parent, "runs", id)
-		return Run{ID: id, Dir: dir, Rel: dir, root: pinned}, nil
+		return id, pinned, nil
 	}
-	return Run{}, errors.New("runlog: could not pick a unique run ID")
+	return "", nil, errors.New("runlog: could not pick a unique run ID")
 }
 
 // ensureDir creates dir, or checks that it is a real directory and not a
