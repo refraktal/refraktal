@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,6 +80,30 @@ type runEnv struct {
 	log    *runlog.Log
 	base   string
 	notice func(string)
+	// rawNotice: a notice with a raw error or path, and its safe wording.
+	rawNotice func(raw, safe string)
+	subtree   string // Confine: the session's folder in the repository, or "" for all of it
+
+	amu      sync.Mutex // this run's own figures (the ledger may be shared)
+	charged  float64
+	retained float64
+	turns    int
+}
+
+// account adds to this run's own figures.
+func (e *runEnv) account(charged, retained float64, turns int) {
+	e.amu.Lock()
+	defer e.amu.Unlock()
+	e.charged += charged
+	e.retained += retained
+	e.turns += turns
+}
+
+// figures copies this run's own figures into the result.
+func (e *runEnv) figures(res *RunResult) {
+	e.amu.Lock()
+	defer e.amu.Unlock()
+	res.Charged, res.Retained, res.RunTurns = e.charged, e.retained, e.turns
 }
 
 // childSpec says what kind of child to run.
@@ -172,18 +197,34 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 		runlog.AppendRaw(scratchRoot, "stderr", code, raw)
 		return runlog.ErrorField(code, raw)
 	}
-	pol := policy.Policy{Worktree: wt.Dir, ReadOnly: sp.judge}
+	// Confined: the harness works in the session's subfolder of its
+	// worktree, and its edits are allowed only there.
+	cwd := wt.Dir
+	if e.subtree != "" {
+		cwd = filepath.Join(wt.Dir, filepath.FromSlash(e.subtree))
+		if err := os.MkdirAll(cwd, 0o755); err != nil {
+			settle(false)
+			removeWT()
+			c.Error = err.Error()
+			return c
+		}
+	}
+	pol := policy.Policy{Worktree: cwd, ReadOnly: sp.judge}
 	var mu sync.Mutex
 	var reply strings.Builder
-	childBudget, _ := json.Marshal(map[string]any{"usd": grant.USD, "turns": grant.Turns,
+	// The prompt about to be sent counts as one of the turns: a child
+	// Refraktal has the rest.
+	childBudget, _ := json.Marshal(map[string]any{"usd": grant.USD, "turns": max(0, grant.Turns-1),
 		"deadline": grant.Deadline.UTC().Format(time.RFC3339), "depth": grant.Depth})
-	s, err := openSession(sctx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, scratchRoot: scratchRoot, cwd: wt.Dir, tmpDir: tmp,
+	s, err := openSession(sctx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, scratchRoot: scratchRoot, cwd: cwd, tmpDir: tmp,
 		liveDir: e.o.LiveDir, labels: map[string]string{"run": e.run.ID, "harness": name}, log: e.log, timeout: 2 * time.Minute,
 		readOnly: sp.judge,
 		// REFRAKTAL_RUN tags the child's processes for logs only (the session
 		// sweep finds leftovers). REFRAKTAL_BUDGET is what a child Refraktal
 		// may use.
-		env:       childEnv(e.root, e.o, hcfg, e.run.ID+"-"+name, string(childBudget)),
+		// REFRAKTAL_PARENT_RUN: a child Refraktal makes its run folder here,
+		// inside this run's.
+		env:       append(childEnv(e.root, e.o, hcfg, e.run.ID+"-"+name, string(childBudget)), ParentRunEnv+"="+scratch),
 		prefixExe: e.o.ShellPrefix,
 		onPermission: func(_ context.Context, req acp.PermissionRequest) string {
 			d := pol.Decide(req)
@@ -238,6 +279,7 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 		e.log.Event("child_end", map[string]any{"harness": name, "outcome": c.Outcome, "error": errEvent(RunExhausted, c.Error)})
 		return c
 	}
+	e.account(0, 0, 1)
 	tctx, tcancel := context.WithDeadline(e.ctx, grant.Deadline)
 	turn, perr := s.client.Prompt(tctx, s.id, sp.prompt)
 	c.timedOut = errors.Is(tctx.Err(), context.DeadlineExceeded)
@@ -249,14 +291,35 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 	// as cancelled on its own (Codex does after a denial).
 	turn.Cancelled = turn.Cancelled || turn.StopReason == "cancelled"
 	var cost sessionCost // a fresh session: its first report is the whole cost
+	charged, childRetained := 0.0, 0.0
 	for _, ch := range cost.charges(h.Name(), c.Model, turn, e.prices) {
 		e.ledger.Charge(grant, ch)
+		if ch.Source != budget.Estimated {
+			charged += ch.USD
+		}
 		e.log.Event("charge", map[string]any{"harness": name, "charge": ch})
 		if ch.Source == budget.Unpriced {
 			e.notice(fmt.Sprintf("warning: no price for model %q; its tokens count as $0 against --usd", ch.Model))
 		}
 	}
+	if ch := turn.Child; ch != nil {
+		// A child Refraktal's own prompts count against --turns too, and
+		// the reservations its cancelled children kept are held here, not
+		// reported as spent.
+		e.ledger.AddTurns(grant, ch.Turns)
+		e.account(0, 0, ch.Turns)
+		if ch.Retained > 0 && !math.IsNaN(ch.Retained) && !math.IsInf(ch.Retained, 0) {
+			e.ledger.Charge(grant, budget.Charge{USD: ch.Retained, Source: budget.Retained, Note: "kept by the child Refraktal's cancelled children"})
+			e.account(0, ch.Retained, 0)
+			childRetained = ch.Retained
+		}
+		e.log.Event("child_run", map[string]any{"harness": name, "turns": ch.Turns, "outcome": ch.Outcome, "exit": ch.Exit})
+	}
 	settle(turn.Cancelled)
+	e.account(charged, 0, 0)
+	if kept := c.Settlement.Spent - charged - childRetained; turn.Cancelled && kept > 0 {
+		e.account(0, kept, 0) // the reservation a cancelled child keeps
+	}
 	if st := c.Settlement; st.Overrun > 0 {
 		e.notice(fmt.Sprintf("the turn cost $%.4f, $%.4f beyond the --usd grant: --usd is checked before a turn, never inside one", st.Spent, st.Overrun))
 	}
@@ -304,6 +367,10 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 	switch {
 	case cerr != nil:
 		c.Outcome, c.Error = candFailed, cerr.Error()
+	case len(outside(e.subtree, r.Files)) > 0:
+		// Confined to the session's folder: a change outside it is refused.
+		c.Outcome = candFailed
+		c.Error = fmt.Sprintf("the result changes %d files outside the session folder %s: refused", len(outside(e.subtree, r.Files)), e.subtree)
 	case c.Outcome == candNoChanges && len(r.Files) > 0:
 		c.Outcome = candChanges
 	}
@@ -341,6 +408,9 @@ func (e *runEnv) apply(c *Candidate) (string, error) {
 	// atomic, so this is the last point to stop.
 	if !time.Now().Before(e.ledger.Deadline()) {
 		return "", errMinsExpired
+	}
+	if out := outside(e.subtree, c.result.Files); len(out) > 0 {
+		return "", fmt.Errorf("the result changes %d files outside the session folder %s: refused", len(out), e.subtree)
 	}
 	ctx, cancel := e.opCtx()
 	defer cancel()
@@ -539,7 +609,8 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 				p, trunc, err := route.Gemini{APIKey: scoreKey, Endpoint: e.o.RouterEndpoint}.Score(cctx, e.o.Task, c.result.Diff)
 				if err != nil {
 					failed.Do(func() {
-						e.notice("pre-score unavailable (" + err.Error() + "); the checks decide, and ties go to the judge")
+						e.rawNotice("pre-score unavailable ("+err.Error()+"); the checks decide, and ties go to the judge",
+							"pre-score unavailable; the checks decide, and ties go to the judge")
 					})
 					e.log.Event("pre_score", map[string]any{"harness": c.Harness, "error": runlog.ErrorField("pre_score_failed", err.Error())})
 					return
@@ -667,7 +738,7 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 			return
 		}
 		if n != "" {
-			e.notice(n)
+			e.rawNotice(n, "some LFS-tracked files were left as LFS pointers")
 		}
 		finish(RunApplied, "", false)
 	}
@@ -695,18 +766,18 @@ func judgeOrder(all, run []harness.Harness, cands []*Candidate, close []*Candida
 	var out []harness.Harness
 	for i, h := range run {
 		ran[h.Name()] = true
-		if !inClose[h.Name()] && cands[i].Outcome != candUnusable {
+		if !inClose[h.Name()] && cands[i].Outcome != candUnusable && h.ReadOnlyMode() != "" {
 			out = append(out, h)
 		}
 	}
 	for _, h := range all {
-		if !ran[h.Name()] {
+		if !ran[h.Name()] && h.ReadOnlyMode() != "" { // a harness with no read-only mode never judges
 			out = append(out, h)
 		}
 	}
 	for _, c := range close {
 		for _, h := range run {
-			if h.Name() == c.Harness {
+			if h.Name() == c.Harness && h.ReadOnlyMode() != "" {
 				out = append(out, h)
 			}
 		}

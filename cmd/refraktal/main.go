@@ -48,9 +48,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return doctor(ctx, args[1:], stdout, stderr)
 	case "run":
 		return runCmd(ctx, args[1:], os.Stdin, stdout, stderr)
-	case "acp", "show":
-		fmt.Fprintf(stderr, "refraktal %s: not implemented yet in %s\n", args[0], refraktal.Version)
-		return refraktal.ExitNothingUsable
+	case "acp":
+		return acpCmd(ctx, args[1:], os.Stdin, stdout, stderr)
+	case "show":
+		return showCmd(args[1:], stdout, stderr)
 	case "-h", "-help", "--help", "help":
 		fmt.Fprint(stdout, usage)
 		return refraktal.ExitOK
@@ -61,6 +62,94 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "refraktal: unknown command %q\n\n%s", args[0], usage)
 		return refraktal.ExitNothingUsable
 	}
+}
+
+// budgetFlags adds --usd, --turns, --mins and --depth to fs.
+func budgetFlags(fs *flag.FlagSet) func() (budget.Limits, error) {
+	d := budget.Defaults
+	usd := fs.Float64("usd", d.USD, "dollars (notional on subscriptions) the run may charge")
+	turns := fs.Int("turns", d.Turns, "prompts Refraktal may send to harnesses")
+	mins := fs.Float64("mins", d.Wall.Minutes(), "wall-clock minutes; never unlimited")
+	depth := fs.Int("depth", d.Depth, "levels of Refraktal that may nest below this run")
+	return func() (budget.Limits, error) {
+		switch {
+		case math.IsNaN(*usd) || math.IsInf(*usd, 0) || math.IsNaN(*mins) || math.IsInf(*mins, 0):
+			return budget.Limits{}, fmt.Errorf("--usd and --mins must be finite numbers")
+		case *mins > budget.MaxWall.Minutes():
+			return budget.Limits{}, fmt.Errorf("--mins must be at most %.0f", budget.MaxWall.Minutes())
+		case *usd < 0 || *turns < 0 || *mins <= 0:
+			return budget.Limits{}, fmt.Errorf("--usd and --turns must not be negative, and --mins must be more than 0")
+		}
+		return budget.Limits{USD: *usd, Turns: *turns, Wall: time.Duration(*mins * float64(time.Minute)), Depth: *depth}, nil
+	}
+}
+
+// acpCmd is `refraktal acp`: Refraktal as an ACP agent on stdio. Its budgets
+// are the flags, shrunk to a parent's REFRAKTAL_BUDGET when one is set.
+func acpCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("acp", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	limits := budgetFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return refraktal.ExitNothingUsable
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintln(stderr, "refraktal acp: takes no task; prompts arrive over ACP")
+		return refraktal.ExitNothingUsable
+	}
+	lim, err := limits()
+	if err != nil {
+		fmt.Fprintf(stderr, "refraktal acp: %v\n", err)
+		return refraktal.ExitNothingUsable
+	}
+	o := refraktal.ServeOptions{Run: refraktal.RunOptions{Budget: &lim, ShellPrefix: selfPath(), Self: selfPath()}}
+	if err := refraktal.ServeACP(ctx, stdin, stdout, o); err != nil {
+		fmt.Fprintf(stderr, "refraktal acp: %v\n", err)
+		return refraktal.ExitNothingUsable
+	}
+	return refraktal.ExitOK
+}
+
+// showCmd is `refraktal show [run] [--json]`.
+func showCmd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	asJSON := fs.Bool("json", false, "JSON on stdout")
+	var words []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return refraktal.ExitNothingUsable
+		}
+		if fs.NArg() == 0 {
+			break
+		}
+		words = append(words, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+	if len(words) > 1 {
+		fmt.Fprintln(stderr, "refraktal show: one run at a time")
+		return refraktal.ExitNothingUsable
+	}
+	root, err := refraktal.RepoRoot()
+	if err != nil {
+		fmt.Fprintf(stderr, "refraktal show: %v\n", err)
+		return refraktal.ExitNothingUsable
+	}
+	id := ""
+	if len(words) == 1 {
+		id = words[0]
+	}
+	r, err := refraktal.Show(root, id)
+	if err != nil {
+		fmt.Fprintf(stderr, "refraktal show: %v\n", err)
+		return refraktal.ExitNothingUsable
+	}
+	if *asJSON {
+		refraktal.WriteShowJSON(stdout, r)
+	} else {
+		refraktal.WriteShowText(stdout, r)
+	}
+	return refraktal.ExitOK
 }
 
 func doctor(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -134,7 +223,7 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 	lim := budget.Limits{USD: *usd, Turns: *turns, Wall: time.Duration(*mins * float64(time.Minute)), Depth: *depth}
 	res, err := refraktal.Run(ctx, refraktal.RunOptions{Task: task, Harness: *harnessName, NoApply: *noApply, Budget: &lim,
 		Dry: *dry, Fan: *fan,
-		ShellPrefix: selfPath(),
+		ShellPrefix: selfPath(), Self: selfPath(),
 		OnNotice: func(n string) {
 			if *asJSON {
 				enc.Encode(map[string]string{"type": "notice", "text": n})

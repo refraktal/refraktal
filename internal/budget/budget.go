@@ -47,6 +47,9 @@ const (
 	Computed  Source = "computed"  // tokens priced from the price table
 	Unpriced  Source = "unpriced"  // no price for the model: counted as $0
 	Estimated Source = "estimated" // a guess for a call a cancel cut off; reporting only
+	// Retained is a child Refraktal's reservation kept by its own cancelled
+	// children: held against --usd, but not reported as spent.
+	Retained Source = "retained"
 )
 
 // Charge is one dollar figure for a child's turn.
@@ -76,6 +79,7 @@ type Settlement struct {
 type grant struct {
 	g     Grant
 	spent float64
+	turns int // turns used, of g.Turns
 	open  bool
 }
 
@@ -87,7 +91,8 @@ type Ledger struct {
 	now      func() time.Time
 	spent    float64 // settled, for enforcement
 	reserved float64 // held by live grants
-	turns    int
+	turns    int     // turns used
+	held     int     // turns reserved by live grants and not used yet
 	nextID   int
 	grants   map[int]*grant
 	charges  []Charge
@@ -113,6 +118,9 @@ func New(l Limits, now func() time.Time) (*Ledger, error) {
 	return &Ledger{lim: l, deadline: now().Add(l.Wall), now: now, grants: map[int]*grant{}}, nil
 }
 
+// Limits are the ledger's limits.
+func (l *Ledger) Limits() Limits { return l.lim }
+
 // Deadline is when --mins runs out.
 func (l *Ledger) Deadline() time.Time { return l.deadline }
 
@@ -130,17 +138,19 @@ func (l *Ledger) check(usd float64) error {
 	switch {
 	case !l.now().Before(l.deadline):
 		return &Exhausted{"mins"}
-	case l.turns >= l.lim.Turns:
-		return &Exhausted{"turns"}
 	case usd <= 0:
 		return &Exhausted{"usd"}
+	case l.turns+l.held >= l.lim.Turns:
+		return &Exhausted{"turns"}
 	}
 	return nil
 }
 
 // ReserveShare grants a child what is left divided by n, the children still
-// to start (this one included), so children started in parallel split it.
-// --turns and --mins are not split: they belong to the whole run.
+// to start (this one included), so children started in parallel split it:
+// dollars, and a turn allowance (at least one) that no other grant can use.
+// Unused dollars and turns return at settlement. --mins is not split: it
+// belongs to the whole run.
 func (l *Ledger) ReserveShare(n int) (Grant, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -148,13 +158,16 @@ func (l *Ledger) ReserveShare(n int) (Grant, error) {
 	if err := l.check(usd); err != nil {
 		return Grant{}, err
 	}
+	turns := l.lim.Turns - l.turns - l.held
 	if n > 1 {
 		usd /= float64(n)
+		turns = max(1, turns/n)
 	}
 	l.nextID++
-	g := Grant{ID: l.nextID, USD: usd, Turns: l.lim.Turns - l.turns, Deadline: l.deadline, Depth: l.lim.Depth - 1}
+	g := Grant{ID: l.nextID, USD: usd, Turns: turns, Deadline: l.deadline, Depth: l.lim.Depth - 1}
 	l.grants[g.ID] = &grant{g: g, open: true}
 	l.reserved += usd
+	l.held += turns
 	return g, nil
 }
 
@@ -169,7 +182,7 @@ func (l *Ledger) BeginTurn(g Grant) error {
 		return fmt.Errorf("budget: grant %d is not open", g.ID)
 	case !l.now().Before(g.Deadline):
 		return &Exhausted{"mins"}
-	case l.turns >= l.lim.Turns:
+	case st.turns >= g.Turns || l.turns >= l.lim.Turns:
 		return &Exhausted{"turns"}
 	case st.spent >= g.USD:
 		return &Exhausted{"usd"}
@@ -179,7 +192,26 @@ func (l *Ledger) BeginTurn(g Grant) error {
 		return &Exhausted{"usd"}
 	}
 	l.turns++
+	st.turns++
+	l.held--
 	return nil
+}
+
+// AddTurns counts prompts a child sent on its own (a child Refraktal's
+// harness prompts), so --turns covers the whole tree. Like a cost overrun,
+// they are counted even past the limit: the next BeginTurn is refused.
+func (l *Ledger) AddTurns(g Grant, n int) {
+	if n <= 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.turns += n
+	if st := l.grants[g.ID]; st != nil && st.open {
+		fromHeld := min(n, g.Turns-st.turns) // within the allowance: no longer held
+		l.held -= max(0, fromHeld)
+		st.turns += n
+	}
 }
 
 // Charge records a figure for a child's turn. Estimated figures are for
@@ -209,6 +241,7 @@ func (l *Ledger) Settle(g Grant, cancelled bool) Settlement {
 	}
 	st.open = false
 	l.reserved -= g.USD
+	l.held -= max(0, g.Turns-st.turns) // unused turns return
 	s := Settlement{Spent: st.spent}
 	if cancelled && s.Spent < g.USD {
 		s.Spent = g.USD
@@ -226,9 +259,10 @@ func (l *Ledger) Settle(g Grant, cancelled bool) Settlement {
 type Summary struct {
 	Limits    Limits   `json:"limits"`
 	Mins      float64  `json:"mins"`
-	Spent     float64  `json:"spent_usd"`     // charged against --usd, including kept reservations
-	Reported  float64  `json:"reported_usd"`  // sum of reported and computed charges
-	Estimated float64  `json:"estimated_usd"` // sum of estimated charges, reporting only
+	Spent     float64  `json:"spent_usd"`              // charged against --usd, including kept reservations
+	Reported  float64  `json:"reported_usd"`           // sum of reported and computed charges
+	Estimated float64  `json:"estimated_usd"`          // sum of estimated charges, reporting only
+	Retained  float64  `json:"retained_usd,omitempty"` // held for children's kept reservations, not spent
 	Turns     int      `json:"turns"`
 	Charges   []Charge `json:"charges"`
 	Unpriced  []string `json:"unpriced,omitempty"` // models that had no price
@@ -246,6 +280,8 @@ func (l *Ledger) Summary() Summary {
 			s.Estimated += c.USD
 		case Unpriced:
 			s.Unpriced = append(s.Unpriced, c.Model)
+		case Retained:
+			s.Retained += c.USD
 		default:
 			s.Reported += c.USD
 		}

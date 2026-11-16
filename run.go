@@ -59,8 +59,26 @@ type RunOptions struct {
 	// os.UserConfigDir()/refraktal/{live,config.json} and
 	// os.UserCacheDir()/refraktal/worktrees.
 	LiveDir, ConfigPath, WorktreeDir string
-	// Harnesses to choose from. Default harness.Defaults.
+	// Harnesses to choose from. Default harness.Defaults, plus the refraktal
+	// harness when Self is set.
 	Harnesses []harness.Harness
+	// Self is the path to this refraktal binary, for the refraktal harness (a
+	// child Refraktal over ACP). The CLI passes its own path. Empty: none.
+	Self string
+	// Confine keeps the run to Dir's subtree of the repository (the acp
+	// server sets it for a session's folder): each harness works in that
+	// subfolder of its worktree, its edits are allowed only there, and a
+	// result that changes anything outside it is refused. Without it, the
+	// run covers the whole repository whatever Dir is.
+	Confine bool
+	// Ledger, if set, is a ledger shared with other runs (an acp server's,
+	// seeded from the parent's grant): Budget is then only its limits.
+	Ledger *budget.Ledger
+	// ParentRun, set when this run is a child Refraktal's, is the folder in
+	// the parent's run folder where this run's folder is made (so child runs
+	// nest inside the parent's). The acp server takes it from
+	// REFRAKTAL_PARENT_RUN.
+	ParentRun string
 	// ShellPrefix is a binary that calls proc.MaybeShellPrefix first in its
 	// main. It is set as Claude's shell prefix so the sessions its tool
 	// commands run in are recorded and swept. The CLI passes its own path.
@@ -72,8 +90,12 @@ type RunOptions struct {
 	// the decision cache folder ("-" disables it), for tests.
 	RouterEndpoint, RouteCache string
 	// OnNotice receives each notice as it is made, such as hooks in the
-	// repository or an inherited MCP setup. Optional.
+	// repository or an inherited MCP setup, in full. Optional.
 	OnNotice func(string)
+	// OnSafeNotice receives each notice in a form safe to send to another
+	// program (the acp server's client): a notice carrying a raw OS error,
+	// URL or path arrives as fixed wording instead. Optional.
+	OnSafeNotice func(string)
 }
 
 // RunResult is what Run did.
@@ -101,6 +123,13 @@ type RunResult struct {
 	Judge      *Candidate         `json:"judge,omitempty"`
 	Notices    []string           `json:"notices,omitempty"`
 	Error      string             `json:"error,omitempty"`
+	// Charged, Retained and RunTurns are this run's own figures (on a
+	// shared ledger, Budget is the whole ledger's): the actual cost charged
+	// (reported and computed), the reservations its cancelled children kept
+	// beyond that, and the prompts it sent.
+	Charged  float64 `json:"charged_usd"`
+	Retained float64 `json:"retained_usd,omitempty"`
+	RunTurns int     `json:"run_turns"`
 	// LeftRunning and Unknown count processes still running after shutdown,
 	// and processes whose cleanup could not be confirmed, over every child.
 	LeftRunning int `json:"left_running"`
@@ -168,6 +197,9 @@ func (o *RunOptions) defaults(ctx context.Context) (root string, err error) {
 			return "", err
 		}
 		o.Harnesses = harness.Defaults(cache)
+		if o.Self != "" {
+			o.Harnesses = append(o.Harnesses, harness.Refraktal(o.Self))
+		}
 	}
 	return root, nil
 }
@@ -225,7 +257,10 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		res.Error = fmt.Sprintf("refusing to start: nested %d levels deep (%s), past --depth %d + 1", n, proc.NestEnv, o.Budget.Depth)
 		return res, nil
 	}
-	ledger, err := budget.New(*o.Budget, nil)
+	ledger, err := o.Ledger, error(nil)
+	if ledger == nil {
+		ledger, err = budget.New(*o.Budget, nil)
+	}
 	if err != nil {
 		var ex *budget.Exhausted
 		if errors.As(err, &ex) {
@@ -239,14 +274,20 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		return res, nil
 	}
 	var nmu sync.Mutex
-	notice := func(s string) {
+	// rawNotice is a notice whose text may carry a raw OS error, URL or path:
+	// in full for the CLI and the result, as safe for OnSafeNotice.
+	rawNotice := func(raw, safe string) {
 		nmu.Lock()
 		defer nmu.Unlock()
-		res.Notices = append(res.Notices, s)
+		res.Notices = append(res.Notices, raw)
 		if o.OnNotice != nil {
-			o.OnNotice(s)
+			o.OnNotice(raw)
+		}
+		if o.OnSafeNotice != nil {
+			o.OnSafeNotice(safe)
 		}
 	}
+	notice := func(s string) { rawNotice(s, s) }
 	// --mins covers every setup step too: the price fetch, the worktree and
 	// starting the harness all run under the run's deadline.
 	setupCtx, setupCancel := context.WithDeadline(ctx, ledger.Deadline())
@@ -259,7 +300,11 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 
 	cleanup, cerr := proc.CleanLeftovers(o.LiveDir)
-	run, err := runlog.NewRun(root)
+	newRun := func() (runlog.Run, error) { return runlog.NewRun(root) }
+	if o.ParentRun != "" {
+		newRun = func() (runlog.Run, error) { return runlog.NewRunUnder(o.ParentRun) }
+	}
+	run, err := newRun()
 	if err != nil {
 		return res, err
 	}
@@ -324,7 +369,11 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		}
 		notice(fmt.Sprintf("routed to %s by %s", strings.Join(names, ", "), how))
 		for _, n := range r.Notes {
-			notice(n)
+			if strings.HasPrefix(n, "decision log not written") {
+				rawNotice(n, "the decision log was not written (see the run's notices)")
+			} else {
+				notice(n)
+			}
 		}
 		if len(names) < len(r.Run) {
 			notice(fmt.Sprintf("the router advised %d harnesses; --fan %d caps it", len(r.Run), o.Fan))
@@ -375,7 +424,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		prices.Override(model, pp)
 	}
 	if perr0 != nil {
-		notice("warning: " + perr0.Error())
+		rawNotice("warning: "+perr0.Error(), "warning: the price table could not be fetched or read; models without a price count as $0")
 	}
 	log.Event("prices", map[string]any{"source": prices.Source, "warning": errString(perr0)})
 	if cerr != nil || cleanup.Dead > 0 {
@@ -405,10 +454,18 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		res.Error = err.Error()
 		return res, nil
 	}
-	env := &runEnv{ctx: ctx, o: o, root: root, cfg: cfg, ledger: ledger, prices: prices, run: run, log: log, base: base, notice: notice}
+	env := &runEnv{ctx: ctx, o: o, root: root, cfg: cfg, ledger: ledger, prices: prices, run: run, log: log, base: base, notice: notice,
+		rawNotice: rawNotice}
+	if o.Confine {
+		if env.subtree, err = subtreeOf(root, o.Dir); err != nil {
+			res.Error = err.Error()
+			return res, nil
+		}
+	}
 	if len(hs) > 1 {
 		env.fanOut(hs, scoreKey, &res)
 		res.Budget = ledger.Summary()
+		env.figures(&res)
 		log.Event("run_end", map[string]any{"outcome": res.Outcome, "winner": res.Harness, "files": res.Files, "branch": res.Branch,
 			"verdict": res.Verdict, "error": runlog.ErrorField(res.Outcome, res.Error), "budget": res.Budget})
 		return res, nil
@@ -443,7 +500,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 			} else {
 				res.Outcome = RunApplied
 				if n != "" {
-					notice(n)
+					rawNotice(n, "some LFS-tracked files were left as LFS pointers")
 				}
 			}
 		}
@@ -456,10 +513,43 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 	env.drop(c)
 	res.Budget = ledger.Summary()
-	log.Event("run_end", map[string]any{"outcome": res.Outcome, "files": res.Files, "branch": res.Branch,
+	env.figures(&res)
+	log.Event("run_end", map[string]any{"outcome": res.Outcome, "harness": res.Harness, "files": res.Files, "branch": res.Branch,
 		"allowed": res.Allowed, "denied": res.Denied, "error": runlog.ErrorField(res.Outcome, res.Error), "budget": res.Budget,
 		"settlement": res.Settlement, "swept": c.swept, "left_running": res.LeftRunning, "unknown": res.Unknown})
 	return res, nil
+}
+
+// subtreeOf is dir relative to the repository root, slash-separated, or ""
+// for the root itself.
+func subtreeOf(root, dir string) (string, error) {
+	r, err1 := filepath.EvalSymlinks(root)
+	d, err2 := filepath.EvalSymlinks(dir)
+	if err1 != nil || err2 != nil {
+		return "", errors.New("cannot resolve the session folder inside the repository")
+	}
+	rel, err := filepath.Rel(r, d)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", errors.New("the session folder is not inside the repository")
+	}
+	if rel == "." {
+		return "", nil
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+// outside returns the files not under the subtree ("" is the whole tree).
+func outside(subtree string, files []string) []string {
+	if subtree == "" {
+		return nil
+	}
+	var out []string
+	for _, f := range files {
+		if !strings.HasPrefix(f, subtree+"/") {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func chunkText(u acp.Update) string {

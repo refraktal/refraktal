@@ -39,7 +39,10 @@ func TestCommands(t *testing.T) {
 		{[]string{"run", "--usd", "NaN", "--harness", "claude", "x"}, 3, "finite"},
 		{[]string{"run", "--usd", "Inf", "--harness", "claude", "x"}, 3, "finite"},
 		{[]string{"run", "--mins", "1e12", "--harness", "claude", "x"}, 3, "at most"},
-		{[]string{"show"}, 3, "not implemented yet"},
+		{[]string{"show"}, 3, "no run found"},
+		{[]string{"show", "a", "b"}, 3, "one run at a time"},
+		{[]string{"acp", "a task"}, 3, "takes no task"},
+		{[]string{"acp", "--mins", "0"}, 3, "--mins must be more than 0"},
 		{[]string{"bogus"}, 3, `unknown command "bogus"`},
 		{[]string{"doctor", "--bogus"}, 3, "flag provided but not defined"},
 	} {

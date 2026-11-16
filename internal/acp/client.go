@@ -493,12 +493,15 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string) (Turn, erro
 	var pr struct {
 		StopReason string `json:"stopReason"`
 		Usage      *Usage `json:"usage"`
+		Meta       struct {
+			Refraktal *ChildReport `json:"refraktal"`
+		} `json:"_meta"`
 	}
 	if err := json.Unmarshal(res, &pr); err != nil {
 		return finish(), fmt.Errorf("session/prompt: %w", err)
 	}
 	c.mu.Lock()
-	ts.turn.StopReason, ts.turn.Usage = pr.StopReason, pr.Usage
+	ts.turn.StopReason, ts.turn.Usage, ts.turn.Child = pr.StopReason, pr.Usage, pr.Meta.Refraktal
 	c.mu.Unlock()
 	return finish(), nil
 }

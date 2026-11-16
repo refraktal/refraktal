@@ -169,9 +169,35 @@ func TestReserveShareSplitsAcrossChildren(t *testing.T) {
 	if j, err := l.ReserveShare(1); err != nil || !near(j.USD, 2) {
 		t.Fatalf("judge grant %v %v", j.USD, err)
 	}
-	// --turns belong to the whole run, not to a share.
-	if gs[1].Turns != 10 {
-		t.Fatalf("turns were split: %d", gs[1].Turns)
+}
+
+// Review M7 (2): parallel children reserve non-overlapping turn allowances
+// (what is left divided by the children still to start), and unused turns
+// return at settlement, like dollars.
+func TestTurnAllowancesDoNotOverlap(t *testing.T) {
+	l, _ := New(Limits{USD: 9, Turns: 5, Wall: time.Minute}, nil)
+	a, _ := l.ReserveShare(2)
+	b, _ := l.ReserveShare(1)
+	if a.Turns+b.Turns != 5 || a.Turns != 2 || b.Turns != 3 {
+		t.Fatalf("allowances %d + %d, want 2 + 3 of 5", a.Turns, b.Turns)
+	}
+	if _, err := l.ReserveShare(1); !exhausted(err, "turns") && !exhausted(err, "usd") {
+		t.Fatalf("every turn (and dollar) is held: %v", err)
+	}
+	l.BeginTurn(a)
+	l.BeginTurn(a)
+	if err := l.BeginTurn(a); !exhausted(err, "turns") {
+		t.Fatalf("a used its allowance: %v", err)
+	}
+	// A child Refraktal's own prompts count against its allowance.
+	l.AddTurns(b, 1)
+	l.Settle(a, false)
+	l.Settle(b, false) // b used 1 of 3: 2 come back
+	if j, err := l.ReserveShare(1); err != nil || j.Turns != 2 {
+		t.Fatalf("after settling: %+v %v", j, err)
+	}
+	if s := l.Summary(); s.Turns != 3 {
+		t.Fatalf("turns used %d, want 3", s.Turns)
 	}
 }
 

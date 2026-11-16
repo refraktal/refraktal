@@ -158,4 +158,18 @@ type Turn struct {
 	Model       string        // the session's model when the turn ended, if the harness reports it
 	Permissions int           // permission requests received during the turn
 	Wall        time.Duration // prompt sent to response
+	Child       *ChildReport  // a child Refraktal's report in the response's _meta, if any
+}
+
+// ChildReport is what a child Refraktal adds to its prompt response, under
+// _meta.refraktal, so the parent can count its prompts across the tree.
+type ChildReport struct {
+	Turns   int    `json:"turns"`   // prompts the child sent to its own harnesses
+	Outcome string `json:"outcome"` // the child run's outcome
+	Exit    int    `json:"exit"`    // the child run's exit code
+	Run     string `json:"run"`     // the child's run folder
+	// Retained is US dollars the child's cancelled children keep reserved,
+	// beyond what they spent: the parent holds it against --usd without
+	// reporting it as spent.
+	Retained float64 `json:"retained_usd,omitempty"`
 }
