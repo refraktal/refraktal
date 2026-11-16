@@ -283,6 +283,35 @@ func (a *agent) handle(m message, line string) {
 
 func (a *agent) prompt(id json.RawMessage) {
 	switch a.mode {
+	case "agent-tool", "agent-tool-change", "agent-edit":
+		var n tortureNode
+		if json.Unmarshal([]byte(os.Getenv(tortureEnv)), &n) != nil {
+			return // the parent observes the missing tool-started marker
+		}
+		if a.mode != "agent-tool" {
+			if os.WriteFile(filepath.Join(a.cwd, "README"), []byte("agent result\n"), 0o600) != nil ||
+				os.WriteFile(filepath.Join(a.cwd, "tool-output.txt"), []byte("complete result\n"), 0o600) != nil {
+				n.mark("error")
+				return
+			}
+		}
+		if a.mode == "agent-edit" {
+			a.send(message{ID: id, Result: obj{"stopReason": "end_turn"}})
+			return
+		}
+		a.update(obj{"sessionUpdate": "tool_call", "toolCallId": "slow-tool", "title": "pwd", "kind": "execute", "status": "pending"})
+		a.ask("session/request_permission", obj{"toolCall": obj{"toolCallId": "slow-tool", "kind": "execute", "rawInput": obj{"command": "pwd"}},
+			"options": []obj{{"optionId": "allow", "kind": "allow_once"}, {"optionId": "reject", "kind": "reject_once"}}})
+		if err := n.launch("cycle", 0, &syscall.SysProcAttr{Setpgid: true}, false); err != nil {
+			n.mark("error")
+			return
+		}
+		a.update(obj{"sessionUpdate": "tool_call_update", "toolCallId": "slow-tool", "status": "in_progress"})
+		n.mark("tool-started")
+		<-a.cancel
+		n.mark("cancelled")
+		a.send(message{ID: id, Result: obj{"stopReason": "cancelled"}})
+		return
 	case "selfcancel": // ends the turn as cancelled on its own, as Codex does after a denial
 		a.update(obj{"sessionUpdate": "usage_update", "used": 4000, "size": 200000})
 		a.send(message{ID: id, Result: obj{"stopReason": "cancelled", "usage": obj{"totalTokens": 300, "inputTokens": 200, "outputTokens": 100}}})

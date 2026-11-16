@@ -52,6 +52,7 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == fakeCheckArg {
 		os.Exit(fakeCheck(os.Args[2:]))
 	}
+	acptest.RunIfTorture()
 	os.Exit(m.Run())
 }
 
