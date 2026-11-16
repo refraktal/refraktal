@@ -90,8 +90,12 @@ type RunOptions struct {
 	// the decision cache folder ("-" disables it), for tests.
 	RouterEndpoint, RouteCache string
 	// OnNotice receives each notice as it is made, such as hooks in the
-	// repository or an inherited MCP setup. Optional.
+	// repository or an inherited MCP setup, in full. Optional.
 	OnNotice func(string)
+	// OnSafeNotice receives each notice in a form safe to send to another
+	// program (the acp server's client): a notice carrying a raw OS error,
+	// URL or path arrives as fixed wording instead. Optional.
+	OnSafeNotice func(string)
 }
 
 // RunResult is what Run did.
@@ -270,14 +274,20 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		return res, nil
 	}
 	var nmu sync.Mutex
-	notice := func(s string) {
+	// rawNotice is a notice whose text may carry a raw OS error, URL or path:
+	// in full for the CLI and the result, as safe for OnSafeNotice.
+	rawNotice := func(raw, safe string) {
 		nmu.Lock()
 		defer nmu.Unlock()
-		res.Notices = append(res.Notices, s)
+		res.Notices = append(res.Notices, raw)
 		if o.OnNotice != nil {
-			o.OnNotice(s)
+			o.OnNotice(raw)
+		}
+		if o.OnSafeNotice != nil {
+			o.OnSafeNotice(safe)
 		}
 	}
+	notice := func(s string) { rawNotice(s, s) }
 	// --mins covers every setup step too: the price fetch, the worktree and
 	// starting the harness all run under the run's deadline.
 	setupCtx, setupCancel := context.WithDeadline(ctx, ledger.Deadline())
@@ -359,7 +369,11 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		}
 		notice(fmt.Sprintf("routed to %s by %s", strings.Join(names, ", "), how))
 		for _, n := range r.Notes {
-			notice(n)
+			if strings.HasPrefix(n, "decision log not written") {
+				rawNotice(n, "the decision log was not written (see the run's notices)")
+			} else {
+				notice(n)
+			}
 		}
 		if len(names) < len(r.Run) {
 			notice(fmt.Sprintf("the router advised %d harnesses; --fan %d caps it", len(r.Run), o.Fan))
@@ -410,7 +424,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		prices.Override(model, pp)
 	}
 	if perr0 != nil {
-		notice("warning: " + perr0.Error())
+		rawNotice("warning: "+perr0.Error(), "warning: the price table could not be fetched or read; models without a price count as $0")
 	}
 	log.Event("prices", map[string]any{"source": prices.Source, "warning": errString(perr0)})
 	if cerr != nil || cleanup.Dead > 0 {
@@ -440,7 +454,8 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		res.Error = err.Error()
 		return res, nil
 	}
-	env := &runEnv{ctx: ctx, o: o, root: root, cfg: cfg, ledger: ledger, prices: prices, run: run, log: log, base: base, notice: notice}
+	env := &runEnv{ctx: ctx, o: o, root: root, cfg: cfg, ledger: ledger, prices: prices, run: run, log: log, base: base, notice: notice,
+		rawNotice: rawNotice}
 	if o.Confine {
 		if env.subtree, err = subtreeOf(root, o.Dir); err != nil {
 			res.Error = err.Error()
@@ -485,7 +500,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 			} else {
 				res.Outcome = RunApplied
 				if n != "" {
-					notice(n)
+					rawNotice(n, "some LFS-tracked files were left as LFS pointers")
 				}
 			}
 		}

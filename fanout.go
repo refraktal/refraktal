@@ -70,17 +70,19 @@ type Candidate struct {
 
 // runEnv is what every child of one run shares.
 type runEnv struct {
-	ctx     context.Context
-	o       RunOptions
-	root    string
-	cfg     config.Config
-	ledger  *budget.Ledger
-	prices  price.Table
-	run     runlog.Run
-	log     *runlog.Log
-	base    string
-	notice  func(string)
-	subtree string // Confine: the session's folder in the repository, or "" for all of it
+	ctx    context.Context
+	o      RunOptions
+	root   string
+	cfg    config.Config
+	ledger *budget.Ledger
+	prices price.Table
+	run    runlog.Run
+	log    *runlog.Log
+	base   string
+	notice func(string)
+	// rawNotice: a notice with a raw error or path, and its safe wording.
+	rawNotice func(raw, safe string)
+	subtree   string // Confine: the session's folder in the repository, or "" for all of it
 
 	amu      sync.Mutex // this run's own figures (the ledger may be shared)
 	charged  float64
@@ -607,7 +609,8 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 				p, trunc, err := route.Gemini{APIKey: scoreKey, Endpoint: e.o.RouterEndpoint}.Score(cctx, e.o.Task, c.result.Diff)
 				if err != nil {
 					failed.Do(func() {
-						e.notice("pre-score unavailable (" + err.Error() + "); the checks decide, and ties go to the judge")
+						e.rawNotice("pre-score unavailable ("+err.Error()+"); the checks decide, and ties go to the judge",
+							"pre-score unavailable; the checks decide, and ties go to the judge")
 					})
 					e.log.Event("pre_score", map[string]any{"harness": c.Harness, "error": runlog.ErrorField("pre_score_failed", err.Error())})
 					return
@@ -735,7 +738,7 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 			return
 		}
 		if n != "" {
-			e.notice(n)
+			e.rawNotice(n, "some LFS-tracked files were left as LFS pointers")
 		}
 		finish(RunApplied, "", false)
 	}

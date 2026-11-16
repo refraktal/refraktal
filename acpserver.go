@@ -506,7 +506,8 @@ func (s *server) run(ctx context.Context, sessionID, cwd, task string) (RunResul
 	if pr := s.o.Getenv(ParentRunEnv); pr != "" {
 		o.ParentRun = pr
 	}
-	o.OnNotice = func(n string) { s.chunk(sessionID, "notice: "+n+"\n") }
+	// Only the safe form of each notice crosses: no raw OS error, URL or path.
+	o.OnNotice, o.OnSafeNotice = nil, func(n string) { s.chunk(sessionID, "notice: "+n+"\n") }
 	return Run(ctx, o)
 }
 

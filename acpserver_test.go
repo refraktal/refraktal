@@ -651,3 +651,24 @@ func TestSessionSubfolderSeesRenames(t *testing.T) {
 		t.Fatalf("a rename from outside the session folder was applied: %+v", turn)
 	}
 }
+
+// Review M7 (9): notices reach the ACP client as structured, safe text:
+// no raw OS error, URL or path (the CLI still shows the full text).
+func TestServeACPNoticesCarryNoRawErrors(t *testing.T) {
+	r := newRunRig(t)
+	var u updates
+	o := r.serveOptions(writer("claude", "out.txt=good"), nil)
+	o.Run.PriceURL = "http://127.0.0.1:1/prices.json" // nothing listens: the fetch fails with an OS error
+	o.Run.PriceCache = filepath.Join(t.TempDir(), "secret-cache-dir", "prices.json")
+	c := serve(t, o, u.add)
+	c.Prompt(context.Background(), open(t, c, r.repo), "x")
+	got := u.all()
+	if !strings.Contains(got, "price table") {
+		t.Fatalf("no price notice at all: %s", got)
+	}
+	for _, raw := range []string{"127.0.0.1", "secret-cache-dir", "connection refused", "dial tcp"} {
+		if strings.Contains(got, raw) {
+			t.Errorf("the client got %q in a notice", raw)
+		}
+	}
+}
