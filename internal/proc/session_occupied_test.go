@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -109,12 +110,21 @@ func TestOccupiedSessionKeepsItsLiveRecordForRetry(t *testing.T) {
 
 func TestReviewSweepForkExitSnapshotRace(t *testing.T) {
 	fakeKillHandles(t)
-	// No child or harness is launched. Fake ps snapshots model a session
-	// member that forks and exits between the two membership snapshots.
-	parentPID := os.Getppid()
-	sid, err := getsid(parentPID)
-	if err != nil || sid <= 1 {
-		t.Fatalf("get parent session: sid=%d err=%v", sid, err)
+	// Own the session so this fixture does not depend on the runner's ancestry.
+	// Fake ps snapshots model a member that forks and exits between snapshots.
+	helper := exec.Command("sleep", "60")
+	helper.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = helper.Process.Kill()
+		_ = helper.Wait()
+	})
+	helperPID := helper.Process.Pid
+	sid, err := getsid(helperPID)
+	if err != nil || sid != helperPID {
+		t.Fatalf("get helper session: pid=%d sid=%d err=%v", helperPID, sid, err)
 	}
 	dir := t.TempDir()
 	script := fmt.Sprintf(`#!/bin/sh
@@ -127,7 +137,7 @@ if [ "$n" -lt 3 ]; then
 else
   printf '%%s\n' '2000000000 1 %d %d S Sun Nov 15 15:45:51 2026 fixture-child'
 fi
-`, dir, dir, dir, parentPID, sid, os.Getuid(), sid, os.Getuid())
+`, dir, dir, dir, helperPID, sid, os.Getuid(), sid, os.Getuid())
 	if err := os.WriteFile(filepath.Join(dir, "ps"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
