@@ -125,7 +125,9 @@ Refraktal sets each child's mode explicitly and answers the permission
 requests that reach it by policy. A permission request requires an active,
 uncancelled turn for its session; without one, the client answers `cancelled`
 without consulting the policy. Pending decisions are cancelled when that turn
-ends or is cancelled. Never use `auto`, `acceptEdits`, `agent`,
+ends or is cancelled. A queued response checks cancellation after acquiring
+writer ownership, immediately before sending its decision. Never use `auto`,
+`acceptEdits`, `agent`,
 `bypassPermissions` or `agent-full-access` for children.
 
 | Harness | Mode | Behaviour observed |
@@ -243,6 +245,10 @@ process-group kill does not reach them.
 - While a child runs, record its descendants by parent PID, whatever their
   process group. Walk the tree once more just before shutdown, while lineage is
   still visible, then kill every tracked descendant and the harness.
+  Every new PPID ownership edge requires a currently verified parent row,
+  valid birth times for both processes, and a child born no earlier than its
+  parent. Missing or invalid times cannot prove enrollment; a stale child row
+  cannot attach to a newer process that reused its parent's PID.
 - **Kill only by tracked PID, after an identity check:** a process's identity
   is its birth identity, PID and start time, everywhere (tracker, live
   registry, kills, sweeps); the command line is kept for display only, since
@@ -349,7 +355,13 @@ process-group kill does not reach them.
     record, or the marker exists, it says why on stderr and exits 126
     without running the command. Before its final read of the sessions file
     Refraktal creates the marker, so every command that ran was recorded in
-    time. The file is read with no line limit, skipping bad lines.
+    time. Cleanup requires a complete, readable sessions inventory with valid
+    birth identities. An unreadable or malformed inventory is unknown: shutdown
+    reports the error and keeps the live record. Diagnostic reads can still
+    skip bad lines and recover later valid records without a file-size limit.
+    Inventory uncertainty is persisted in the live record; dead-run cleanup
+    reports it and keeps the record too. It cannot reconstruct missing records,
+    so this uncertainty may require manual resolution and remain indefinitely.
   - **Rejected review finding: forged session records.** A process that
     can append to the sessions file runs as the same user, so it can already
     kill any of the user's processes; a forged record gains it nothing.
@@ -448,6 +460,48 @@ process-group kill does not reach them.
 - The child shares the repository's `.git` (a linked worktree). Refraktal's
   own git commands discard inherited `GIT_*` variables and disable hooks,
   fsmonitor, signing, filters, external diff, textconv, pager and ssh command.
+  Every command sets `GIT_ALLOW_PROTOCOL=/`, after scrubbing any inherited
+  allowlist so a parent cannot widen it. An empty value is unsafe: Git splits it
+  into an empty-name entry, which admits `::fixture` or `remote.origin.vcs=""`
+  and can execute `git-remote-` or the `remote-` alias. This was reproduced with
+  local Git 2.54, even though the empty value blocks ordinary named helpers.
+  The `/` sentinel rejects both named and empty protocols, regardless of
+  `protocol.<name>.allow=always` config. A forced `/` helper resolves to
+  `git-remote-/`, an unexecutable path on supported macOS/Linux platforms.
+  Git command dispatch must also be pinned: every command passes
+  `-c help.autocorrect=0` and `-c alias.remote-/.command=remote-/`. The latter
+  self-alias fails Git's recursive-alias check. Without these settings, Git
+  could autocorrect the slash command or execute an exact alias using its
+  arbitrary-name subsection syntax. A blank alias is insufficient: it can
+  fall through to an executable named `git-`. Named, empty and slash-alias
+  promisor fixtures all fail without running helpers when lazy-fetch suppression
+  is removed. See the [transport gate](https://github.com/git/git/blob/v2.54.0/transport.c#L979-L1068),
+  [alias parsing](https://github.com/git/git/blob/v2.54.0/alias.c) and
+  [recursive-alias check](https://github.com/git/git/blob/v2.54.0/git.c#L407-L408).
+  The allowlist first shipped in Git 2.6.1, with maintenance backports in 2.5.4,
+  2.4.10 and 2.3.10; it predates the protocol config controls. See Git's
+  [introduction](https://github.com/git/git/commit/a5adaced2e13c135d5d9cc65be9eb95aa3bacedf)
+  and [2.6.1 transport implementation](https://github.com/git/git/blob/v2.6.1/transport.c).
+  Safegit retains `-c protocol.allow=never` and `-c protocol.<name>.allow=never`
+  for `ext`, `fd`, `file`, `git`, `ssh`, `http`, `https`, `ftp` and `ftps`.
+  These config controls, available from Git 2.12, pin every documented bundled
+  transport; per-protocol command-line settings override repository/global
+  policies for the same keys. Local `git-fetch(1)` and `gitremote-helpers(7)`
+  include the deprecated `ftp`/`ftps` fetch transports. The sentinel and command
+  dispatch guards also block helpers outside this finite list on Git without
+  lazy-fetch suppression.
+  Every command additionally sets `GIT_NO_LAZY_FETCH=1`. Upstream Git 2.45.0
+  first honors it through `fetch_if_missing`; Git 2.44.0 ignores it. The
+  [security fix](https://github.com/git/git/commit/7b70e9efb18c2cc3f219af399bd384c5801ba1d7)
+  also checks it at the promisor-fetch boundary, covering paths missed by the
+  initial implementation. That gate shipped in 2.45.1 and maintenance releases
+  2.44.1, 2.43.4, 2.42.2, 2.41.1, 2.40.2 and 2.39.4. The transport denial
+  does not depend on this newer suppression. Versions older than the allowlist
+  releases have no guaranteed transport denial; no historical Git binary was
+  exercised by these tests.
+  `refraktal doctor` reports Refraktal and harness/adapter versions, but does not
+  report or check the Git version; no version gate is applied. With transport
+  denial active, a missing promised object fails instead of fetching it.
   Creation uses `git worktree add --no-checkout`, then discovers drivers in
   the new worktree before populating it with `git reset --hard --quiet HEAD`.
   If setup fails after registration, bounded cleanup removes the checkout,
@@ -506,7 +560,8 @@ process-group kill does not reach them.
   reading cannot hold up the stop.
 - **Exit codes:** 0 applied, kept or no changes; 1 the turn failed or the
   result did not apply; 2 a budget ran out (before the turn, or `--mins`
-  during it); 3 the harness could not be started or logged in.
+  during it); 3 the harness could not be started or logged in, or writing the
+  final `--json` result failed (with the write error reported on stderr).
 
 ## Fan-out and judging (M6)
 

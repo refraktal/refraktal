@@ -327,13 +327,19 @@ func TestSurvivorsAreReportedThenKilled(t *testing.T) {
 
 // running reports whether pid is alive and not a zombie. A killed orphan stays
 // a zombie until its new parent reaps it, and kill(pid, 0) still succeeds on it.
+// Inspection failures remain potentially alive, so cleanup assertions fail closed.
 func running(pid int) bool {
-	if syscall.Kill(pid, 0) != nil {
+	if err := syscall.Kill(pid, 0); err == syscall.ESRCH {
 		return false
+	} else if err != nil {
+		return true
 	}
 	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return true
+	}
 	st := strings.TrimSpace(string(out))
-	return err == nil && st != "" && !strings.HasPrefix(st, "Z")
+	return !strings.HasPrefix(st, "Z")
 }
 
 func TestSetMode(t *testing.T) {

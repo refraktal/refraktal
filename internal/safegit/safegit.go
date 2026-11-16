@@ -42,9 +42,22 @@ func Env() []string {
 // --no-replace-objects: a child shares the repository's .git and could add
 // replacement refs (git replace <base> <stub>) that make Refraktal read a
 // different commit, tree or file than the one it pinned.
+// Per-protocol policies override protocol.allow, so pin every shipped transport
+// to never as well. GIT_ALLOW_PROTOCOL=/ denies every usable protocol name;
+// unlike an empty value, it also denies empty helper names. A forced "/" helper
+// ends in a slash and cannot execute on macOS/Linux. Disable autocorrection and
+// pin its alias to itself so Git cannot reinterpret it as a runnable command.
+// GIT_NO_LAZY_FETCH=1 additionally suppresses lazy fetching where supported.
+// These commands need only the local object database; a missing object must fail
+// instead of fetching. See docs/DESIGN.md for version coverage.
 var safe = []string{"--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "diff.external=",
 	"-c", "core.pager=cat", "-c", "core.sshCommand=false",
-	"-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false"}
+	"-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false", "-c", "protocol.allow=never",
+	"-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never", "-c", "protocol.file.allow=never",
+	"-c", "protocol.git.allow=never", "-c", "protocol.ssh.allow=never",
+	"-c", "protocol.http.allow=never", "-c", "protocol.https.allow=never",
+	"-c", "protocol.ftp.allow=never", "-c", "protocol.ftps.allow=never",
+	"-c", "help.autocorrect=0", "-c", "alias.remote-/.command=remote-/"}
 
 func command(ctx context.Context, dir, gitDir string, args ...string) *exec.Cmd {
 	full := []string{"-C", dir}
@@ -54,6 +67,7 @@ func command(ctx context.Context, dir, gitDir string, args ...string) *exec.Cmd 
 	full = append(append(full, safe...), args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Env = append(Env(), "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_ALLOW_PROTOCOL=/", "GIT_NO_LAZY_FETCH=1",
 		"GIT_AUTHOR_NAME=Refraktal", "GIT_AUTHOR_EMAIL=refraktal@localhost",
 		"GIT_COMMITTER_NAME=Refraktal", "GIT_COMMITTER_EMAIL=refraktal@localhost")
 	return cmd

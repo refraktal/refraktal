@@ -131,12 +131,13 @@ func (c *Client) write(m message) error {
 // background. Waiting for writer ownership uses the same deadline, and an
 // expired queued message is never written later.
 func (c *Client) writeBy(m message, deadline time.Time) error {
-	m.JSONRPC = "2.0"
-	b, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	b = append(b, '\n')
+	return c.writeReadyBy(func() message { return m }, deadline)
+}
+
+// writeReadyBy prepares the message only after taking writer ownership, just
+// before writing. Permission responses use it to decide whether their turn
+// still authorizes the selected option after waiting behind another write.
+func (c *Client) writeReadyBy(ready func() message, deadline time.Time) error {
 	c.wonce.Do(func() { c.wgate = make(chan struct{}, 1) })
 	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
@@ -151,20 +152,28 @@ func (c *Client) writeBy(m message, deadline time.Time) error {
 		return timedOut
 	}
 	unlock := func() { <-c.wgate }
+	write := func() error {
+		m := ready()
+		m.JSONRPC = "2.0"
+		b, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		_, err = c.w.Write(append(b, '\n'))
+		return err
+	}
 	type deadliner interface{ SetWriteDeadline(time.Time) error }
 	if d, ok := c.w.(deadliner); ok {
 		if d.SetWriteDeadline(deadline) == nil {
 			defer unlock()
 			defer d.SetWriteDeadline(time.Time{})
-			_, err = c.w.Write(b)
-			return err
+			return write()
 		}
 	}
 	done := make(chan error, 1)
 	go func() {
 		defer unlock()
-		_, err := c.w.Write(b)
-		done <- err
+		done <- write()
 	}()
 	select {
 	case err := <-done:
@@ -373,16 +382,14 @@ func (c *Client) request(m message) {
 			case id = <-answer:
 			case <-ctx.Done():
 			}
-			if ctx.Err() != nil {
-				id = "" // a cancelled turn cannot approve a pending request
+		}
+		c.writeReadyBy(func() message {
+			outcome := map[string]any{"outcome": "cancelled"}
+			if id != "" && ctx != nil && ctx.Err() == nil {
+				outcome = map[string]any{"outcome": "selected", "optionId": id}
 			}
-		}
-		outcome := map[string]any{"outcome": "cancelled"}
-		if id != "" {
-			outcome = map[string]any{"outcome": "selected", "optionId": id}
-		}
-		b, _ := json.Marshal(map[string]any{"outcome": outcome})
-		c.write(message{ID: m.ID, Result: b})
+			return message{ID: m.ID, Result: mustJSON(map[string]any{"outcome": outcome})}
+		}, time.Now().Add(writeTimeout))
 	}()
 }
 

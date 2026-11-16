@@ -23,6 +23,7 @@ type Record struct {
 	Tracked            []Proc            `json:"tracked"` // its descendants and session members seen so far
 	Labels             map[string]string `json:"labels,omitempty"`
 	UnresolvedSessions []Proc            `json:"unresolved_sessions,omitempty"` // observed only, never Kill targets
+	InventoryUnknown   bool              `json:"inventory_unknown,omitempty"`   // an unreadable or malformed inventory may hide sessions
 }
 
 // DefaultLiveDir is os.UserConfigDir()/refraktal/live.
@@ -137,7 +138,12 @@ func CleanLeftovers(dir string) (CleanupReport, error) {
 				r.Errors = append(r.Errors, fmt.Sprintf("%s: %v", e.Name(), inspectErr))
 			}
 		}
-		if len(kr.Alive) == 0 && len(kr.Unknown) == 0 {
+		if rec.InventoryUnknown {
+			// No session identity can stand in for missing inventory contents.
+			// Keep this uncertainty even after every known process is gone.
+			r.Errors = append(r.Errors, fmt.Sprintf("%s: recorded sessions inventory is unknown", e.Name()))
+		}
+		if !rec.InventoryUnknown && len(kr.Alive) == 0 && len(kr.Unknown) == 0 {
 			os.Remove(path)
 		}
 	}

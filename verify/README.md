@@ -1,7 +1,8 @@
 # Bounded model checks for the fixed code
 
 These test-only models describe the fixed production code on main at `7ab1b1d`,
-plus the run-5 fixes for findings 5–7 below.
+plus the run-5 fixes for findings 5–7 below. PR D extends the KILL model to
+cover tracker enrollment from mixed process snapshots (finding 8 below).
 Every FAITHFUL exploration must exhaust its reachable graph without an invariant
 violation. Old failures are mutation tests: each must find its counterexample.
 The separate no-pidfd exploration must find the documented platform limit.
@@ -52,6 +53,16 @@ occupied snapshots without stable members are not empty. This mirrors
 `provenMembers`, `provenDescendants` and `sweepSession` in
 `internal/proc/session.go`, session polling in `internal/proc/child.go`, and live
 record retention in `internal/proc/live.go`.
+
+The former tracker-enrollment gap is closed within the new bounds. Tracker
+discovery uses `killPoll`, shared with the exit/reuse model, and follows a PPID
+edge only from a current verified parent row with valid birth times and child
+birth >= parent birth. The separate mixed-snapshot exploration varies current
+rows and historical records independently, then acquires a handle, rechecks the
+enrolled identity and signals it. This checks ownership before the identity
+check, which alone cannot reject a wrongly enrolled process. Missing or
+malformed births are represented by rank zero; real tracker tests exercise
+the timestamp parser with missing and malformed strings.
 
 The separate **no pidfd** variant represents macOS and Linux when Go falls back
 to PID signalling (old kernels, failed pidfd open or blocked syscalls). It must
@@ -116,6 +127,7 @@ intersects flags with grants. Lost grants cannot bypass the ceiling.
 | --- | --- | --- |
 | Kill exit/reuse | Three PID slots: pinned harness, recorded tool leader, member; two distinct births per reusable PID; reusable session/group IDs; empty count saturated at two | Exit/reuse around handle acquisition, recheck and signal; session replacement leader can fork and exit; unknown record retention; occupied versus empty. |
 | Kill snapshot provenance | Three rows: absent leader, parent outside session, child in session; current and recorded births 1..2; child record absent/1/2; parent presence and PPID link independent | Stale parent identity, child older than replacement parent, direct historical identity and ancestry. |
+| Kill tracker enrollment | Three PID rows with separate PGIDs; root birth 1..3; parent/child birth 0 (invalid) or 1..3; historical parent absent/1..3; root/parent presence and child PPID link independent: 1,536 input snapshots | Current verified parent, missing/invalid births, equal births, stale PPID after parent reuse, then handle acquisition, successful recheck and signal. |
 | Concurrent ledger | Two candidates plus later judge; four USD units/four turns; turn costs `{0,1,3}` | Overlapping reservations, returned shares, cumulative reports, duplicate settlement, cancellation and per-grant final-turn crossing of at most two units. |
 | Child-report boundary | USD/turn grants 1..4; report turns -1..5; costs `{0,1,3,6}` or negative/NaN/infinite/non-USD classes; retained `{0,1,3,5}` or negative/NaN/infinite classes; non-numeric and absent wire costs; cancelled or normal | Every validation branch, a malformed wire cost, grant forfeiture and idempotence, valid retained charges, real costs above the grant. Invalid-cost token pricing uses the zero-cost fallback. |
 | Lifecycle | One/two candidates, each optionally stopped for budget or `--mins`; optional judge; one collect/check result each; two touched files; monotonic cancel/deadline | Failed turn with work versus failed collect, a budget stop with a failed collect, snapshot refusal, sequential writes, later write error, rollback, and a post-apply LFS error that rolls back. |
@@ -130,6 +142,9 @@ unresolved live records may remain indefinitely.
   set retains historical births across polls, slightly overapproximating the
   production latest-birth map; births never return in these bounds. Birth identities have distinct
   start times; the accepted one-second `ps` start-time alias is unproven.
+  Tracker snapshots abstract timestamp validity and order into four ranks;
+  arbitrary encodings and invalid root births are outside this model's bounds
+  (the real tracker tests cover invalid root/parent birth strings).
   Process-group signals have no pidfd and retain the check-to-signal limit.
   The modeled harness stays unreaped, reserving its IDs; fallback immediate
   reaping on systems without `waitid(WNOWAIT)` is unproven. A process that
@@ -156,6 +171,7 @@ unresolved live records may remain indefinitely.
 | --- | --- | --- | ---: |
 | Kill | PID-based signal after recheck | Unrelated identity signalled | 12 |
 | Kill | Remove per-target identity guard | Unrelated identity signalled | 12 |
+| Kill | Remove tracker PPID birth-order guard | Older unrelated child passes identity recheck and is signalled | 5 |
 | Kill | Sweep current members of a never-seen-empty session | Unrelated member signalled after session reuse | 22 |
 | Kill | Treat one unoccupied snapshot as empty | Premature emptiness declared | 2 |
 | Kill | Remove permanent retirement | Retired session inspected | 1 |
@@ -180,7 +196,7 @@ unresolved live records may remain indefinitely.
 | Lifecycle | Clear snapshot before the post-apply check | Failure reported over a changed tree | 12 |
 | Nesting | Remove inherited-ceiling refusal | Ceiling exceeded after grant loss/reset flags | 5 |
 
-All 25 checks reproduce the stated counterexample. Trace lengths count
+All 26 checks reproduce the stated counterexample. Trace lengths count
 transitions, excluding the initial state. The legacy retirement fixture retains
 the original mutation under explicitly restricted pre-fix membership selection;
 its guarded baseline passes only that fixture and is not a FAITHFUL claim about
@@ -195,7 +211,8 @@ The no-pidfd limit is reported separately from mutation results.
 
 Findings 1–4 are fixed on main and findings 5–7 on this branch. Their former
 faithful counterexamples now live in mutations, while updated FAITHFUL models
-must pass exhaustive exploration.
+must pass exhaustive exploration. PR D also fixes the production tracker
+enrollment guard and adds its model (finding 8).
 
 1. **PID reuse after recheck:** fixed on Linux with pidfd acquisition before
    recheck (`32ddb68`). The PID-signal mutation reproduces the old unrelated
@@ -239,7 +256,21 @@ report model assumed a negative cost reached validation, but the parser dropped
 it as absent. The no-pidfd counterexample is the already documented platform
 limit.
 
-Process-level reproductions were not run in this sandbox, which blocks
+8. **Mixed tracker snapshot with a stale PPID (PR D, run-5 finding 2):** the real
+   `TestReviewTrackerStalePPIDTargetsUnrelatedProcess` uses deterministic rows
+   and intercepted signals. Before the fix it enrolled and signalled an older
+   unrelated child through a replacement parent. The fixed tracker requires
+   valid birth times and child birth >= parent birth. The exact model fixture
+   `TestKillTrackerStalePPIDReproduction` now passes, and the new birth-order
+   mutation reproduces the ownership error even with the identity recheck and
+   handle signalling retained. `TestTrackerPPIDEnrollmentNeedsBirthOrder`
+   also covers root/tracked parents, absent rows and invalid births.
+
+The new production
+tracker reproduction runs in this sandbox because all signals are intercepted;
+the older process-level reproductions still need the orchestrator.
+
+The older process-level reproductions were not run in this sandbox, which blocks
 `/bin/ps`; the orchestrator can run them. Existing reproduction commands:
 
 ```sh
@@ -260,7 +291,9 @@ Measured on macOS, Go 1.27.4, darwin/arm64, using the command above with
 (package time), **34.58 s wall time**, below one minute. The budget report and
 lifecycle rows were measured again after findings 5–7 (default cache, same
 machine): the complete suite then passed in **36.427 s** (package time),
-**36.93 s wall time**. Timings are observations,
+**36.93 s wall time**. After PR D's tracker model was
+added and rebased onto #28 (`4f7c5be`), the complete suite passed in
+**36.662 s** (package time), **38 s wall time**. Timings are observations,
 not performance guarantees. Every faithful row below exhausted the full graph;
 the platform-limit row stopped at its expected counterexample.
 
@@ -268,6 +301,8 @@ the platform-limit row stopped at its expected counterexample.
 | --- | ---: | ---: | ---: | --- |
 | Kill, FAITHFUL usable pidfd | 79,492 | 33 | 6.658 s | Exhaustive, no violation |
 | Kill, FAITHFUL snapshot provenance | 193 | 2 | 0.007 s | Exhaustive, no violation |
+| Kill, FAITHFUL tracker enrollment | 7,105 | 5 | 0.257 s | Exhaustive, no violation |
+| Kill, exact stale-PPID fixture | 5 | 4 | 0.00021 s | Exhaustive, no violation |
 | Kill, fixed retirement fixture | 8 | 3 | 0.00036 s | Exhaustive, no violation |
 | Budget, FAITHFUL concurrent ledger | 185,881 | 24 | 12.577 s | Exhaustive, no violation |
 | Budget, FAITHFUL report validation | 109,761 | 6 | 1.332 s | Exhaustive, no violation |
@@ -277,22 +312,45 @@ the platform-limit row stopped at its expected counterexample.
 | Kill, no pidfd platform limit | 21,941 | 12 | 1.991 s | Expected unrelated-signal counterexample |
 | Restricted legacy retirement fixture, guard retained | 8 | 3 | 0.00035 s | Exhaustive only for this pre-fix fixture |
 
-All 25 mutation checks passed by reproducing their intended violations; their
+All 26 mutation checks passed by reproducing their intended violations; their
 trace lengths are in the mutation table. The real ledger witnesses and the
 production dependency isolation check passed in the complete suite. The real
 `TestVerifyNestingSourceWitness` also passed separately with race detection.
 
+The new tracker birth-order mutation explored a 5,835-state prefix in 0.214 s
+and found a shortest five-transition trace: sample child birth 1 with replacement
+parent birth 2, enroll through its stale PPID, acquire the child handle, pass the
+identity recheck, and signal the unrelated child. Only the birth-order check is
+removed; timestamp validity and handle signalling remain. The faithful tracker
+exploration covers all 1,536 input snapshots without a cutoff. All existing
+invariants and mutation expectations are retained.
+
+The production tracker reproduction and 16 birth-order cases passed with race
+detection, using deterministic snapshots and intercepted signals. Neither this
+run nor the model signals an unrelated real process.
+
 Final checks (wall times):
 
-- `gofmt -l .`: 0.03 s, no paths printed.
-- `go vet ./...`: 0.19 s, passed.
-- `go test -race ./verify/... -count=1 -v -timeout=60s`: 34.58 s, passed.
+- `gofmt -l .`: 0.07 s, no paths printed.
+- `go vet ./...`: 1.30 s, passed on darwin/arm64.
+- `GOOS=linux go vet ./...`: 1.34 s, passed; no Linux execution claimed.
+- ACP spike native/Linux vet: 0.22 s / 0.20 s, passed.
+- `go test -race ./verify/... -count=1 -v -timeout=60s`: 35.56 s, passed.
 - `git diff --check`: passed.
 
-No Linux execution or fresh CI result is claimed by this local run. No
-process-level production reproduction was run here. Four subagents handled
-kill, budget, lifecycle and nesting separately; the primary agent reviewed the
-production mappings and models, integrated each area, wrote this status, and
-ran the final checks. Cumulative integration snapshots (complete changed files,
-`DELETED.txt`, and a proposed message in `COMMIT.txt`) are under
-`~/Projects/.refraktal-gocache/verify2-snapshots/`. No commit was made.
+Full process integration remains for the orchestrator because this sandbox
+blocks `/bin/ps`; local listeners are also blocked. An overly broad ACP test
+selection included `TestKillWhenCancelIsIgnored`, which failed with its fake
+agent still running, then the selection timed out at 60 s. The explicit
+in-memory writer/permission regression selection passed three times with race
+detection. No full-suite, real-harness, Linux runtime or fresh CI success is
+claimed. The optional broad worktree race run in staging also exceeded its
+60 s timeout; the active driver-configuration test passed separately.
+
+Three subagents implemented safegit, tracker/KILL, and ACP/CLI in isolated
+staging copies. The primary agent implemented sessions-inventory retention and
+the spike oracle, reviewed all changes, integrated the fixes, and ran the final
+checks. Integration review also added persistent inventory uncertainty so a
+dead-run cleanup cannot discard a record retained at shutdown. Cumulative
+snapshots contain complete changed files, `DELETED.txt`, and `COMMIT.txt` under
+`~/Projects/.refraktal-gocache/fixd-snapshots/`. No commit was made.
