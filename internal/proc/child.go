@@ -263,18 +263,19 @@ func (c *Child) pollSessions(every time.Duration) {
 	}
 }
 
-func (c *Child) sessionLeaders() []Proc {
+func (c *Child) sessionLeaders() ([]Proc, error) {
 	leaders := []Proc{c.leader}
 	if c.sessions != "" {
-		recorded, _ := RecordedSessions(c.sessions)
-		leaders = append(leaders, recorded...)
+		recorded, err := recordedSessions(c.sessions, true)
+		return append(leaders, recorded...), err
 	}
-	return leaders
+	return leaders, nil
 }
 
 func (c *Child) checkSessions() {
 	changed := false
-	for _, l := range c.sessionLeaders() {
+	leaders, _ := c.sessionLeaders() // shutdown retries the inventory and reports errors
+	for _, l := range leaders {
 		c.smu.Lock()
 		dropped := c.dropped[sessionKey(l)]
 		c.smu.Unlock()
@@ -366,7 +367,16 @@ func (c *Child) sweepSessions() (KillReport, error) {
 	done := map[string]bool{}
 	var firstErr error
 	pass := func() {
-		for _, l := range c.sessionLeaders() {
+		leaders, inventoryErr := c.sessionLeaders()
+		if inventoryErr != nil {
+			c.rmu.Lock()
+			c.recordBase.InventoryUnknown = true
+			c.rmu.Unlock()
+			if firstErr == nil {
+				firstErr = fmt.Errorf("recorded sessions inventory: %w", inventoryErr)
+			}
+		}
+		for _, l := range leaders {
 			k := sessionKey(l)
 			c.smu.Lock()
 			skip := c.dropped[k] || done[k]
@@ -481,7 +491,7 @@ type ShutdownReport struct {
 	Tracked        []Proc     `json:"tracked"`           // every descendant seen while it ran
 	Kill           KillReport `json:"kill"`              // the identity-checked kill of the child and its descendants
 	Swept          KillReport `json:"swept"`             // processes still in the child's session, or in a session its tool commands recorded, killed by the session sweep
-	Err            string     `json:"error,omitempty"`   // listing processes failed at some point
+	Err            string     `json:"error,omitempty"`   // process cleanup or inventory inspection failed
 }
 
 // Shutdown stops the child and everything it started. It looks at the tree a
@@ -529,9 +539,7 @@ func (c *Child) shutdown(grace time.Duration) ShutdownReport {
 	}
 	// The child is not reaped yet, so its session ID cannot have been reused.
 	swept, serr := c.sweepSessions()
-	if err == nil {
-		err = serr
-	}
+	err = errors.Join(err, serr)
 	if c.record != "" {
 		// The final sweep can discover processes the pollers never recorded.
 		// Preserve every known identity whose cleanup needs another attempt.

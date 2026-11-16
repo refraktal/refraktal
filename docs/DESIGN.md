@@ -349,7 +349,13 @@ process-group kill does not reach them.
     record, or the marker exists, it says why on stderr and exits 126
     without running the command. Before its final read of the sessions file
     Refraktal creates the marker, so every command that ran was recorded in
-    time. The file is read with no line limit, skipping bad lines.
+    time. Cleanup requires a complete, readable sessions inventory with valid
+    birth identities. An unreadable or malformed inventory is unknown: shutdown
+    reports the error and keeps the live record. Diagnostic reads can still
+    skip bad lines and recover later valid records without a file-size limit.
+    Inventory uncertainty is persisted in the live record; dead-run cleanup
+    reports it and keeps the record too. It cannot reconstruct missing records,
+    so this uncertainty may require manual resolution and remain indefinitely.
   - **Rejected review finding: forged session records.** A process that
     can append to the sessions file runs as the same user, so it can already
     kill any of the user's processes; a forged record gains it nothing.

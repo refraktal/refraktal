@@ -204,6 +204,12 @@ func parsePIDOutput(pid int, r psResult) (Proc, error) {
 // RecordedSessions reads the session leaders a helper recorded, without
 // duplicates.
 func RecordedSessions(path string) ([]Proc, error) {
+	return recordedSessions(path, false)
+}
+
+// Cleanup requires a complete inventory. The public reader remains tolerant
+// of bad lines so diagnostic callers can recover the valid records.
+func recordedSessions(path string, strict bool) ([]Proc, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -212,21 +218,33 @@ func RecordedSessions(path string) ([]Proc, error) {
 		return nil, err
 	}
 	defer f.Close()
-	return readSessions(f)
+	return readSessionRecords(f, strict)
 }
 
 func readSessions(r io.Reader) ([]Proc, error) {
+	return readSessionRecords(r, false)
+}
+
+func readSessionRecords(r io.Reader, strict bool) ([]Proc, error) {
 	seen := map[string]bool{}
 	var out []Proc
-	br := bufio.NewReader(r) // no line limit: a bad or very long line is skipped, not fatal
-	for {
+	br := bufio.NewReader(r) // bounded memory, including oversized malformed lines
+	for row := 1; ; row++ {
 		line, err := br.ReadSlice('\n')
 		oversized := err == bufio.ErrBufferFull
 		for err == bufio.ErrBufferFull {
 			_, err = br.ReadSlice('\n')
 		}
 		var p Proc
-		if !oversized && len(line) < 4096 && json.Unmarshal(line, &p) == nil && p.PID > 1 && p.Start != "" {
+		valid := !oversized && len(line) < 4096 && json.Unmarshal(line, &p) == nil && p.PID > 1 && p.Start != ""
+		if strict {
+			_, validStart := startTime(p.Start)
+			valid = valid && validStart
+			if !valid && (len(line) != 0 || oversized) {
+				return nil, fmt.Errorf("proc: malformed recorded session at line %d", row)
+			}
+		}
+		if valid {
 			if k := strconv.Itoa(p.PID) + "|" + p.Start; !seen[k] {
 				seen[k] = true
 				out = append(out, Proc{PID: p.PID, Start: p.Start})
