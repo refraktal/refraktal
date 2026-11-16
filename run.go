@@ -170,10 +170,6 @@ func (o *RunOptions) defaults(ctx context.Context) (root string, err error) {
 			return "", err
 		}
 	}
-	if o.Budget == nil {
-		d := budget.Defaults
-		o.Budget = &d
-	}
 	if o.LiveDir == "" {
 		if o.LiveDir, err = proc.DefaultLiveDir(); err != nil {
 			return "", err
@@ -221,7 +217,38 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	if o.Fan < 0 {
 		return res, errors.New("--fan must not be negative")
 	}
-	root, err := o.defaults(ctx)
+	// --mins covers the whole run, setup included: the ledger, and with it
+	// the deadline, starts before any setup step, and every setup step
+	// (repository discovery, the config, the price fetch, the worktree,
+	// starting the harness) runs under it.
+	if o.Budget == nil {
+		d := budget.Defaults
+		o.Budget = &d
+	}
+	ledger, err := o.Ledger, error(nil)
+	if ledger == nil {
+		ledger, err = budget.New(*o.Budget, nil)
+	}
+	if err != nil {
+		var ex *budget.Exhausted
+		if errors.As(err, &ex) {
+			res.Outcome, res.Error = RunExhausted, err.Error()
+			return res, nil
+		}
+		return res, err
+	}
+	setupCtx, setupCancel := context.WithDeadline(ctx, ledger.Deadline())
+	defer setupCancel()
+	setupExpired := func() bool { return errors.Is(setupCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil }
+	exhausted := func(step string) (RunResult, error) {
+		res.Outcome, res.Budget = RunExhausted, ledger.Summary()
+		res.Error = "budget exhausted: --mins ran out during " + step
+		return res, nil
+	}
+	root, err := o.defaults(setupCtx)
+	if setupExpired() {
+		return exhausted("repository discovery")
+	}
 	if err != nil {
 		return res, err
 	}
@@ -255,6 +282,9 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		}
 	}
 	cfg, err := config.Load(o.ConfigPath)
+	if setupExpired() {
+		return exhausted("loading the config")
+	}
 	if err != nil {
 		return res, err
 	}
@@ -262,18 +292,6 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	if err != nil {
 		res.Outcome, res.Error = RunExhausted, err.Error()
 		return res, nil
-	}
-	ledger, err := o.Ledger, error(nil)
-	if ledger == nil {
-		ledger, err = budget.New(*o.Budget, nil)
-	}
-	if err != nil {
-		var ex *budget.Exhausted
-		if errors.As(err, &ex) {
-			res.Outcome, res.Error = RunExhausted, err.Error()
-			return res, nil
-		}
-		return res, err
 	}
 	if err := ledger.Check(); err != nil {
 		res.Outcome, res.Error, res.Budget = RunExhausted, err.Error(), ledger.Summary()
@@ -294,16 +312,6 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		}
 	}
 	notice := func(s string) { rawNotice(s, s) }
-	// --mins covers every setup step too: the price fetch, the worktree and
-	// starting the harness all run under the run's deadline.
-	setupCtx, setupCancel := context.WithDeadline(ctx, ledger.Deadline())
-	defer setupCancel()
-	setupExpired := func() bool { return errors.Is(setupCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil }
-	exhausted := func(step string) (RunResult, error) {
-		res.Outcome, res.Budget = RunExhausted, ledger.Summary()
-		res.Error = "budget exhausted: --mins ran out during " + step
-		return res, nil
-	}
 
 	cleanup, cerr := proc.CleanLeftovers(o.LiveDir)
 	newRun := func() (runlog.Run, error) { return runlog.NewRun(root) }
@@ -479,23 +487,28 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 
 	// One candidate: nothing to choose, so it is applied as in M3.
 	c := env.child(hs[0], childSpec{prompt: o.Task})
-	env.collect(c) // the only child, and it has stopped
+	env.collect(c) // the only child, and it has stopped (skipped if its cleanup is unconfirmed)
 	res.Harness, res.MCP, res.Allowed, res.Denied = c.Harness, c.MCP, c.Allowed, c.Denied
 	res.Model, res.Reply, res.StopReason, res.Usage, res.Cost = c.Model, c.Reply, c.StopReason, c.Usage, c.Cost
 	res.Settlement, res.Files, res.Error = c.Settlement, c.Files, c.Error
 	res.LeftRunning, res.Unknown = c.LeftRunning, c.Unknown
-	switch c.Outcome {
-	case candUnusable:
+	outcome, why, unconfirmed := env.unconfirmedStop(c.Outcome == candTimedOut, c.Outcome == candExhausted)
+	switch {
+	case unconfirmed:
+		// Not collected, never applied: the worktree is kept.
+		notice(why)
+		res.Outcome, res.Error = outcome, strings.TrimPrefix(c.Error+"; "+why, "; ")
+	case c.Outcome == candUnusable:
 		res.Outcome = RunUnusable
-	case candExhausted:
+	case c.Outcome == candExhausted:
 		res.Outcome = RunExhausted
-	case candTimedOut:
+	case c.Outcome == candTimedOut:
 		res.Outcome = RunTimedOut
-	case candFailed:
+	case c.Outcome == candFailed:
 		res.Outcome = RunFailed
-	case candNoChanges:
+	case c.Outcome == candNoChanges:
 		res.Outcome = RunNoChanges
-	case candChanges:
+	case c.Outcome == candChanges:
 		switch {
 		case o.NoApply:
 			res.Outcome = RunKept
@@ -516,7 +529,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 	// --no-apply always leaves the worktree; so do a failed apply and a
 	// failed or timed-out turn that changed something.
-	if c.wt != nil && (o.NoApply || c.collectFailed || (len(c.Files) > 0 && res.Outcome != RunApplied)) {
+	if c.wt != nil && (unconfirmed || o.NoApply || c.collectFailed || (len(c.Files) > 0 && res.Outcome != RunApplied)) {
 		c.keep()
 		res.Branch, res.Worktree = c.Branch, c.Worktree
 	}

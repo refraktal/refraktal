@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -162,4 +163,47 @@ func wrapWorktreeGit(t *testing.T, cases string) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// Run 7 #3: CreateAt waited for the repository lock with
+// context.Background, so a cancelled create kept waiting for another
+// operation (another candidate's create, another ACP session) to finish.
+func TestCreateHonorsContextWhileRepositoryLocked(t *testing.T) {
+	r := repo(t)
+	var once sync.Once
+	held := lockRepo(r)
+	unlock := func() { once.Do(held) }
+	defer unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := filepath.Join(t.TempDir(), "wt")
+	finished := make(chan error, 1)
+	go func() {
+		_, err := CreateAt(ctx, r, dir, "refraktal/locked-create", "HEAD")
+		finished <- err
+	}()
+	time.Sleep(200 * time.Millisecond) // past the discovery commands, into the lock wait
+	cancel()
+	select {
+	case err := <-finished:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected a cancelled create, got %v", err)
+		}
+	case <-time.After(time.Second):
+		unlock()
+		<-finished
+		t.Fatal("CreateAt ignored its cancellation while waiting for the repository lock")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("a cancelled create left its checkout behind: %v", err)
+	}
+	if out := fixtureGit(t, r, "branch", "--list", "refraktal/locked-create"); out != "" {
+		t.Errorf("a cancelled create left its branch behind: %s", out)
+	}
+}
+
+// lockRepo holds the repository lock until unlock is called.
+func lockRepo(repo string) (unlock func()) {
+	unlock, _ = lockRepoContext(context.Background(), repo)
+	return unlock
 }

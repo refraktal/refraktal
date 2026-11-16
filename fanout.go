@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -59,8 +60,9 @@ type Candidate struct {
 	Score          *float64           `json:"pre_score,omitempty"`
 	ScoreTruncated bool               `json:"pre_score_truncated,omitempty"`
 	Error          string             `json:"error,omitempty"`
-	LeftRunning    int                `json:"left_running"` // processes still running after shutdown
-	Unknown        int                `json:"unknown"`      // processes whose cleanup could not be confirmed
+	LeftRunning    int                `json:"left_running"`             // processes still running after shutdown
+	Unknown        int                `json:"unknown"`                  // processes whose cleanup could not be confirmed
+	CleanupFailed  bool               `json:"cleanup_failed,omitempty"` // the shutdown reported a cleanup error
 
 	wt      *worktree.Worktree
 	pending bool // stopped, not collected yet
@@ -94,6 +96,12 @@ type runEnv struct {
 	// passed down unchanged (REFRAKTAL_NEST_CEILING).
 	nestCeiling int
 
+	// unconfirmed names the children (harness, check or judge) whose
+	// cleanup was not confirmed. Once it is not empty, nothing more is
+	// collected or applied and every worktree is kept.
+	umu         sync.Mutex
+	unconfirmed []string
+
 	amu      sync.Mutex // this run's own figures (the ledger may be shared)
 	charged  float64
 	retained float64
@@ -107,6 +115,45 @@ func (e *runEnv) account(charged, retained float64, turns int) {
 	e.charged += charged
 	e.retained += retained
 	e.turns = satAdd(e.turns, max(0, turns))
+}
+
+// cleanupUnconfirmed records a child whose shutdown left a process
+// running, could not confirm one, or reported a cleanup error.
+func (e *runEnv) cleanupUnconfirmed(child string) {
+	e.umu.Lock()
+	defer e.umu.Unlock()
+	e.unconfirmed = append(e.unconfirmed, child)
+	e.log.Event("cleanup_unconfirmed", map[string]any{"child": child})
+}
+
+// unconfirmedChildren returns the children whose cleanup was not confirmed.
+// Collect and apply run git in the shared repository, so they run only
+// while this is empty: no process of ours can still be changing it.
+func (e *runEnv) unconfirmedChildren() []string {
+	e.umu.Lock()
+	defer e.umu.Unlock()
+	return slices.Clone(e.unconfirmed)
+}
+
+// unconfirmedStop is the outcome of a run stopped by unconfirmed cleanup:
+// failed (exit 1), unless --mins or a budget ended it first (exit 2, per
+// the outcome precedence). ok is false while every cleanup is confirmed.
+func (e *runEnv) unconfirmedStop(timedOut, exhausted bool) (outcome, why string, ok bool) {
+	names := e.unconfirmedChildren()
+	if len(names) == 0 {
+		return "", "", false
+	}
+	why = "cleanup was not confirmed for " + strings.Join(names, ", ") +
+		": nothing more is collected and nothing is applied; every worktree is kept, and the live records stay for the next run's cleanup"
+	switch {
+	case timedOut || !time.Now().Before(e.ledger.Deadline()):
+		outcome = RunTimedOut
+	case exhausted:
+		outcome = RunExhausted
+	default:
+		outcome = RunFailed
+	}
+	return outcome, why, true
 }
 
 // figures copies this run's own figures into the result.
@@ -168,6 +215,11 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 	}
 	c.wt = &wt
 	removeWT := func() {
+		if len(e.unconfirmedChildren()) > 0 {
+			// Removing runs git in the shared repository: kept instead.
+			c.keep()
+			return
+		}
 		if err := e.remove(wt); err != nil {
 			e.log.Event("worktree_remove_failed", map[string]any{"harness": name, "error": runlog.ErrorField("worktree_remove_failed", err.Error())})
 		}
@@ -260,9 +312,23 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 	c.MCP = s.launch.MCP
 	closeSession := func(grace time.Duration) proc.ShutdownReport {
 		sr := s.close(e.log, name, grace)
+		if testChildShutdown != nil {
+			testChildShutdown(name, &sr)
+		}
 		c.LeftRunning, c.Unknown = shutdownCounts(sr)
-		if c.LeftRunning > 0 || c.Unknown > 0 {
-			e.notice(fmt.Sprintf("%s: shutdown incomplete: %d still running, %d unknown; live record kept for retry", name, c.LeftRunning, c.Unknown))
+		c.CleanupFailed = sr.Err != ""
+		if c.LeftRunning > 0 || c.Unknown > 0 || c.CleanupFailed {
+			safe := fmt.Sprintf("%s: shutdown incomplete: %d still running, %d unknown", name, c.LeftRunning, c.Unknown)
+			if c.CleanupFailed {
+				safe += ", cleanup error"
+			}
+			safe += "; live record kept for retry"
+			raw := safe
+			if sr.Err != "" {
+				raw += " (" + sr.Err + ")"
+			}
+			e.rawNotice(raw, safe)
+			e.cleanupUnconfirmed(name)
 		}
 		return sr
 	}
@@ -422,6 +488,18 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 	default:
 		c.Outcome = candNoChanges
 	}
+	if sp.judge && len(e.unconfirmedChildren()) > 0 {
+		// Checking the judge's worktree runs git in the shared repository:
+		// with cleanup unconfirmed, the worktree is kept and the answer
+		// is not used.
+		if c.Outcome != candTimedOut && c.Outcome != candExhausted {
+			c.Outcome, c.Error = candFailed, "cleanup was not confirmed, so the judge's answer is not used"
+		}
+		removeWT()
+		e.log.Event("child_end", map[string]any{"harness": name, "outcome": c.Outcome, "judge": true, "swept": c.swept,
+			"allowed": c.Allowed, "denied": c.Denied})
+		return c
+	}
 	if sp.judge { // the judge's worktree is never collected, but must be unchanged
 		sctx, scancel := e.opCtx()
 		changed, err := wt.Changed(sctx)
@@ -456,6 +534,12 @@ func (e *runEnv) collect(c *Candidate) {
 		return
 	}
 	c.pending = false
+	if len(e.unconfirmedChildren()) > 0 {
+		// Collecting runs git in the shared repository: never while a
+		// process of ours may still be changing it.
+		e.log.Event("collect_skipped", map[string]any{"harness": c.name, "reason": "cleanup unconfirmed"})
+		return
+	}
 	errEvent := func(code, raw string) map[string]any {
 		if c.root != nil {
 			runlog.AppendRaw(c.root, "stderr", code, raw)
@@ -575,6 +659,11 @@ var errCancelled = errors.New("cancelled before the result could be applied; it 
 // forge a child Refraktal's report without a forging agent.
 var testChildTurn func(harness string, t *acp.Turn)
 
+// testChildShutdown, set by tests, edits a child's shutdown report (by its
+// name: the harness, or the suffix such as judge-<harness>): a seam to
+// simulate unconfirmed cleanup without defeating the real kill.
+var testChildShutdown func(name string, sr *proc.ShutdownReport)
+
 // testBeforeApply, set by tests, runs just before the apply's deadline check.
 var testBeforeApply func(deadline time.Time)
 
@@ -676,6 +765,7 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 			failedWithChanges++
 		}
 	}
+	keepEvery := false // unconfirmed cleanup: every worktree is kept
 	finish := func(outcome, why string, keepAll bool) {
 		if failedWithChanges > 0 && (outcome == RunNoChanges || outcome == RunNoWinner) {
 			msg := fmt.Sprintf("%d candidate(s) failed after making changes (kept on their branches) and no candidate produced an applicable result", failedWithChanges)
@@ -686,7 +776,7 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 			res.Error = why
 		}
 		for _, c := range cands {
-			if c.collectFailed || c.failedWithChanges() || keepAll && (len(c.Files) > 0 || e.o.NoApply) {
+			if keepEvery || c.collectFailed || c.failedWithChanges() || keepAll && (len(c.Files) > 0 || e.o.NoApply) {
 				c.keep()
 			}
 			e.drop(c)
@@ -698,6 +788,27 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 			returned.result = worktree.Result{}
 			res.Candidates = append(res.Candidates, returned)
 		}
+	}
+	// stopUnconfirmed ends the run once any child's cleanup is unconfirmed
+	// (outcome precedence: below --mins and budget, above everything else).
+	stopUnconfirmed := func(extra ...*Candidate) bool {
+		timed, ex := false, false
+		for _, c := range append(slices.Clone(cands), extra...) {
+			timed = timed || c != nil && c.Outcome == candTimedOut
+			ex = ex || c != nil && c.Outcome == candExhausted
+		}
+		outcome, why, ok := e.unconfirmedStop(timed, ex)
+		if !ok {
+			return false
+		}
+		e.notice(why)
+		keepEvery = true
+		res.Harness, res.Files, res.Reply, res.Model = "", nil, "", ""
+		finish(outcome, why, true)
+		return true
+	}
+	if stopUnconfirmed() {
+		return
 	}
 	var changed, unusable, timedOut, exhausted, nochange int
 	for _, c := range cands {
@@ -751,6 +862,9 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 		cw.Add(1)
 		go func() {
 			defer cw.Done()
+			if len(e.unconfirmedChildren()) > 0 {
+				return
+			}
 			actx, acancel := context.WithTimeout(cctx, safegit.OperationTimeout)
 			ok := c.wt.CheckApply(actx, c.result) == nil
 			acancel()
@@ -765,11 +879,15 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 			}
 			env := checkEnv(filepath.Join(e.run.Dir, c.Harness, "check-tmp"))
 			for _, s := range plan.Steps {
+				if len(e.unconfirmedChildren()) > 0 {
+					break
+				}
 				r := runCheck(cctx, c.wt.Dir, env, c.root, "check-"+s.Name+".log", e.o.LiveDir,
 					map[string]string{"run": e.run.ID, "harness": c.Harness, "check": s.Name}, s, plan.Timeout)
 				c.Checks = append(c.Checks, r)
 				if raw, safe, ok := r.cleanupNotice(c.Harness); ok {
 					e.rawNotice(raw, safe)
+					e.cleanupUnconfirmed(c.Harness + " check " + s.Name)
 				}
 				if r.Status != CheckPassed {
 					break
@@ -782,6 +900,9 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 		if c.Outcome == candChanges {
 			e.log.Event("checked", map[string]any{"harness": c.Harness, "applies": c.Applies, "checks": c.Checks, "flagged": c.Flagged})
 		}
+	}
+	if stopUnconfirmed() {
+		return
 	}
 	if !time.Now().Before(e.ledger.Deadline()) {
 		finish(RunTimedOut, "--mins ran out during the checks", true)
@@ -829,6 +950,9 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 		prompt := judgePrompt(e.o.Task, close)
 		for _, jh := range judgeOrder(e.o.Harnesses, hs, cands, close) {
 			j = e.child(jh, childSpec{suffix: "judge-" + jh.Name(), share: 1, prompt: prompt, judge: true})
+			if len(e.unconfirmedChildren()) > 0 {
+				break // no further judge, and this one's answer is not used
+			}
 			if j.Outcome == candExhausted {
 				break // refused before it started: no judge to name
 			}
@@ -852,6 +976,10 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 		if j != nil {
 			res.LeftRunning += j.LeftRunning
 			res.Unknown += j.Unknown
+		}
+		if stopUnconfirmed(j) {
+			res.Verdict = &v
+			return
 		}
 		var labels []string
 		for _, c := range close {
@@ -913,6 +1041,9 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 	}
 	res.Verdict = &v
 	e.log.Event("verdict", map[string]any{"verdict": v})
+	if stopUnconfirmed() {
+		return
+	}
 	if winner == nil {
 		finish(RunNoWinner, v.Reason, true)
 		return

@@ -109,7 +109,11 @@ survive even when another candidate wins; if no applicable winner exists while
 failed work remains, the run fails rather than reporting no changes or no winner.
 A candidate whose turn ended for budget or `--mins` keeps that outcome through a
 failed collect: the run exits 2, applies nothing and keeps the work (the outcome
-precedence table in `docs/DESIGN.md`).
+precedence table in `docs/DESIGN.md`). Each child's last shutdown step (a
+candidate's sweep, each check, the judge's sweep) may leave its cleanup
+unconfirmed. From then on nothing is collected or applied, the judge's answer is
+not used, every candidate is kept, and the run ends failed, or exit 2 when a
+budget stop or `--mins` also holds.
 
 `Worktree.Apply` (`internal/worktree/worktree.go`) snapshots touched paths before
 writes. A modeled write failure restores the snapshot before returning, and so
@@ -136,7 +140,7 @@ intersects flags with grants. Lost grants cannot bypass the ceiling.
 | Kill tracker enrollment | Three PID rows with separate PGIDs; root birth 1..3; parent/child birth 0 (invalid) or 1..3; historical parent absent/1..3; root/parent presence and child PPID link independent: 1,536 input snapshots | Current verified parent, missing/invalid births, equal births, stale PPID after parent reuse, then handle acquisition, successful recheck and signal. |
 | Concurrent ledger | Two candidates plus later judge; four USD units/four turns; turn costs `{0,1,3}` | Overlapping reservations, returned shares, cumulative reports, duplicate settlement, cancellation and per-grant final-turn crossing of at most two units. |
 | Child-report boundary | USD/turn grants 1..4; report turns -1..5; costs `{0,1,3,6}` or negative/NaN/infinite/non-USD classes; retained `{0,1,3,5}` or negative/NaN/infinite classes; non-numeric and absent wire costs; decodable, undecodable-report and undecodable-usage responses, and a child ending without a report after `end_turn` or a failed turn; cancelled or normal | Every validation branch, a malformed wire cost, an undecodable report or usage, a missing report forfeited or kept, grant forfeiture and idempotence, valid retained charges, real costs above the grant. Invalid-cost token pricing uses the zero-cost fallback. |
-| Lifecycle | One/two candidates, each optionally stopped for budget or `--mins`; optional judge; one collect/check result each; two touched files; monotonic cancel/deadline | Failed turn with work versus failed collect, a budget stop with a failed collect, snapshot refusal, sequential writes, later write error, rollback, and a post-apply LFS error that rolls back. |
+| Lifecycle | One/two candidates, each optionally stopped for budget or `--mins`; optional judge; one collect/check result each; cleanup confirmed or unconfirmed for each candidate, check and judge; two touched files; monotonic cancel/deadline | Failed turn with work versus failed collect, a budget stop with a failed collect, unconfirmed cleanup of a lone candidate, one fan-out sibling, a check or the judge (with and without a budget stop), snapshot refusal, sequential writes, later write error, rollback, and a post-apply LFS error that rolls back. |
 | Nesting | Nest invalid/negative/0..3; depth/child flags 0..3; ceilings absent/malformed/-1..4; shrinking/lost/malformed grants | Equality/refusal, ceiling lowering and grant loss; at most four admitted runs per chain. |
 
 The bounds exercise the races and guards listed below. They establish no
@@ -202,9 +206,11 @@ unresolved live records may remain indefinitely.
 | Lifecycle | Suppress unused-failed-work outcome | Failed/clean fan-out incorrectly reports no changes | 11 |
 | Lifecycle | Collect failure erases budget exhaustion | Budget-stopped run ends failed (exit 1), not exit 2 | 8 |
 | Lifecycle | Clear snapshot before the post-apply check | Failure reported over a changed tree | 12 |
+| Lifecycle | Collect despite unconfirmed cleanup | Candidate collected after a sibling's cleanup was unconfirmed | 4 |
+| Lifecycle | Apply despite unconfirmed cleanup | Winner admitted after a check's cleanup was unconfirmed | 12 |
 | Nesting | Remove inherited-ceiling refusal | Ceiling exceeded after grant loss/reset flags | 5 |
 
-All 28 checks reproduce the stated counterexample. Trace lengths count
+All 30 checks reproduce the stated counterexample. Trace lengths count
 transitions, excluding the initial state. The legacy retirement fixture retains
 the original mutation under explicitly restricted pre-fix membership selection;
 its guarded baseline passes only that fixture and is not a FAITHFUL claim about
@@ -217,7 +223,7 @@ The no-pidfd limit is reported separately from mutation results.
 
 ## Findings and production reproductions
 
-Findings 1–8 are fixed on main and finding 9 on this branch. Their former
+Findings 1–9 are fixed on main and findings 10–12 on this branch. Their former
 faithful counterexamples now live in mutations, while updated FAITHFUL models
 must pass exhaustive exploration. PR D also fixes the production tracker
 enrollment guard and adds its model (finding 8).
@@ -293,6 +299,34 @@ limit.
    `TestRefraktalChildWithoutReportForfeits` and
    `TestFailedRefraktalChildKeepsItsGrant` (root package) are enforced.
 
+10. **Collect and apply continued after unconfirmed cleanup** (Astra run 7
+   #1): a child whose shutdown left a process running, could not confirm
+   one, or reported a cleanup error only produced a notice. With process
+   inspection failing (`unknown=1`), a fake run still changed the checkout
+   and exited 0. Fixed by making confirmed cleanup a run-wide precondition
+   for collect and apply: from the first unconfirmed child (harness, check or
+   judge) nothing more is collected or applied, every worktree is kept, and
+   the run ends failed (exit 1), or exit 2 under `--mins` or a budget. The
+   two unconfirmed-cleanup mutations reproduce the old collect and apply.
+   `TestUnconfirmedCleanupBlocksCollectAndApply` (root package) runs Astra's
+   failing-`ps` reproduction and seam cases for each child, and is enforced.
+   The lifecycle model assumed every shutdown it modeled was confirmed.
+
+11. **A cancelled worktree create waited for the repository lock** (Astra
+   run 7 #3): `CreateAt` took the lock with `context.Background`, so a
+   cancelled or expired create waited for another create or removal on the
+   same repository. Fixed by waiting through the caller's context, as
+   `Remove` already did. Outside the models (the lock is not modeled).
+   `TestCreateHonorsContextWhileRepositoryLocked` (`internal/worktree`) is
+   enforced.
+
+12. **Setup ran before the `--mins` clock started** (Astra run 7 #4):
+   repository discovery and config loading ran before the ledger, and with
+   it the deadline, was created, so a 30 ms dry run whose discovery took
+   200 ms exited 0. Fixed by creating the ledger at `Run` entry and running
+   every setup step under its deadline. Outside the models (setup is not
+   modeled). `TestSetupCountsAgainstMins` (root package) is enforced.
+
 The new production
 tracker reproduction runs in this sandbox because all signals are intercepted;
 the older process-level reproductions still need the orchestrator.
@@ -303,11 +337,11 @@ The older process-level reproductions were not run in this sandbox, which blocks
 ```sh
 GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
   go test ./internal/proc ./internal/worktree ./verify \
-  -run '^(TestVerifyFinding.*|TestVerifyApplyAtomicityFilesystemError|TestFailedApplyIsRolledBackViaSeam|TestBudgetUntrustedTurnsFindingReproduction|TestPostApplyFailureIsRolledBack)$' \
+  -run '^(TestVerifyFinding.*|TestVerifyApplyAtomicityFilesystemError|TestFailedApplyIsRolledBackViaSeam|TestBudgetUntrustedTurnsFindingReproduction|TestPostApplyFailureIsRolledBack|TestCreateHonorsContextWhileRepositoryLocked)$' \
   -count=1 -v
 GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
   go test . ./internal/acp \
-  -run '^(TestCollectFailureNeverOverridesExhaustion|TestMalformedNestedCostForfeitsTheGrant|TestCostInvalidMarksAPresentUnusableCost|TestUndecodableChildReportForfeitsTheGrant|TestDecodePromptResultFlagsAPresentUndecodableReport|TestRefraktalChildWithoutReportForfeits|TestFailedRefraktalChildKeepsItsGrant)$' \
+  -run '^(TestCollectFailureNeverOverridesExhaustion|TestMalformedNestedCostForfeitsTheGrant|TestCostInvalidMarksAPresentUnusableCost|TestUndecodableChildReportForfeitsTheGrant|TestDecodePromptResultFlagsAPresentUndecodableReport|TestRefraktalChildWithoutReportForfeits|TestFailedRefraktalChildKeepsItsGrant|TestSetupCountsAgainstMins|TestUnconfirmedCleanupBlocksCollectAndApply)$' \
   -count=1 -v
 ```
 
@@ -322,7 +356,10 @@ machine): the complete suite then passed in **36.427 s** (package time),
 added and rebased onto #28 (`4f7c5be`), the complete suite passed in
 **36.662 s** (package time), **38 s wall time**. After finding 9 and its follow-up added the response classes, the report
 validation row was measured again (default cache, same machine) and the
-complete suite passed in **48.814 s** (package time), **49.31 s wall time**. Timings are observations,
+complete suite passed in **48.814 s** (package time), **49.31 s wall time**. After
+finding 10 added unconfirmed cleanup to the lifecycle model, its rows were
+measured again (default cache, same machine) and the complete suite passed in
+**49.557 s** (package time), **50.08 s wall time**. Timings are observations,
 not performance guarantees. Every faithful row below exhausted the full graph;
 the platform-limit row stopped at its expected counterexample.
 
@@ -335,8 +372,8 @@ the platform-limit row stopped at its expected counterexample.
 | Kill, fixed retirement fixture | 8 | 3 | 0.00036 s | Exhaustive, no violation |
 | Budget, FAITHFUL concurrent ledger | 185,881 | 24 | 12.577 s | Exhaustive, no violation |
 | Budget, FAITHFUL report validation | 548,801 | 6 | 7.639 s | Exhaustive, no violation |
-| Lifecycle, FAITHFUL control flow | 5,675 | 24 | 0.220 s | Exhaustive, no violation |
-| Lifecycle, FAITHFUL filesystem errors | 5,791 | 24 | 0.249 s | Exhaustive, no violation |
+| Lifecycle, FAITHFUL control flow | 7,051 | 24 | 0.310 s | Exhaustive, no violation |
+| Lifecycle, FAITHFUL filesystem errors | 7,167 | 24 | 0.319 s | Exhaustive, no violation |
 | Nesting, FAITHFUL | 1,654 | 10 | 0.030 s | Exhaustive, no violation |
 | Kill, no pidfd platform limit | 21,941 | 12 | 1.991 s | Expected unrelated-signal counterexample |
 | Restricted legacy retirement fixture, guard retained | 8 | 3 | 0.00035 s | Exhaustive only for this pre-fix fixture |

@@ -565,8 +565,10 @@ process-group kill does not reach them.
 - **Budgets** as in Budgets above; `--mins` covers the whole run, from
   start-up to the end of the turn: during the turn, `session/cancel`, then
   shutdown, the tree kill and the session sweep (`timed_out`); during any
-  setup step (price fetch, worktree, starting the harness),
-  `budget_exhausted`. Both exit 2. Writes to a harness are bounded (10 s, the
+  setup step (repository discovery, loading the config, the price fetch,
+  the worktree, starting the harness), `budget_exhausted`. The deadline is
+  set when `run` starts, before any setup step, and each step runs under it:
+  a slow repository discovery counts against `--mins` (`--dry` included). Both exit 2. Writes to a harness are bounded (10 s, the
   cancel 2 s), including waiting for the writer lock, so one that stopped
   reading cannot hold up the stop.
 - **Exit codes:** 0 applied, kept or no changes; 1 the turn failed or the
@@ -588,7 +590,10 @@ worktree of its own on branch `refraktal/<run id>-<harness>`.
 
 Git's worktree-list commands (`worktree add`, `worktree remove`, `branch
 -D`) are serialised per repository within a run: in parallel, one can read
-another's half-written administrative folder and fail.
+another's half-written administrative folder and fail. Waiting for that lock
+honours the caller's context, for a create as for a removal: a cancelled or
+expired create (Ctrl-C, `session/cancel`, `--mins`) returns at once instead
+of waiting for another candidate's or another session's operation.
 
 **Budgets across children.** Each child reserves what is left divided by the
 children still to start, so parallel children split `--usd`, and `--turns`
@@ -727,9 +732,10 @@ candidates that did. This is reported ahead of `no_changes`.
   | ---: | --- | --- | ---: | --- | --- |
   | 1 | `--mins` ran out (during a candidate's turn, the checks, the judge, or before the apply) | `timed_out` | 2 | nothing | every candidate with changes, and every failed collect |
   | 2 | A budget was spent before a candidate or the judge could run, or a child Refraktal sent an untrusted report | `budget_exhausted` | 2 | nothing | every candidate with changes, and every failed collect |
-  | 3 | No harness could be started | `unusable` | 3 | nothing | nothing to keep |
-  | 4 | A candidate failed with changes (failed turn, failed collect, refused result) and no candidate is applicable | `failed` | 1 | nothing | every candidate with changes |
-  | 5 | Otherwise: `applied`, `kept`, `apply_failed`, `no_winner`, `no_changes` as described above | | | | |
+  | 3 | A child's cleanup was not confirmed (a harness, check or judge left a process running or unknown, or its cleanup failed) | `failed` | 1 | nothing (and nothing more collected) | every worktree |
+  | 4 | No harness could be started | `unusable` | 3 | nothing | nothing to keep |
+  | 5 | A candidate failed with changes (failed turn, failed collect, refused result) and no candidate is applicable | `failed` | 1 | nothing | every candidate with changes |
+  | 6 | Otherwise: `applied`, `kept`, `apply_failed`, `no_winner`, `no_changes` as described above | | | | |
 
   A collect failure or a refused result is recorded beside the candidate's
   outcome: in its error and the `collected` event. It keeps the candidate's
@@ -739,6 +745,18 @@ candidates that did. This is reported ahead of `no_changes`.
   every child of the run (each candidate harness) has stopped and been swept:
   a still-running harness shares the repository's `.git` and could add a
   filter to its configuration between driver discovery and the collect.
+- **Confirmed cleanup before collect and apply, run-wide.** Collect and
+  apply run git in the shared repository, so they must only run once no
+  process of ours can still be changing it. If any child of the run (a
+  candidate harness, a check or the judge) ends with a process still
+  running (`left_running`), a process whose exit could not be confirmed
+  (`unknown`) or a cleanup error, then from that point nothing more is
+  collected and nothing is applied: every worktree is kept (no `git
+  worktree remove` either), the live records stay for the next run's
+  cleanup, no further check or judge starts, and a judge with unconfirmed
+  cleanup is not used. The run ends `failed` (exit 1) with a notice naming
+  the children, unless `--mins` or a budget ended it first (exit 2, ranks 1
+  and 2 below).
 - **A failed collect keeps the work.** If collecting a candidate fails (a
   stale `index.lock`, say), its worktree and branch are kept and reported,
   whatever the run's outcome; a failed collect never deletes work.
