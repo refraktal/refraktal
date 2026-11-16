@@ -2,6 +2,7 @@ package verify
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -15,6 +16,9 @@ import (
 // relaunches that bypass proc.Start are not counted managed edges. A manual
 // invocation enters as an initial state and uses the no-ceiling fallback.
 // No exploration cutoff is used: intact guards terminate every modeled chain.
+// At most four runs are admitted per chain. Repeated prompts on one ACP
+// server are not new managed edges; server.sharedLedger (acpserver.go) keeps
+// their inherited ledger, which is outside this nesting-only state machine.
 type nestingState struct {
 	Phase                         uint8 // 0 configure, 1 guard, 2 accepted, 3 refused
 	Nest, Depth, Ceiling          int
@@ -25,8 +29,12 @@ type nestingState struct {
 }
 
 func nestingModel(removeGuard bool) model[nestingState] {
+	name := "nesting FAITHFUL"
+	if removeGuard {
+		name = "nesting MUTATION inherited-ceiling refusal"
+	}
 	return model[nestingState]{
-		Name: "nesting", Key: func(s nestingState) string { return fmt.Sprintf("%v", s) },
+		Name: name, Key: func(s nestingState) string { return fmt.Sprintf("%v", s) },
 		Invariant: func(s nestingState) error {
 			if s.Accepted > 0 && (s.MaxAccepted > s.Bound || s.Accepted > s.Bound-s.RootNest+1) {
 				return fmt.Errorf("managed chain exceeded ceiling %d: accepted=%d highest_nest=%d", s.Bound, s.Accepted, s.MaxAccepted)
@@ -51,7 +59,8 @@ func nestingModel(removeGuard bool) model[nestingState] {
 				}
 			case 1:
 				// nestCeiling (run.go), budget.New (internal/budget/budget.go),
-				// and childLimits (acpserver.go) refuse invalid/depleted grants.
+				// and childLimits/server.sharedLedger (acpserver.go) refuse
+				// malformed grants or a negative remaining grant depth.
 				n := s
 				if s.Malformed || s.Depth < 0 || s.Inherited && s.Nest > s.Ceiling && !removeGuard || !s.Inherited && s.Nest > s.Depth+1 {
 					n.Phase = 3
@@ -123,8 +132,8 @@ func TestNestingMutation(t *testing.T) {
 	m.Initial = nestingState{Phase: 1, Depth: 1}
 	r := check(m)
 	t.Log(r.String())
-	if r.Violation == nil {
-		t.Fatal("removing inherited ceiling guard produced no counterexample")
+	if r.Violation == nil || !strings.HasPrefix(r.Violation.Error(), "managed chain exceeded ceiling ") {
+		t.Fatalf("removing inherited ceiling guard missed its intended counterexample: %s", r.String())
 	}
 	if !r.Trace[len(r.Trace)-1].State.LostGrant {
 		t.Fatal("mutation did not exercise the independent guard after grant loss")
