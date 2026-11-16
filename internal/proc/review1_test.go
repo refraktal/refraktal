@@ -247,12 +247,15 @@ func TestStartRefusesARealExecutableInATest(t *testing.T) {
 		}
 		t.Fatalf("a real executable started inside a test: %v", err)
 	}
-	t.Setenv("REFRAKTAL_LIVE", "1")
-	c, err := Start(Spec{Argv: []string{"sleep", "5"}})
+	// Check the positive branch at the launch guard, without enabling live
+	// execution or starting any executable outside this test binary.
+	self, err := os.Executable()
 	if err != nil {
-		t.Fatalf("with REFRAKTAL_LIVE=1: %v", err)
+		t.Fatal(err)
 	}
-	c.Shutdown(100 * time.Millisecond)
+	if err := checkTestLaunch(self); err != nil {
+		t.Fatalf("test binary was refused: %v", err)
+	}
 }
 
 // C. Every child's REFRAKTAL_NEST is one more than its parent's.
