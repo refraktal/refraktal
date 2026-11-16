@@ -84,6 +84,30 @@ func Defaults(cacheDir string) []Harness {
 	}
 }
 
+// Refraktal is a child Refraktal driven over ACP: exe acp (or exe with
+// args, for tests). It has no read-only mode, so it never judges.
+func Refraktal(exe string, args ...string) Harness {
+	if len(args) == 0 {
+		args = []string{"acp"}
+	}
+	return refraktalHarness{exe: exe, args: args}
+}
+
+type refraktalHarness struct {
+	exe  string
+	args []string
+}
+
+func (refraktalHarness) Name() string         { return "refraktal" }
+func (refraktalHarness) Mode() string         { return "default" }
+func (refraktalHarness) ReadOnlyMode() string { return "" }
+func (r refraktalHarness) Prepare(_ context.Context, o Options) (Launch, error) {
+	if r.exe == "" {
+		return Launch{}, errors.New("refraktal: no path to this refraktal binary")
+	}
+	return Launch{Argv: append([]string{r.exe}, r.args...), MCP: MCPIsolated, Installed: "self"}, nil
+}
+
 // DefaultCacheDir is os.UserCacheDir()/refraktal/adapters.
 func DefaultCacheDir() (string, error) {
 	d, err := os.UserCacheDir()

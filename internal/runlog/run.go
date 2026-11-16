@@ -107,6 +107,48 @@ func NewRun(root string) (Run, error) {
 	return Run{}, errors.New("runlog: could not pick a unique run ID")
 }
 
+// NewRunUnder creates a run folder inside parent, a folder a parent
+// Refraktal made in its own run folder for a child Refraktal: the child's
+// run is parent/runs/<id>, so child runs nest in the parent's. parent must be
+// an absolute path to an existing real directory (not a symlink).
+func NewRunUnder(parent string) (Run, error) {
+	if !filepath.IsAbs(parent) {
+		return Run{}, fmt.Errorf("runlog: parent run folder %q is not absolute", parent)
+	}
+	if fi, err := os.Lstat(parent); err != nil || !fi.IsDir() {
+		return Run{}, fmt.Errorf("runlog: parent run folder is not a directory")
+	}
+	top, err := os.OpenRoot(parent)
+	if err != nil {
+		return Run{}, err
+	}
+	defer top.Close()
+	runs, err := ensureDir(top, "runs")
+	if err != nil {
+		return Run{}, err
+	}
+	defer runs.Close()
+	for range 5 {
+		var r [3]byte
+		rand.Read(r[:])
+		id := time.Now().Format("20060102-150405") + "-" + hex.EncodeToString(r[:])
+		err := runs.Mkdir(id, 0o755)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return Run{}, err
+		}
+		pinned, err := ensureDir(runs, id)
+		if err != nil {
+			return Run{}, err
+		}
+		dir := filepath.Join(parent, "runs", id)
+		return Run{ID: id, Dir: dir, Rel: dir, root: pinned}, nil
+	}
+	return Run{}, errors.New("runlog: could not pick a unique run ID")
+}
+
 // ensureDir creates dir, or checks that it is a real directory and not a
 // symlink.
 func ensureDir(parent *os.Root, dir string) (*os.Root, error) {

@@ -175,7 +175,9 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 	pol := policy.Policy{Worktree: wt.Dir, ReadOnly: sp.judge}
 	var mu sync.Mutex
 	var reply strings.Builder
-	childBudget, _ := json.Marshal(map[string]any{"usd": grant.USD, "turns": grant.Turns,
+	// The prompt about to be sent counts as one of the turns: a child
+	// Refraktal has the rest.
+	childBudget, _ := json.Marshal(map[string]any{"usd": grant.USD, "turns": max(0, grant.Turns-1),
 		"deadline": grant.Deadline.UTC().Format(time.RFC3339), "depth": grant.Depth})
 	s, err := openSession(sctx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, scratchRoot: scratchRoot, cwd: wt.Dir, tmpDir: tmp,
 		liveDir: e.o.LiveDir, labels: map[string]string{"run": e.run.ID, "harness": name}, log: e.log, timeout: 2 * time.Minute,
@@ -183,7 +185,9 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 		// REFRAKTAL_RUN tags the child's processes for logs only (the session
 		// sweep finds leftovers). REFRAKTAL_BUDGET is what a child Refraktal
 		// may use.
-		env:       childEnv(e.root, e.o, hcfg, e.run.ID+"-"+name, string(childBudget)),
+		// REFRAKTAL_PARENT_RUN: a child Refraktal makes its run folder here,
+		// inside this run's.
+		env:       append(childEnv(e.root, e.o, hcfg, e.run.ID+"-"+name, string(childBudget)), ParentRunEnv+"="+scratch),
 		prefixExe: e.o.ShellPrefix,
 		onPermission: func(_ context.Context, req acp.PermissionRequest) string {
 			d := pol.Decide(req)
@@ -255,6 +259,11 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 		if ch.Source == budget.Unpriced {
 			e.notice(fmt.Sprintf("warning: no price for model %q; its tokens count as $0 against --usd", ch.Model))
 		}
+	}
+	if ch := turn.Child; ch != nil {
+		// A child Refraktal's own prompts count against --turns too.
+		e.ledger.AddTurns(ch.Turns)
+		e.log.Event("child_run", map[string]any{"harness": name, "turns": ch.Turns, "outcome": ch.Outcome, "exit": ch.Exit})
 	}
 	settle(turn.Cancelled)
 	if st := c.Settlement; st.Overrun > 0 {
@@ -695,18 +704,18 @@ func judgeOrder(all, run []harness.Harness, cands []*Candidate, close []*Candida
 	var out []harness.Harness
 	for i, h := range run {
 		ran[h.Name()] = true
-		if !inClose[h.Name()] && cands[i].Outcome != candUnusable {
+		if !inClose[h.Name()] && cands[i].Outcome != candUnusable && h.ReadOnlyMode() != "" {
 			out = append(out, h)
 		}
 	}
 	for _, h := range all {
-		if !ran[h.Name()] {
+		if !ran[h.Name()] && h.ReadOnlyMode() != "" { // a harness with no read-only mode never judges
 			out = append(out, h)
 		}
 	}
 	for _, c := range close {
 		for _, h := range run {
-			if h.Name() == c.Harness {
+			if h.Name() == c.Harness && h.ReadOnlyMode() != "" {
 				out = append(out, h)
 			}
 		}

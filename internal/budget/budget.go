@@ -182,6 +182,18 @@ func (l *Ledger) BeginTurn(g Grant) error {
 	return nil
 }
 
+// AddTurns counts prompts a child sent on its own (a child Refraktal's
+// harness prompts), so --turns covers the whole tree. Like a cost overrun,
+// they are counted even past the limit: the next BeginTurn is refused.
+func (l *Ledger) AddTurns(n int) {
+	if n <= 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.turns += n
+}
+
 // Charge records a figure for a child's turn. Estimated figures are for
 // reporting only.
 func (l *Ledger) Charge(g Grant, c Charge) {

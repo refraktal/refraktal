@@ -162,9 +162,9 @@ func Load(path string) (Config, error) {
 	}
 	for name, h := range c.Harnesses {
 		switch name {
-		case "claude", "codex", "agy":
+		case "claude", "codex", "agy", "refraktal":
 		default:
-			return c, fmt.Errorf("%s: unknown harness %q (want claude, codex or agy)", path, name)
+			return c, fmt.Errorf("%s: unknown harness %q (want claude, codex, agy or refraktal)", path, name)
 		}
 		for _, k := range h.PassEnv {
 			if !slices.Contains(ProviderKeys, k) {

@@ -59,8 +59,17 @@ type RunOptions struct {
 	// os.UserConfigDir()/refraktal/{live,config.json} and
 	// os.UserCacheDir()/refraktal/worktrees.
 	LiveDir, ConfigPath, WorktreeDir string
-	// Harnesses to choose from. Default harness.Defaults.
+	// Harnesses to choose from. Default harness.Defaults, plus the refraktal
+	// harness when Self is set.
 	Harnesses []harness.Harness
+	// Self is the path to this refraktal binary, for the refraktal harness (a
+	// child Refraktal over ACP). The CLI passes its own path. Empty: none.
+	Self string
+	// ParentRun, set when this run is a child Refraktal's, is the folder in
+	// the parent's run folder where this run's folder is made (so child runs
+	// nest inside the parent's). The acp server takes it from
+	// REFRAKTAL_PARENT_RUN.
+	ParentRun string
 	// ShellPrefix is a binary that calls proc.MaybeShellPrefix first in its
 	// main. It is set as Claude's shell prefix so the sessions its tool
 	// commands run in are recorded and swept. The CLI passes its own path.
@@ -168,6 +177,9 @@ func (o *RunOptions) defaults(ctx context.Context) (root string, err error) {
 			return "", err
 		}
 		o.Harnesses = harness.Defaults(cache)
+		if o.Self != "" {
+			o.Harnesses = append(o.Harnesses, harness.Refraktal(o.Self))
+		}
 	}
 	return root, nil
 }
@@ -259,7 +271,11 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 
 	cleanup, cerr := proc.CleanLeftovers(o.LiveDir)
-	run, err := runlog.NewRun(root)
+	newRun := func() (runlog.Run, error) { return runlog.NewRun(root) }
+	if o.ParentRun != "" {
+		newRun = func() (runlog.Run, error) { return runlog.NewRunUnder(o.ParentRun) }
+	}
+	run, err := newRun()
 	if err != nil {
 		return res, err
 	}
@@ -456,7 +472,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 	env.drop(c)
 	res.Budget = ledger.Summary()
-	log.Event("run_end", map[string]any{"outcome": res.Outcome, "files": res.Files, "branch": res.Branch,
+	log.Event("run_end", map[string]any{"outcome": res.Outcome, "harness": res.Harness, "files": res.Files, "branch": res.Branch,
 		"allowed": res.Allowed, "denied": res.Denied, "error": runlog.ErrorField(res.Outcome, res.Error), "budget": res.Budget,
 		"settlement": res.Settlement, "swept": c.swept, "left_running": res.LeftRunning, "unknown": res.Unknown})
 	return res, nil
