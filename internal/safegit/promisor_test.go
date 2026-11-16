@@ -128,7 +128,15 @@ func testWorktreeSetupDoesNotExecutePromisorRemote(t *testing.T, protocol string
 	if err == nil {
 		t.Fatal("worktree setup succeeded despite the missing promised blob")
 	}
-	if !strings.Contains(err.Error(), blob) {
-		t.Fatalf("missing-object error does not name the missing blob %s: %v", blob, err)
+	message := err.Error()
+	if !strings.HasPrefix(message, "git reset --hard --quiet HEAD:") {
+		t.Fatalf("worktree setup failed before checkout: %v", err)
+	}
+	// The lazy-fetch subprocess can reject the transport before reset writes
+	// the requested OID to its stdin. That gives reset SIGPIPE instead of a
+	// missing-object diagnostic; both failures must leave the helper unrun.
+	transportDenied := strings.Contains(message, "fatal: transport '") && strings.Contains(message, "' not allowed")
+	if !strings.Contains(message, blob) && !transportDenied {
+		t.Fatalf("checkout error neither names missing blob %s nor denies transport: %v", blob, err)
 	}
 }
