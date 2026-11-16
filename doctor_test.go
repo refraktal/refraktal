@@ -53,6 +53,9 @@ func TestMain(m *testing.M) {
 		os.Exit(fakeCheck(os.Args[2:]))
 	}
 	acptest.RunIfTorture()
+	if len(os.Args) > 2 && os.Args[1] == childACPArg {
+		os.Exit(childACP(os.Args[2]))
+	}
 	os.Exit(m.Run())
 }
 

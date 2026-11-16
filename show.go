@@ -91,6 +91,9 @@ func Show(root, id string) (ShowRun, error) {
 		return ShowRun{}, fmt.Errorf("%q is not a run ID", id)
 	}
 	dir := filepath.Join(runs, id)
+	if !realDir(dir) || !realDir(runs) {
+		return ShowRun{}, fmt.Errorf("%w: %s", ErrNoRun, id)
+	}
 	r, err := readRun(dir, 0)
 	if err != nil {
 		return r, err
@@ -104,6 +107,9 @@ const maxNesting = 8
 
 func readRun(dir string, depth int) (ShowRun, error) {
 	r := ShowRun{ID: filepath.Base(dir), Dir: dir, Costs: ShowCosts{BySource: map[string]float64{}}}
+	if fi, err := os.Lstat(filepath.Join(dir, "events.jsonl")); err != nil || !fi.Mode().IsRegular() {
+		return r, fmt.Errorf("%w: %s has no run log", ErrNoRun, r.ID)
+	}
 	f, err := os.Open(filepath.Join(dir, "events.jsonl"))
 	if err != nil {
 		return r, fmt.Errorf("%w: %s has no run log", ErrNoRun, r.ID)
@@ -134,6 +140,9 @@ func readRun(dir string, depth int) (ShowRun, error) {
 		case "child_end":
 			c := ShowChild{Harness: str("harness"), Outcome: str("outcome")}
 			json.Unmarshal(e["judge"], &c.Judge)
+			if c.Judge {
+				c.Harness = strings.TrimPrefix(c.Harness, "judge-") // the attempt's folder name
+			}
 			json.Unmarshal(e["files"], &c.Files)
 			r.Child = append(r.Child, c)
 		case "child_run":
@@ -175,21 +184,44 @@ func readRun(dir string, depth int) (ShowRun, error) {
 	// shows through its turn; fold child_run-only entries into their child.
 	r.Child = mergeChildren(r.Child)
 	if depth < maxNesting {
-		// Nested runs: <dir>/<harness>/runs/<id>, made by a child Refraktal.
-		subs, _ := filepath.Glob(filepath.Join(dir, "*", "runs", "*", "events.jsonl"))
-		sort.Strings(subs)
-		for _, ev := range subs {
-			sub := filepath.Dir(ev)
-			n, err := readRun(sub, depth+1)
-			if err != nil {
-				continue
+		// Nested runs: <dir>/refraktal/runs/<id>, made by a child Refraktal in
+		// the refraktal harness's scratch folder. Nothing else is followed (a
+		// harness writes its own scratch folder), and never a symlink.
+		base := filepath.Join(dir, "refraktal", "runs")
+		if realDir(filepath.Join(dir, "refraktal")) && realDir(base) {
+			entries, _ := os.ReadDir(base)
+			for _, e := range entries {
+				sub := filepath.Join(base, e.Name())
+				if !realDir(sub) {
+					continue
+				}
+				n, err := readRun(sub, depth+1)
+				if err != nil {
+					continue
+				}
+				n.Via, n.Dir = "refraktal", sub
+				r.Nested = append(r.Nested, n)
 			}
-			n.Via = filepath.Base(filepath.Dir(filepath.Dir(sub)))
-			n.Dir = sub
-			r.Nested = append(r.Nested, n)
 		}
 	}
 	return r, sc.Err()
+}
+
+// realDir reports whether path is a directory and not a symlink.
+func realDir(path string) bool {
+	fi, err := os.Lstat(path)
+	return err == nil && fi.IsDir()
+}
+
+// clean drops control characters (terminal escapes among them) from text
+// read from a run log before it is printed.
+func clean(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func mergeChildren(cs []ShowChild) []ShowChild {
@@ -228,7 +260,29 @@ func WriteShowText(w io.Writer, r ShowRun) {
 	writeShow(w, r, "")
 }
 
+// cleanWriter drops control characters from everything written except the
+// newline ending each line.
+type cleanWriter struct{ w io.Writer }
+
+func (c cleanWriter) Write(p []byte) (int, error) {
+	lines := strings.SplitAfter(string(p), "\n")
+	for _, l := range lines {
+		nl := strings.HasSuffix(l, "\n")
+		out := clean(strings.TrimSuffix(l, "\n"))
+		if nl {
+			out += "\n"
+		}
+		if _, err := io.WriteString(c.w, out); err != nil {
+			return 0, err
+		}
+	}
+	return len(p), nil
+}
+
 func writeShow(w io.Writer, r ShowRun, in string) {
+	if _, ok := w.(cleanWriter); !ok {
+		w = cleanWriter{w}
+	}
 	head := "run " + r.ID
 	if r.Via != "" {
 		head = "nested run " + r.ID + " (child Refraktal, via " + r.Via + ")"
