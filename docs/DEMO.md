@@ -16,17 +16,21 @@ $0.80 notional; that is a budget unit Refraktal tracks, not a bill.
 
 ## Install from the release
 
-Download `SHA256SUMS` and the archive for your platform from the
-[v0.1.0 release page](https://github.com/refraktal/refraktal/releases/tag/v0.1.0),
-then:
+Download with `curl`, check the archive against `SHA256SUMS`, then unpack it.
+The steps are chained, so a checksum mismatch stops before anything is
+unpacked:
 
 ```sh
-grep ' refraktal_0.1.0_darwin_arm64.tar.gz$' SHA256SUMS | shasum -a 256 -c - &&
+base=https://github.com/refraktal/refraktal/releases/download/v0.1.0
+curl -fsSLO "$base/SHA256SUMS" && curl -fsSLO "$base/refraktal_0.1.0_darwin_arm64.tar.gz" &&
+  grep ' refraktal_0.1.0_darwin_arm64.tar.gz$' SHA256SUMS | shasum -a 256 -c - &&
   tar -xzf refraktal_0.1.0_darwin_arm64.tar.gz refraktal &&
   mkdir -p ~/.local/bin && mv refraktal ~/.local/bin/
 ```
 
 Use `darwin_amd64` on an Intel Mac. Make sure `~/.local/bin` is on your `PATH`.
+If you downloaded in a browser, run
+`xattr -d com.apple.quarantine ~/.local/bin/refraktal`.
 
 ## A scratch repository
 
