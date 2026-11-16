@@ -653,6 +653,22 @@ could run, exits 2 (`budget_exhausted`) with the candidates kept: when a
 planned candidate could not run, nothing is chosen or applied, even from the
 candidates that did. This is reported ahead of `no_changes`.
 
+- **Outcome precedence.** When more than one condition holds, the run's
+  outcome is the highest row that applies, for one candidate and for a
+  fan-out:
+
+  | Rank | Condition | Outcome | Exit | Applied | Kept |
+  | ---: | --- | --- | ---: | --- | --- |
+  | 1 | `--mins` ran out (during a candidate's turn, the checks, the judge, or before the apply) | `timed_out` | 2 | nothing | every candidate with changes, and every failed collect |
+  | 2 | A budget was spent before a candidate or the judge could run, or a child Refraktal sent an untrusted report | `budget_exhausted` | 2 | nothing | every candidate with changes, and every failed collect |
+  | 3 | No harness could be started | `unusable` | 3 | nothing | nothing to keep |
+  | 4 | A candidate failed with changes (failed turn, failed collect, refused result) and no candidate is applicable | `failed` | 1 | nothing | every candidate with changes |
+  | 5 | Otherwise: `applied`, `kept`, `apply_failed`, `no_winner`, `no_changes` as described above | | | | |
+
+  A collect failure or a refused result is recorded beside the candidate's
+  outcome: in its error and the `collected` event. It keeps the candidate's
+  work. It never changes rank 1 or 2: a candidate that timed out or was
+  exhausted stays so, so the run still exits 2 and no sibling is applied.
 - **Collect after every child has stopped.** No candidate is collected until
   every child of the run (each candidate harness) has stopped and been swept:
   a still-running harness shares the repository's `.git` and could add a
@@ -671,8 +687,10 @@ candidates that did. This is reported ahead of `no_changes`.
   the user's tree half-applied. Before the apply, every path the patch
   touches is snapshotted into `apply-snapshot[-<harness>]/` in the run
   folder, through its pinned root: content, permissions, link target, file
-  or folder or absent, and the permissions of the folders above. On any
-  apply failure every path is restored byte for byte, the files and folders
+  or folder or absent, and the permissions of the folders above. The
+  snapshot is kept until every step after the apply (the LFS attribute
+  check) has also passed. On any failure of the apply or of those steps
+  every path is restored byte for byte, the files and folders
   the apply created are removed, and each path is checked against the
   snapshot; the run is `apply_failed` (exit 1) and the result stays on its
   branch. The restore works through `os.Root` and never through a symlink
@@ -734,7 +752,12 @@ client, including a parent Refraktal, can drive it.
 - **A child's report is untrusted.** The parent accepts it only if the
   turns are within 0 and the child's remaining allowance (the allowance it
   was given), the cost is finite and not negative, and `retained_usd` is
-  finite, not negative and within the grant. Anything else charges the
+  finite, not negative and within the grant. A cost field that is present
+  but malformed (negative, not a number, not an object, no amount, or
+  dropped with a malformed `used` or `size` in the same update) is an
+  untrusted report, not an absent cost: it is never priced from tokens
+  instead. An absent cost (no field, or `null`) is priced from tokens as
+  for any harness. Anything else charges the
   child its whole grant (the unspent dollars as a `forfeited` charge, and
   every unused turn; its real costs are charged first and stand in full, so
   an overrun is never capped), marks it `budget_exhausted` with a notice, and the run
