@@ -130,10 +130,14 @@ func helperEvery(t *testing.T, name string, every time.Duration, env ...string) 
 }
 
 // running reports whether pid is alive and not a zombie.
-func running(pid int) bool {
+func running(t testing.TB, pid int) bool {
+	t.Helper()
 	all, err := List()
+	if err != nil {
+		t.Fatalf("inspect process exit: %v", err)
+	}
 	_, ok := all[pid]
-	return err == nil && ok
+	return ok
 }
 
 func pids(ps []Proc) []int {
@@ -174,7 +178,7 @@ func TestTreeKillCatchesAChildThatLeftTheGroup(t *testing.T) {
 	if !slices.Contains(pids(r.Kill.Killed), pid) || len(r.Kill.Alive) != 0 || r.Err != "" {
 		t.Fatalf("grandchild %d not killed: %+v", pid, r)
 	}
-	if running(pid) {
+	if running(t, pid) {
 		t.Fatalf("grandchild %d still running", pid)
 	}
 }
@@ -225,7 +229,7 @@ func TestKillLeavesAReusedPIDAlone(t *testing.T) {
 	if len(r.Killed) != 0 || len(r.Changed) != 1 {
 		t.Fatalf("want it left alone as changed: %+v", r)
 	}
-	if !running(pid) {
+	if !running(t, pid) {
 		t.Fatal("unrelated process was killed")
 	}
 
@@ -383,7 +387,7 @@ func TestReparentedBackgroundChildDoesNotSurviveShutdown(t *testing.T) {
 		t.Fatalf("background child in session %d (%v), want the child's %d", sid, err, c.PID())
 	}
 	r := c.Shutdown(time.Second)
-	if running(bg) || !slices.Contains(append(pids(r.Kill.Killed), pids(r.Swept.Killed)...), bg) {
+	if running(t, bg) || !slices.Contains(append(pids(r.Kill.Killed), pids(r.Swept.Killed)...), bg) {
 		t.Fatalf("reparented child %d survived: kill %+v swept %+v", bg, r.Kill, r.Swept)
 	}
 }
@@ -405,10 +409,10 @@ func TestSessionSweepCatchesAnUntrackedDetachedChild(t *testing.T) {
 	if slices.Contains(pids(r.Tracked), pid) || slices.Contains(pids(r.Kill.Killed), pid) {
 		t.Fatalf("the child was tracked; the test needs it untracked: %+v", r)
 	}
-	if !slices.Contains(pids(r.Swept.Killed), pid) || running(pid) || r.Err != "" {
+	if !slices.Contains(pids(r.Swept.Killed), pid) || running(t, pid) || r.Err != "" {
 		t.Fatalf("detached child %d not swept: %+v", pid, r)
 	}
-	if !running(stranger) {
+	if !running(t, stranger) {
 		t.Fatal("the sweep killed a process in another session")
 	}
 }
@@ -420,7 +424,7 @@ func TestSessionSweepRefusesAReusedID(t *testing.T) {
 	rec := listed(t, leader)
 	rec.Start = "Mon Jan 1 00:00:00 2001" // the recorded leader was another process
 	r, err := SweepSession(rec)
-	if !errors.Is(err, ErrSessionReused) || len(r.Killed) != 0 || !running(leader) {
+	if !errors.Is(err, ErrSessionReused) || len(r.Killed) != 0 || !running(t, leader) {
 		t.Fatalf("err %v report %+v", err, r)
 	}
 }

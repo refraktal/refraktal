@@ -54,10 +54,10 @@ func TestShellPrefixRecordsTheSessionAndRunsTheCommand(t *testing.T) {
 	}
 	stranger := startSleep(t, &syscall.SysProcAttr{Setsid: true})
 	kr, err := SweepSession(leaders[0])
-	if err != nil || !slices.Contains(pids(kr.Killed), bg) || running(bg) {
+	if err != nil || !slices.Contains(pids(kr.Killed), bg) || running(t, bg) {
 		t.Fatalf("background child %d not swept: %+v %v", bg, kr, err)
 	}
-	if !running(stranger) {
+	if !running(t, stranger) {
 		t.Fatal("the sweep killed a process in another session")
 	}
 }
@@ -118,7 +118,7 @@ func TestShutdownSweepsRecordedSessions(t *testing.T) {
 	if slices.Contains(pids(r.Tracked), bg) {
 		t.Fatalf("the tracker saw the background child; the test needs it untracked: %+v", r.Tracked)
 	}
-	if !slices.Contains(pids(r.Swept.Killed), bg) || running(bg) || r.Err != "" {
+	if !slices.Contains(pids(r.Swept.Killed), bg) || running(t, bg) || r.Err != "" {
 		t.Fatalf("background child %d of a recorded session survived: %+v", bg, r)
 	}
 }

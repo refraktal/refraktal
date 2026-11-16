@@ -112,10 +112,10 @@ func TestCleanLeftovers(t *testing.T) {
 	if r.Records != 4 || r.Live != 1 || r.Dead != 2 || len(r.Errors) != 1 {
 		t.Fatalf("report %+v", r)
 	}
-	if !slices.Contains(pids(r.Kill.Killed), orphan) || running(orphan) {
+	if !slices.Contains(pids(r.Kill.Killed), orphan) || running(t, orphan) {
 		t.Fatalf("orphan %d not killed: %+v", orphan, r.Kill)
 	}
-	if !running(stillOwned) || !running(reused) {
+	if !running(t, stillOwned) || !running(t, reused) {
 		t.Fatal("killed a process of a live run, or a reused PID")
 	}
 	if !slices.Contains(pids(r.Kill.Changed), reused) {
@@ -164,7 +164,7 @@ func TestDeadRunCleanupKillsSessionMembersByIdentity(t *testing.T) {
 	rec.Owner = deadOwner(t)
 	writeRecord(files[0], rec)
 	r, err := CleanLeftovers(live)
-	if err != nil || running(gc) || !slices.Contains(pids(r.Kill.Killed), gc) {
+	if err != nil || running(t, gc) || !slices.Contains(pids(r.Kill.Killed), gc) {
 		t.Fatalf("recorded member %d survived: %+v %v", gc, r, err)
 	}
 	c.Shutdown(time.Second)

@@ -103,7 +103,7 @@ func TestASessionSeenEmptyIsNeverSwept(t *testing.T) {
 	})
 	reusedNow.Store(true)
 	c.Shutdown(time.Second)
-	if !running(stranger) {
+	if !running(t, stranger) {
 		t.Fatal("a stranger in a reused session ID was killed")
 	}
 }
@@ -121,7 +121,7 @@ func TestCleanLeftoversNeverSweepsBySessionID(t *testing.T) {
 	if err != nil || !slices.Contains(pids(r.Kill.Killed), leader.PID) {
 		t.Fatalf("recorded child not killed: %+v %v", r, err)
 	}
-	if !running(member) {
+	if !running(t, member) {
 		t.Fatal("an unrecorded member was killed by session ID")
 	}
 }
@@ -134,7 +134,7 @@ func TestSweepSkipsMembersOlderThanTheLeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !running(member) || slices.Contains(pids(kr.Killed), member) {
+	if !running(t, member) || slices.Contains(pids(kr.Killed), member) {
 		t.Fatal("killed a member older than the recorded leader")
 	}
 }
@@ -211,7 +211,7 @@ func TestRecordedLeaderWithAChangedCommandIsStillSwept(t *testing.T) {
 	rec := listed(t, lead.Process.Pid)
 	rec.Cmd = "refraktal" // as recorded before the exec
 	kr, err := SweepSession(rec)
-	if err != nil || !slices.Contains(pids(kr.Killed), member) || running(member) {
+	if err != nil || !slices.Contains(pids(kr.Killed), member) || running(t, member) {
 		t.Fatalf("member of a live recorded session survived: %+v %v", kr, err)
 	}
 }
@@ -229,7 +229,7 @@ func TestARecordAppendedLateIsSwept(t *testing.T) {
 	c := helperEvery(t, "deaf", time.Hour)
 	c.sessions = sessions
 	c.Shutdown(100 * time.Millisecond)
-	if running(member) {
+	if running(t, member) {
 		t.Fatal("a session recorded after the first read survived")
 	}
 }
@@ -373,7 +373,7 @@ func TestTrackedProcessThatExecsIsStillKilled(t *testing.T) {
 		}
 	}
 	r := c.Shutdown(time.Second)
-	if running(pid) || !slices.Contains(pids(r.Kill.Killed), pid) {
+	if running(t, pid) || !slices.Contains(pids(r.Kill.Killed), pid) {
 		t.Fatalf("the identity-checked kill did not take the tracked process that exec'd: %+v", r.Kill)
 	}
 }

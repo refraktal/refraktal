@@ -77,15 +77,16 @@ func waitUntil(t *testing.T, what string, ok func() bool) {
 	}
 }
 
-func survivors(dir string) []int {
+func survivors(t testing.TB, dir string) []int {
+	t.Helper()
+	all, err := List()
+	if err != nil {
+		t.Fatalf("inspect process exit: %v", err)
+	}
 	var out []int
 	for _, pid := range chainMembers(dir) {
-		if syscall.Kill(pid, 0) == nil {
-			if all, err := List(); err == nil {
-				if _, ok := all[pid]; ok {
-					out = append(out, pid)
-				}
-			}
+		if _, ok := all[pid]; ok {
+			out = append(out, pid)
 		}
 	}
 	return out
@@ -100,7 +101,7 @@ func TestSweepSessionOutlastsForksDuringTheSweep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s := survivors(dir); len(s) != 0 {
+	if s := survivors(t, dir); len(s) != 0 {
 		t.Fatalf("%d chain members survived the sweep (reported alive: %d)", len(s), len(kr.Alive))
 	}
 }
@@ -115,7 +116,7 @@ func TestSweepSessionReportsWhatOutlivesIt(t *testing.T) {
 	sweepFor = 500 * time.Millisecond
 	leader, dir := startChain(t, 1_000)
 	kr, _ := SweepSession(leader)
-	if s := survivors(dir); len(s) > 0 && len(kr.Alive) == 0 {
+	if s := survivors(t, dir); len(s) > 0 && len(kr.Alive) == 0 {
 		t.Fatalf("%d members outlived the sweep, and none was reported alive", len(s))
 	}
 	if len(kr.Alive) == 0 {
