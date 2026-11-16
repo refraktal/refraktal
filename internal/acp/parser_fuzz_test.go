@@ -264,6 +264,7 @@ func FuzzToolCallUpdate(f *testing.F) {
 
 func FuzzPermissionRequest(f *testing.F) {
 	acpHostile(f)
+	f.Add([]byte(`{"sessionId":"unknown","options":[{"optionId":"once","kind":"allow_once"}]}`))
 	f.Add([]byte(`{"sessionId":"s","toolCall":{"toolCallId":"t1","kind":"edit","title":"Write note.txt","rawInput":{"file_path":"note.txt","content":"hello"}},"options":[{"optionId":"always","kind":"allow_always"},{"optionId":"once","kind":"allow_once"},{"optionId":"no","kind":"reject_once"}]}`))
 	f.Add([]byte(`{"sessionId":"s","toolCall":{"toolCallId":"x1","kind":"execute","rawInput":{"command":"git push origin HEAD"}},"options":[{"optionId":"no","kind":"reject_always"}]}`))
 	f.Fuzz(func(t *testing.T, b []byte) {
@@ -291,6 +292,12 @@ func FuzzPermissionRequest(f *testing.F) {
 		if err != nil {
 			if callback != nil || c.turns["s"].turn.Permissions != 0 || response.Error == nil {
 				t.Fatal("invalid permission request reached policy or changed turn")
+			}
+			return
+		}
+		if req.SessionID != "s" {
+			if callback != nil || c.turns["s"].turn.Permissions != 0 || string(response.Result) != `{"outcome":{"outcome":"cancelled"}}` {
+				t.Fatal("permission without an active turn was not cancelled")
 			}
 			return
 		}

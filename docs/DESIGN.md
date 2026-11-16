@@ -122,7 +122,10 @@ cancels and exits 2 (`timed_out`).
 ## Permissions
 
 Refraktal sets each child's mode explicitly and answers the permission
-requests that reach it by policy. Never use `auto`, `acceptEdits`, `agent`,
+requests that reach it by policy. A permission request requires an active,
+uncancelled turn for its session; without one, the client answers `cancelled`
+without consulting the policy. Pending decisions are cancelled when that turn
+ends or is cancelled. Never use `auto`, `acceptEdits`, `agent`,
 `bypassPermissions` or `agent-full-access` for children.
 
 | Harness | Mode | Behaviour observed |
