@@ -231,11 +231,14 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 		return refraktal.ExitNothingUsable
 	}
 	if *asJSON {
-		enc.Encode(struct {
+		if err := enc.Encode(struct {
 			Type string `json:"type"`
 			refraktal.RunResult
 			Exit int `json:"exit"`
-		}{"result", res, res.ExitCode()})
+		}{"result", res, res.ExitCode()}); err != nil {
+			fmt.Fprintf(stderr, "refraktal run: %v\n", err)
+			return refraktal.ExitNothingUsable
+		}
 		return res.ExitCode()
 	}
 	if res.Outcome == refraktal.RunPlanned {

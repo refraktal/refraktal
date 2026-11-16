@@ -517,7 +517,8 @@ process-group kill does not reach them.
   reading cannot hold up the stop.
 - **Exit codes:** 0 applied, kept or no changes; 1 the turn failed or the
   result did not apply; 2 a budget ran out (before the turn, or `--mins`
-  during it); 3 the harness could not be started or logged in.
+  during it); 3 the harness could not be started or logged in, or writing the
+  final `--json` result failed (with the write error reported on stderr).
 
 ## Fan-out and judging (M6)
 
