@@ -588,7 +588,10 @@ worktree of its own on branch `refraktal/<run id>-<harness>`.
 
 Git's worktree-list commands (`worktree add`, `worktree remove`, `branch
 -D`) are serialised per repository within a run: in parallel, one can read
-another's half-written administrative folder and fail.
+another's half-written administrative folder and fail. Waiting for that lock
+honours the caller's context, for a create as for a removal: a cancelled or
+expired create (Ctrl-C, `session/cancel`, `--mins`) returns at once instead
+of waiting for another candidate's or another session's operation.
 
 **Budgets across children.** Each child reserves what is left divided by the
 children still to start, so parallel children split `--usd`, and `--turns`

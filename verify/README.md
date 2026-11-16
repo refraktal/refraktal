@@ -293,6 +293,14 @@ limit.
    `TestRefraktalChildWithoutReportForfeits` and
    `TestFailedRefraktalChildKeepsItsGrant` (root package) are enforced.
 
+11. **A cancelled worktree create waited for the repository lock** (Astra
+   run 7 #3): `CreateAt` took the lock with `context.Background`, so a
+   cancelled or expired create waited for another create or removal on the
+   same repository. Fixed by waiting through the caller's context, as
+   `Remove` already did. Outside the models (the lock is not modeled).
+   `TestCreateHonorsContextWhileRepositoryLocked` (`internal/worktree`) is
+   enforced.
+
 The new production
 tracker reproduction runs in this sandbox because all signals are intercepted;
 the older process-level reproductions still need the orchestrator.
@@ -303,7 +311,7 @@ The older process-level reproductions were not run in this sandbox, which blocks
 ```sh
 GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
   go test ./internal/proc ./internal/worktree ./verify \
-  -run '^(TestVerifyFinding.*|TestVerifyApplyAtomicityFilesystemError|TestFailedApplyIsRolledBackViaSeam|TestBudgetUntrustedTurnsFindingReproduction|TestPostApplyFailureIsRolledBack)$' \
+  -run '^(TestVerifyFinding.*|TestVerifyApplyAtomicityFilesystemError|TestFailedApplyIsRolledBackViaSeam|TestBudgetUntrustedTurnsFindingReproduction|TestPostApplyFailureIsRolledBack|TestCreateHonorsContextWhileRepositoryLocked)$' \
   -count=1 -v
 GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
   go test . ./internal/acp \

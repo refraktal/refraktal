@@ -90,11 +90,6 @@ func readGitfile(dir string) (string, error) {
 // process only: two Refraktal runs on one repository are not serialised.
 var repoLocks sync.Map // canonical repository path -> chan struct{}
 
-func lockRepo(repo string) (unlock func()) {
-	unlock, _ = lockRepoContext(context.Background(), repo)
-	return unlock
-}
-
 func lockRepoContext(ctx context.Context, repo string) (func(), error) {
 	key := repo
 	if r, err := filepath.EvalSymlinks(repo); err == nil {
@@ -159,7 +154,12 @@ func CreateAt(ctx context.Context, repo, dir, branch, base string) (Worktree, er
 	if err != nil {
 		return Worktree{}, err
 	}
-	unlock := lockRepo(repo)
+	// Waiting for the lock honours ctx: a cancelled or expired create must
+	// not wait for another operation on the repository to finish.
+	unlock, err := lockRepoContext(ctx, repo)
+	if err != nil {
+		return Worktree{}, err
+	}
 	_, err = g.Run(ctx, nil, "worktree", "add", "--quiet", "--no-checkout", "-b", branch, dir, w.Base)
 	unlock()
 	if err != nil {
