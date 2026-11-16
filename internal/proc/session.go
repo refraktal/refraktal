@@ -12,8 +12,8 @@ import (
 // inherited by every descendant: through reparenting, through process
 // groups of their own, after the leader exits. Only setsid() leaves a session
 // (pseudo-terminal launchers do that). So at shutdown, the processes of this
-// user still in the harness's session are the harness's leftovers, including
-// any that detached and escaped the parent-PID tracking.
+// user still in the harness's session can include leftovers. A recorded
+// session may empty and be reused between polls, so membership needs proof.
 
 // membersOf lists a session's members; a variable so tests can simulate a
 // session whose ID is reused.
@@ -64,50 +64,56 @@ func sessionMembers(sid int) (members []Proc, occupied bool, err error) {
 	return out, true, nil
 }
 
-// SweepSession kills, with the identity check, every process of this user
-// still in the session that leader started. leader is the session leader as
-// recorded; it is matched on PID and start time only, since its command line
-// may change when it execs. If its PID now belongs to a process with another
-// start time, the ID may name a new session and nothing is killed. A member
-// that started before the leader cannot be in the leader's session and is
-// skipped.
-//
-// SweepSession cannot tell a session that emptied, and whose ID was then
-// reused, from the original: callers sweep only sessions they have never seen
-// empty (Child polls them while it runs).
+// SweepSession kills only provable members of the recorded session. A matching
+// live leader proves that current membership belongs to its session. After the
+// leader exits, membership alone is not proof: the ID may have been reused.
+// Child supplies identities recorded while the session was known to be ours.
 func SweepSession(leader Proc) (KillReport, error) {
+	return sweepSession(leader, []Proc{leader}, nil, nil)
+}
+
+func sweepSession(leader Proc, known []Proc, pinned func() bool, remember func([]Proc)) (KillReport, error) {
 	r := KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}, Unknown: []Proc{}}
 	if leader.PID <= 1 {
 		return r, nil
 	}
-	// A member may fork while the sweep runs, and on a loaded machine each
-	// pass is slow: sweep until the session is empty, for up to sweepFor.
-	// Whatever is still there then is reported alive (never left unreported),
-	// so the live record is kept and the run says so.
 	deadline := time.Now().Add(sweepFor)
+	empty := false
 	for pass := 0; ; pass++ {
-		all, err := List()
-		if err != nil {
-			r.Unknown = append(r.Unknown, leader)
-			return r, err
-		}
-		if now, ok := all[leader.PID]; ok && now.Start != leader.Start {
-			return r, ErrSessionReused
-		}
-		members, _, err := sessionOf(leader)
+		members, occupied, all, err := sessionSnapshot(leader)
 		if err != nil {
 			r.Unknown = append(r.Unknown, leader)
 			return r, err
 		}
 		if len(members) == 0 {
-			r.Alive = r.Alive[:0]
-			break
+			if !occupied && empty {
+				r.Alive = r.Alive[:0]
+				break
+			}
+			empty = !occupied
+			if time.Now().After(deadline) {
+				r.Alive = r.Alive[:0]
+				r.Unknown = append(r.Unknown, leader)
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+			continue
 		}
+		empty = false
+		owned, unknown := provenMembers(leader, members, all, known, pinned != nil && pinned())
+		if remember != nil {
+			remember(owned)
+		}
+		known = provenDescendants(all, append(known, owned...))
+		if remember != nil {
+			remember(known)
+		}
+		r.Unknown = append(r.Unknown, unknown...)
 		if pass > 0 && time.Now().After(deadline) {
-			r.Alive = append(r.Alive[:0], members...)
+			r.Alive = append(r.Alive[:0], owned...)
 			break
 		}
-		kr, err := Kill(members)
+		kr, err := Kill(owned)
 		r.Killed = append(r.Killed, kr.Killed...)
 		r.Gone = append(r.Gone, kr.Gone...)
 		r.Changed = append(r.Changed, kr.Changed...)
@@ -116,9 +122,105 @@ func SweepSession(leader Proc) (KillReport, error) {
 		if err != nil {
 			return r, err
 		}
+		if len(unknown) != 0 {
+			return r, nil
+		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	return r, nil
+}
+
+// sessionSnapshot checks the leader after membership was sampled. A matching
+// leader then existed throughout the sample; a different birth retires the ID.
+func sessionSnapshot(leader Proc) ([]Proc, bool, map[int]Proc, error) {
+	members, occupied, err := sessionOf(leader)
+	if err != nil {
+		return nil, occupied, nil, err
+	}
+	all, err := List()
+	if err != nil {
+		return nil, occupied, nil, err
+	}
+	if now, ok := all[leader.PID]; ok && !now.Same(leader) {
+		return nil, occupied, all, ErrSessionReused
+	}
+	return members, occupied, all, nil
+}
+
+// provenMembers never treats continuity between polls as proof of ownership.
+// Birth identities survive leader exit; new identities need a verified parent
+// chain in this snapshot, or a leader that still reserves the session ID.
+func provenMembers(leader Proc, members []Proc, all map[int]Proc, known []Proc, pinned bool) (owned, unknown []Proc) {
+	if now, ok := all[leader.PID]; pinned || (ok && now.Same(leader)) {
+		return members, nil
+	}
+	trusted := map[int]Proc{}
+	for _, p := range provenDescendants(all, known) {
+		if now, ok := all[p.PID]; ok && now.Same(p) {
+			trusted[p.PID] = p
+		}
+	}
+	for _, m := range members {
+		proved := false
+		for _, k := range known {
+			if k.Same(m) {
+				proved = true
+				break
+			}
+		}
+		if p, ok := trusted[m.PID]; ok && p.Same(m) {
+			proved = true
+		}
+		if proved {
+			owned = append(owned, m)
+		} else {
+			unknown = append(unknown, m)
+		}
+	}
+	return owned, unknown
+}
+
+// provenDescendants follows PPID links only from identities that still match
+// in one snapshot. A stale parent PID alone never establishes ownership.
+func provenDescendants(all map[int]Proc, known []Proc) []Proc {
+	trusted := map[int]Proc{}
+	for _, p := range known {
+		if now, ok := all[p.PID]; ok && now.Same(p) {
+			trusted[p.PID] = now
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for pid, p := range all {
+			if _, ok := trusted[pid]; ok {
+				continue
+			}
+			if parent, ok := trusted[p.PPID]; ok {
+				// ps rows are sampled at different times. An older child
+				// cannot belong to a replacement parent born after it.
+				childBirth, childValid := startTime(p.Start)
+				parentBirth, parentValid := startTime(parent.Start)
+				if childValid && parentValid && !childBirth.Before(parentBirth) {
+					trusted[pid] = p
+					changed = true
+				}
+			}
+		}
+	}
+	// Preserve old birth identities too, so a later PPID reparenting cannot
+	// erase an identity that was proved while its parent was still visible.
+	identities := map[string]Proc{}
+	for _, p := range known {
+		identities[sessionKey(p)] = p
+	}
+	for _, p := range trusted {
+		identities[sessionKey(p)] = p
+	}
+	out := make([]Proc, 0, len(identities))
+	for _, p := range identities {
+		out = append(out, p)
+	}
+	return out
 }
 
 // sessionOf lists the members of leader's session that started no earlier

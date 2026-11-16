@@ -75,9 +75,10 @@ type Child struct {
 	polling chan struct{}
 	spoll   chan struct{} // closed when the session poller has stopped
 
-	smu     sync.Mutex
-	dropped map[string]bool // sessions (by leader PID and start) seen empty: never swept
-	members map[int]Proc    // session members seen by the poller, kept in the live record
+	smu        sync.Mutex
+	dropped    map[string]bool // sessions (by leader PID and start) seen empty: never swept
+	members    map[int]Proc    // proven session members, kept in the live record
+	unresolved map[string]Proc // occupied sessions with unresolved ownership or exit
 
 	once   sync.Once
 	report ShutdownReport
@@ -213,6 +214,10 @@ func (c *Child) writeRecord() error {
 	r := c.recordBase
 	r.Tracked = c.tracker.Tracked()
 	c.smu.Lock()
+	r.UnresolvedSessions = nil
+	for _, l := range c.unresolved {
+		r.UnresolvedSessions = append(r.UnresolvedSessions, l)
+	}
 	for pid, p := range c.members {
 		if i := slices.IndexFunc(r.Tracked, func(q Proc) bool { return q.PID == pid }); i < 0 {
 			r.Tracked = append(r.Tracked, p)
@@ -276,32 +281,81 @@ func (c *Child) checkSessions() {
 		if dropped {
 			continue
 		}
-		members, occupied, err := sessionOf(l)
+		members, occupied, all, err := sessionSnapshot(l)
 		if err == nil && !occupied {
-			// Confirm with a fresh look: one check lists processes, then asks
-			// each for its session, and a fork followed by an exit between the
-			// two can make a live session look empty for a moment.
 			time.Sleep(50 * time.Millisecond)
-			members, occupied, err = sessionOf(l)
+			members, occupied, all, err = sessionSnapshot(l)
 		}
 		if err != nil {
 			continue
 		}
+		owned, _ := provenMembers(l, members, all, c.knownMembers(), c.sessionPinned(l))
+		owned = provenDescendants(all, owned)
 		c.smu.Lock()
 		if !occupied {
 			c.dropped[sessionKey(l)] = true
 		}
-		for _, m := range members {
-			if previous, ok := c.members[m.PID]; !ok || previous != m {
-				c.members[m.PID] = m
-				changed = true
-			}
-		}
 		c.smu.Unlock()
+		if c.rememberMembers(owned) {
+			changed = true
+		}
 	}
 	if changed && c.record != "" {
 		c.writeRecord()
 	}
+}
+
+// sessionPinned is true only for our own unreaped child. Its zombie reserves
+// the session ID even though List omits it. Recorded tool leaders have no pin.
+func (c *Child) sessionPinned(leader Proc) bool {
+	if c.cmd == nil || c.reaped == nil || !leader.Same(c.leader) {
+		return false
+	}
+	select {
+	case <-c.reaped:
+		return false
+	default:
+		return true
+	}
+}
+
+func (c *Child) knownMembers() []Proc {
+	var known []Proc
+	if c.tracker != nil {
+		known = c.tracker.Tracked()
+	}
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	for _, p := range c.members {
+		known = append(known, p)
+	}
+	return append(known, c.leader)
+}
+
+func (c *Child) rememberMembers(members []Proc) bool {
+	changed := false
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	if c.members == nil {
+		c.members = map[int]Proc{}
+	}
+	for _, m := range members {
+		previous, exists := c.members[m.PID]
+		if !exists || previous.Same(m) {
+			if !exists || previous != m {
+				changed = true
+			}
+			c.members[m.PID] = m
+			continue
+		}
+		observed, valid := startTime(m.Start)
+		prior, priorValid := startTime(previous.Start)
+		if valid && (!priorValid || observed.After(prior)) {
+			c.members[m.PID] = m
+			changed = true
+		}
+	}
+	return changed
 }
 
 // sweepSessions sweeps the child's session and every recorded session never
@@ -321,7 +375,17 @@ func (c *Child) sweepSessions() (KillReport, error) {
 				continue
 			}
 			done[k] = true
-			kr, err := SweepSession(l)
+			kr, err := sweepSession(l, c.knownMembers(), func() bool { return c.sessionPinned(l) }, func(members []Proc) { c.rememberMembers(members) })
+			c.smu.Lock()
+			if len(kr.Unknown) != 0 {
+				if c.unresolved == nil {
+					c.unresolved = map[string]Proc{}
+				}
+				c.unresolved[k] = l
+			} else {
+				delete(c.unresolved, k)
+			}
+			c.smu.Unlock()
 			if err != nil && !errors.Is(err, ErrSessionReused) && firstErr == nil {
 				firstErr = err
 			}
@@ -472,7 +536,7 @@ func (c *Child) shutdown(grace time.Duration) ShutdownReport {
 		// The final sweep can discover processes the pollers never recorded.
 		// Preserve every known identity whose cleanup needs another attempt.
 		c.smu.Lock()
-		for _, pending := range [][]Proc{kr.Alive, kr.Unknown, swept.Alive, swept.Unknown} {
+		for _, pending := range [][]Proc{kr.Alive, kr.Unknown, swept.Alive} {
 			for _, p := range pending {
 				if p.Start != "" {
 					c.members[p.PID] = p

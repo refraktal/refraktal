@@ -262,20 +262,64 @@ func TestTortureWideDeepRecordedTrees(t *testing.T) {
 			}
 		}
 		leaders, err := RecordedSessions(filepath.Join(s.Dir, "sessions"))
-		return err == nil && len(leaders) == 1 && leaders[0].PID != c.PID() && len(daemons) == 2
+		return err == nil && len(leaders) == 1 && leaders[0].PID != c.PID() &&
+			all[leaders[0].PID].PID == 0 && len(daemons) == 2
 	})
-	var escaped bool
+	// These identities come from this fixture's own inventory, captured while
+	// the processes were alive. They are test teardown targets only; the
+	// production sweep must establish its own ownership independently.
+	t.Cleanup(func() {
+		checkSentinel()
+		r, err := Kill(daemons)
+		if err != nil || len(r.Alive)+len(r.Unknown) != 0 {
+			t.Errorf("owned daemon teardown: alive/unknown %d/%d, error %v", len(r.Alive), len(r.Unknown), err)
+		}
+	})
+	var escaped Proc
+	var escapedSID int
 	for _, p := range daemons {
 		sid, err := getsid(p.PID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		escaped = escaped || sid != c.PID()
+		if sid != c.PID() {
+			if escaped.PID != 0 {
+				t.Fatal("fixture created more than one escaped daemon")
+			}
+			escaped, escapedSID = p, sid
+		}
 	}
-	if !escaped {
+	if escaped.PID == 0 {
 		t.Fatal("fixture did not create a setsid escape")
 	}
-	tortureReport(t, c.Shutdown(10*time.Millisecond))
+	rep := c.Shutdown(10 * time.Millisecond)
+	if slices.Contains(pids(rep.Tracked), escaped.PID) {
+		// An early tree poll may have recorded the daemon before it detached.
+		// That birth identity remains a sufficient target after reparenting.
+		tortureReport(t, rep)
+	} else {
+		// Its tool-session leader has exited and been reaped. Without a recorded
+		// identity or live parent chain, current membership alone cannot prove
+		// that this daemon belongs to the original session.
+		if rep.Err != "" || len(rep.Kill.Alive)+len(rep.Kill.Unknown)+len(rep.Swept.Alive) != 0 ||
+			len(rep.Swept.Unknown) != 1 || !rep.Swept.Unknown[0].Same(escaped) ||
+			slices.Contains(pids(rep.Swept.Killed), escaped.PID) {
+			t.Fatalf("unproved daemon was killed or not reported unknown: %+v", rep)
+		}
+		now, err := listPID(escaped.PID)
+		if err != nil || !now.Same(escaped) {
+			t.Fatalf("unproved daemon did not survive: %v", err)
+		}
+		rec, err := loadRecord(c.record)
+		if err != nil || slices.Contains(pids(rec.Tracked), escaped.PID) || len(rec.UnresolvedSessions) != 1 || rec.UnresolvedSessions[0].PID != escapedSID {
+			t.Fatalf("unproved daemon lost its unresolved live record: %+v, error %v", rec, err)
+		}
+		checkSentinel()
+		cleanup, err := Kill([]Proc{escaped})
+		if err != nil || len(cleanup.Alive)+len(cleanup.Unknown) != 0 {
+			t.Fatalf("owned daemon teardown: %+v, error %v", cleanup, err)
+		}
+	}
 	tortureGone(t, s)
 	checkSentinel()
 }

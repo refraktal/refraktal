@@ -70,8 +70,10 @@ type Options struct {
 	// OnNotification receives every other notification, such as a harness's
 	// auth status (which carries account details: do not log it verbatim).
 	OnNotification func(method string, params json.RawMessage)
-	// OnPermission answers session/request_permission with an option ID, or
-	// "" for the cancelled outcome. ctx is cancelled if the turn is cancelled
+	// OnPermission answers session/request_permission during an active turn
+	// with an option ID, or "" for the cancelled outcome. Requests without an
+	// active, uncancelled turn are answered "cancelled" without calling it.
+	// ctx is cancelled if the turn is cancelled
 	// first; the client then answers "cancelled" itself, as ACP requires. If
 	// nil, every request is rejected.
 	OnPermission func(ctx context.Context, req PermissionRequest) string
@@ -350,28 +352,30 @@ func (c *Client) request(m message) {
 	}
 	req.Raw = m.Params
 	c.mu.Lock()
-	ctx := context.Background()
-	if ts := c.turns[req.SessionID]; ts != nil {
+	var ctx context.Context // nil means this session has no permission authority
+	if ts := c.turns[req.SessionID]; ts != nil && ts.ctx.Err() == nil {
 		ctx = ts.ctx
 		ts.turn.Permissions++
 	}
 	c.mu.Unlock()
 	go func() {
-		answer := make(chan string, 1)
-		go func() {
-			if c.opts.OnPermission == nil {
-				answer <- req.reject()
-				return
-			}
-			answer <- c.opts.OnPermission(ctx, req)
-		}()
 		var id string
-		select {
-		case id = <-answer:
-		case <-ctx.Done():
-		}
-		if ctx.Err() != nil {
-			id = "" // once the turn is cancelled, every pending request is answered "cancelled"
+		if ctx != nil {
+			answer := make(chan string, 1)
+			go func() {
+				if c.opts.OnPermission == nil {
+					answer <- req.reject()
+					return
+				}
+				answer <- c.opts.OnPermission(ctx, req)
+			}()
+			select {
+			case id = <-answer:
+			case <-ctx.Done():
+			}
+			if ctx.Err() != nil {
+				id = "" // a cancelled turn cannot approve a pending request
+			}
 		}
 		outcome := map[string]any{"outcome": "cancelled"}
 		if id != "" {
@@ -440,7 +444,7 @@ func (c *Client) SetMode(ctx context.Context, sessionID, mode string) error {
 // response. The returned Turn then has Cancelled set. If no response comes,
 // the error is ErrCancelIgnored and the caller must shut the agent down.
 func (c *Client) Prompt(ctx context.Context, sessionID, text string) (Turn, error) {
-	tctx, tcancel := context.WithCancel(context.Background())
+	tctx, tcancel := context.WithCancel(ctx)
 	ts := &turnState{ctx: tctx}
 	c.mu.Lock()
 	if c.turns[sessionID] != nil {

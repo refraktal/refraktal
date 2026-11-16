@@ -2,6 +2,7 @@ package proc
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,10 +55,10 @@ func TestShellPrefixRecordsTheSessionAndRunsTheCommand(t *testing.T) {
 	}
 	stranger := startSleep(t, &syscall.SysProcAttr{Setsid: true})
 	kr, err := SweepSession(leaders[0])
-	if err != nil || !slices.Contains(pids(kr.Killed), bg) || running(bg) {
+	if err != nil || !slices.Contains(pids(kr.Killed), bg) || running(t, bg) {
 		t.Fatalf("background child %d not swept: %+v %v", bg, kr, err)
 	}
-	if !running(stranger) {
+	if !running(t, stranger) {
 		t.Fatal("the sweep killed a process in another session")
 	}
 }
@@ -83,8 +84,9 @@ func TestShellPrefixChainsAUserPrefix(t *testing.T) {
 }
 
 // A child whose tool commands run in sessions of their own (as Claude's do):
-// the harness-session sweep cannot reach their background children, the
-// recorded-session sweep must.
+// the harness-session sweep cannot reach their background children. Record
+// them while the tool leader proves ownership, then require the recorded-
+// session sweep to reach them after reparenting.
 func TestShutdownSweepsRecordedSessions(t *testing.T) {
 	sessions := filepath.Join(t.TempDir(), "sessions")
 	self, _ := os.Executable()
@@ -93,10 +95,23 @@ func TestShutdownSweepsRecordedSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { c.Shutdown(0) })
 	bg := readPID(t, bufio.NewReader(c.Stdout))
 	defer syscall.Kill(bg, syscall.SIGKILL)
 	if sid, _ := getsid(bg); sid == c.PID() {
 		t.Fatal("the tool command ran in the harness's session; the test needs a session of its own")
+	}
+	// The fixture holds the tool leader at a gate. Poll while its birth
+	// identity still proves the session is ours, before allowing it to exit.
+	c.checkSessions()
+	c.smu.Lock()
+	recorded, known := c.members[bg]
+	c.smu.Unlock()
+	if !known || recorded.PID != bg || recorded.Start == "" {
+		t.Fatal("background child was not recorded while its leader was alive")
+	}
+	if _, err := fmt.Fprintln(c.Stdin, "release"); err != nil {
+		t.Fatal(err)
 	}
 	// The tracker finds descendants through their parents: until the tool
 	// shell that started bg has exited (and bg is reparented), bg is still a
@@ -118,7 +133,7 @@ func TestShutdownSweepsRecordedSessions(t *testing.T) {
 	if slices.Contains(pids(r.Tracked), bg) {
 		t.Fatalf("the tracker saw the background child; the test needs it untracked: %+v", r.Tracked)
 	}
-	if !slices.Contains(pids(r.Swept.Killed), bg) || running(bg) || r.Err != "" {
+	if !slices.Contains(pids(r.Swept.Killed), bg) || running(t, bg) || r.Err != "" {
 		t.Fatalf("background child %d of a recorded session survived: %+v", bg, r)
 	}
 }

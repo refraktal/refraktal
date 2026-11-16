@@ -83,6 +83,7 @@ func TestChildRecordKeepsNewestVerifiedIdentity(t *testing.T) {
 }
 
 func TestSessionRecordRefreshesReusedPID(t *testing.T) {
+	fakePS(t, "echo '101 1 101 501 S Sun Nov 15 15:45:50 2026 harness'")
 	old := Proc{PID: 102, PGID: 101, Start: "Sun Nov 15 15:45:51 2026"}
 	newer := old
 	newer.Start = "Sun Nov 15 15:45:52 2026"

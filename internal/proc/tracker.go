@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"sync"
 	"syscall"
@@ -164,7 +165,7 @@ type KillReport struct {
 	Gone    []Proc `json:"gone"`    // had already exited
 	Changed []Proc `json:"changed"` // its PID now belongs to a different process: left alone
 	Alive   []Proc `json:"alive"`   // sent SIGKILL but still running killConfirm (5 s) later
-	Unknown []Proc `json:"unknown"` // lookup failed: identity or exit could not be confirmed
+	Unknown []Proc `json:"unknown"` // identity, ownership or exit could not be confirmed
 }
 
 // killConfirm is how long Kill waits for killed processes to disappear.
@@ -174,9 +175,10 @@ const killConfirm = 5 * time.Second
 var listForKill = List
 
 // Kill sends SIGKILL to each process that is still running as recorded: same
-// PID and start time, checked again immediately before its own signal, so the
-// window for a PID reuse is as small as one ps call. A process whose PID has
-// been reused is not touched. Kill never targets this process or PID 1.
+// PID and start time. It acquires an os.Process before rechecking identity and
+// signals that handle. On Linux, a pidfd pins the target across PID reuse;
+// when pidfds are unavailable, and on macOS, the check-to-signal window remains.
+// Kill never targets this process or PID 1.
 func Kill(procs []Proc) (KillReport, error) {
 	r := KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}, Unknown: []Proc{}}
 	var lookupErr error
@@ -184,6 +186,16 @@ func Kill(procs []Proc) (KillReport, error) {
 	for _, p := range procs {
 		if p.PID <= 1 || p.PID == self {
 			r.Changed = append(r.Changed, p)
+			continue
+		}
+		// FindProcess opens the pidfd on Linux before the identity check. A
+		// process that exits after that check cannot redirect the signal to
+		// a replacement with the same PID. Go falls back to a PID-backed
+		// Process when pidfds are unavailable (for example, ENOSYS).
+		process, err := findProcessForKill(p.PID)
+		if err != nil {
+			r.Unknown = append(r.Unknown, p)
+			lookupErr = errors.Join(lookupErr, fmt.Errorf("process %d: %w", p.PID, err))
 			continue
 		}
 		now, err := recheckPID(p.PID)
@@ -196,9 +208,10 @@ func Kill(procs []Proc) (KillReport, error) {
 		case !now.Same(p):
 			r.Changed = append(r.Changed, p)
 		default:
-			signal(p.PID, syscall.SIGKILL)
+			signalProcessForKill(process, syscall.SIGKILL)
 			r.Killed = append(r.Killed, p)
 		}
+		process.Release() // do not keep one pidfd per target during confirmation
 	}
 	if len(r.Killed) == 0 {
 		return r, lookupErr
@@ -226,9 +239,11 @@ func Kill(procs []Proc) (KillReport, error) {
 	}
 }
 
-// recheckPID and signal are variables so tests can simulate a PID that
-// changes identity between the check and the signal.
+// These seams let tests intercept both PID and handle-based signals. The
+// PID signal is retained for process groups, which have no pidfd equivalent.
 var (
-	recheckPID = listPID
-	signal     = syscall.Kill
+	recheckPID           = listPID
+	signal               = syscall.Kill
+	findProcessForKill   = os.FindProcess
+	signalProcessForKill = (*os.Process).Signal
 )

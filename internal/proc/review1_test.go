@@ -103,7 +103,7 @@ func TestASessionSeenEmptyIsNeverSwept(t *testing.T) {
 	})
 	reusedNow.Store(true)
 	c.Shutdown(time.Second)
-	if !running(stranger) {
+	if !running(t, stranger) {
 		t.Fatal("a stranger in a reused session ID was killed")
 	}
 }
@@ -121,7 +121,7 @@ func TestCleanLeftoversNeverSweepsBySessionID(t *testing.T) {
 	if err != nil || !slices.Contains(pids(r.Kill.Killed), leader.PID) {
 		t.Fatalf("recorded child not killed: %+v %v", r, err)
 	}
-	if !running(member) {
+	if !running(t, member) {
 		t.Fatal("an unrecorded member was killed by session ID")
 	}
 }
@@ -134,7 +134,7 @@ func TestSweepSkipsMembersOlderThanTheLeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !running(member) || slices.Contains(pids(kr.Killed), member) {
+	if !running(t, member) || slices.Contains(pids(kr.Killed), member) {
 		t.Fatal("killed a member older than the recorded leader")
 	}
 }
@@ -211,14 +211,14 @@ func TestRecordedLeaderWithAChangedCommandIsStillSwept(t *testing.T) {
 	rec := listed(t, lead.Process.Pid)
 	rec.Cmd = "refraktal" // as recorded before the exec
 	kr, err := SweepSession(rec)
-	if err != nil || !slices.Contains(pids(kr.Killed), member) || running(member) {
+	if err != nil || !slices.Contains(pids(kr.Killed), member) || running(t, member) {
 		t.Fatalf("member of a live recorded session survived: %+v %v", kr, err)
 	}
 }
 
-// 7. A record appended after the first read of the sessions file is swept by
-// the second read.
-func TestARecordAppendedLateIsSwept(t *testing.T) {
+// 7. The second read sees a late record, but its reaped leader cannot prove
+// that an unseen reparented member belongs to the original session.
+func TestARecordAppendedLateIsReportedUnknown(t *testing.T) {
 	sessions := filepath.Join(t.TempDir(), "sessions")
 	leaderPID, member := startSessionWithMember(t)
 	orig := betweenRecordedReads
@@ -228,9 +228,9 @@ func TestARecordAppendedLateIsSwept(t *testing.T) {
 	defer func() { betweenRecordedReads = orig }()
 	c := helperEvery(t, "deaf", time.Hour)
 	c.sessions = sessions
-	c.Shutdown(100 * time.Millisecond)
-	if running(member) {
-		t.Fatal("a session recorded after the first read survived")
+	r := c.Shutdown(100 * time.Millisecond)
+	if !running(t, member) || !slices.Contains(pids(r.Swept.Unknown), member) || slices.Contains(pids(r.Swept.Killed), member) {
+		t.Fatalf("late unproven member was killed or omitted: %+v", r.Swept)
 	}
 }
 
@@ -247,12 +247,15 @@ func TestStartRefusesARealExecutableInATest(t *testing.T) {
 		}
 		t.Fatalf("a real executable started inside a test: %v", err)
 	}
-	t.Setenv("REFRAKTAL_LIVE", "1")
-	c, err := Start(Spec{Argv: []string{"sleep", "5"}})
+	// Check the positive branch at the launch guard, without enabling live
+	// execution or starting any executable outside this test binary.
+	self, err := os.Executable()
 	if err != nil {
-		t.Fatalf("with REFRAKTAL_LIVE=1: %v", err)
+		t.Fatal(err)
 	}
-	c.Shutdown(100 * time.Millisecond)
+	if err := checkTestLaunch(self); err != nil {
+		t.Fatalf("test binary was refused: %v", err)
+	}
 }
 
 // C. Every child's REFRAKTAL_NEST is one more than its parent's.
@@ -373,7 +376,7 @@ func TestTrackedProcessThatExecsIsStillKilled(t *testing.T) {
 		}
 	}
 	r := c.Shutdown(time.Second)
-	if running(pid) || !slices.Contains(pids(r.Kill.Killed), pid) {
+	if running(t, pid) || !slices.Contains(pids(r.Kill.Killed), pid) {
 		t.Fatalf("the identity-checked kill did not take the tracked process that exec'd: %+v", r.Kill)
 	}
 }
