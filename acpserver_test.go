@@ -631,3 +631,23 @@ func TestServeACPSplitsLargeSummaries(t *testing.T) {
 		t.Fatalf("summary reassembled to %d bytes in %d frames", len(text.String()), len(lines))
 	}
 }
+
+// Review M7 (3), rename variant (automated review): deleting a file outside
+// the session folder and recreating it inside looks like a rename, whose
+// name-only listing shows only the new path. The confinement check must see
+// both sides.
+func TestSessionSubfolderSeesRenames(t *testing.T) {
+	r := newRunRig(t)
+	content := strings.Repeat("a line that git will recognise as the same file\n", 20)
+	os.MkdirAll(filepath.Join(r.repo, "sub"), 0o755)
+	os.WriteFile(filepath.Join(r.repo, "sub", "keep"), []byte("k\n"), 0o644)
+	os.WriteFile(filepath.Join(r.repo, "move.txt"), []byte(content), 0o644)
+	r.git(t, "add", "-A")
+	r.git(t, "commit", "-q", "-m", "files")
+	c := serve(t, r.serveOptions(fake{name: "claude", agentMode: "turn",
+		env: []string{"ACPTEST_RAWDELETE=../move.txt", "ACPTEST_RAWWRITE=moved.txt=" + strings.TrimSuffix(content, "\n")}}, nil), nil)
+	turn, _ := c.Prompt(context.Background(), open(t, c, filepath.Join(r.repo, "sub")), "x")
+	if !exists(filepath.Join(r.repo, "move.txt")) || turn.StopReason == "end_turn" {
+		t.Fatalf("a rename from outside the session folder was applied: %+v", turn)
+	}
+}

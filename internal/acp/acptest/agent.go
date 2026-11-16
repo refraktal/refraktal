@@ -373,6 +373,11 @@ func (a *agent) prompt(id json.RawMessage) {
 	}
 	a.chunk("Hello")
 	a.writes()
+	for _, f := range strings.Split(os.Getenv("ACPTEST_RAWDELETE"), "|") { // deletes without asking
+		if f != "" {
+			os.Remove(filepath.Join(a.cwd, f))
+		}
+	}
 	if w := os.Getenv("ACPTEST_RAWWRITE"); w != "" { // writes without asking: a sandbox that failed
 		for _, kv := range strings.Split(w, "|") {
 			path, content, _ := strings.Cut(kv, "=")

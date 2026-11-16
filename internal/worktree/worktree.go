@@ -180,7 +180,9 @@ func CreateAt(ctx context.Context, repo, dir, branch, base string) (Worktree, er
 }
 
 // Collect commits everything the child changed in the worktree (new files
-// included, ignored files not) and returns it as a diff from Base. Commits
+// included, ignored files not) and returns it as a diff from Base. Rename
+// detection is off (--no-renames, whatever diff.renames says), so a file
+// moved from elsewhere lists both its old and its new path. Commits
 // the child made itself are included.
 func (w Worktree) Collect(ctx context.Context, message string) (Result, error) {
 	if w.gitDir == "" {
@@ -197,7 +199,7 @@ func (w Worktree) Collect(ctx context.Context, message string) (Result, error) {
 			return Result{}, err
 		}
 	}
-	names, err := g.Run(ctx, nil, "diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--no-ext-diff", "--no-textconv", "--name-only", "-z", w.Base, "HEAD")
+	names, err := g.Run(ctx, nil, "diff", "--no-color", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", "--no-ext-diff", "--no-textconv", "--name-only", "-z", w.Base, "HEAD")
 	if err != nil {
 		return Result{}, err
 	}
@@ -210,7 +212,7 @@ func (w Worktree) Collect(ctx context.Context, message string) (Result, error) {
 	if len(r.Files) == 0 {
 		return r, nil
 	}
-	if r.Diff, err = g.Run(ctx, nil, "diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--no-ext-diff", "--no-textconv", "--binary", w.Base, "HEAD"); err != nil {
+	if r.Diff, err = g.Run(ctx, nil, "diff", "--no-color", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", "--no-ext-diff", "--no-textconv", "--binary", w.Base, "HEAD"); err != nil {
 		return r, err
 	}
 	head, err := g.Run(ctx, nil, "rev-parse", "HEAD")
