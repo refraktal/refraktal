@@ -36,13 +36,12 @@ func fakeCheck(args []string) int {
 			return 0
 		}
 		return 1
-	case "env": // reports leaked variables, then leaves a detached sleeper behind
+	case "env": // prints every variable name and TMPDIR, then leaves a detached sleeper behind
 		for _, kv := range os.Environ() {
 			name, _, _ := strings.Cut(kv, "=")
-			if strings.HasPrefix(name, "GIT_") || strings.HasSuffix(name, "_API_KEY") {
-				fmt.Println("leaked", name)
-			}
+			fmt.Println("var", name)
 		}
+		fmt.Println("tmpdir", os.Getenv("TMPDIR"))
 		kid := exec.Command("sleep", "30")
 		kid.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		if kid.Start() == nil {
@@ -280,13 +279,30 @@ func TestChecksRunSandboxed(t *testing.T) {
 	r := newRunRig(t)
 	t.Setenv("GIT_REFRAKTAL_PROBE", "1")
 	t.Setenv("GEMINI_API_KEY", "should-not-leak")
+	t.Setenv("OPENAI_API_KEY", "should-not-leak")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "should-not-leak")
+	t.Setenv("SOME_TOKEN", "should-not-leak")
+	t.Setenv("GOFLAGS", "-count=1")
 	argv, _ := json.Marshal([]string{self(t), fakeCheckArg, "env"})
 	os.WriteFile(r.config, []byte(`{"checks": {"`+r.repo+`": {"test": `+string(argv)+`}}}`), 0o600)
 	res := r.fan(t, []harness.Harness{writer("claude", "a.txt=1", "ACPTEST_JUDGE=WINNER: A"), writer("codex", "b.txt=2")}, nil)
 	for _, name := range []string{"claude", "codex"} {
 		b, err := os.ReadFile(filepath.Join(r.repo, res.Run, name, "check-test.log"))
-		if err != nil || strings.Contains(string(b), "leaked") {
-			t.Fatalf("%s check log %q %v", name, b, err)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Review (3): an allow-listed environment, nothing else.
+		for _, l := range strings.Split(string(b), "\n") {
+			v, ok := strings.CutPrefix(l, "var ")
+			if ok && !checkEnvAllowed(v) && v != "REFRAKTAL_NEST" {
+				t.Errorf("%s: the check got %s", name, v)
+			}
+		}
+		if !strings.Contains(string(b), "var GOFLAGS") || !strings.Contains(string(b), "var PATH") {
+			t.Errorf("%s: toolchain variables or PATH missing", name)
+		}
+		if !strings.Contains(string(b), "tmpdir "+filepath.Join(r.repo, res.Run)) && !strings.Contains(string(b), "tmpdir "+canonPath(filepath.Join(r.repo, res.Run))) {
+			t.Errorf("%s: TMPDIR is not in the run folder", name)
 		}
 		_, after, ok := strings.Cut(string(b), "detached ")
 		pid, _ := strconv.Atoi(strings.TrimSpace(after))
@@ -692,7 +708,7 @@ func TestCheckRefusesToStartAfterTheDeadline(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 	marker := filepath.Join(dir, "ran")
-	r := runCheck(ctx, dir, root, "check.log", t.TempDir(), nil, checkStep{"test", []string{self(t), fakeCheckArg, "touch", marker}}, time.Minute)
+	r := runCheck(ctx, dir, checkEnv(dir), root, "check.log", t.TempDir(), nil, checkStep{"test", []string{self(t), fakeCheckArg, "touch", marker}}, time.Minute)
 	if exists(marker) || r.Status != CheckTimedOut {
 		t.Fatalf("a check started after the deadline: %+v (ran: %v)", r, exists(marker))
 	}
@@ -705,5 +721,24 @@ func TestExhaustionIsReportedBeforeNoChanges(t *testing.T) {
 		func(o *RunOptions) { o.Budget.Turns = 1 })
 	if res.Outcome != RunExhausted || res.ExitCode() != ExitBudget {
 		t.Fatalf("one child ran with no changes, the other found the budget spent: %+v", res)
+	}
+}
+
+// Review (3): harness children get no provider API key by default, so none
+// silently bills a key instead of the subscription; a per-harness config
+// opt-in passes a named key through.
+func TestHarnessChildrenGetNoAPIKeysByDefault(t *testing.T) {
+	for _, k := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"} {
+		t.Setenv(k, "k")
+	}
+	r := newRunRig(t)
+	r.run(t, fake{name: "codex", agentMode: "turn"}, nil)
+	if b, _ := os.ReadFile(r.prompts + ".env"); !strings.Contains(string(b), "keys=\n") {
+		t.Fatalf("keys reached the harness: %q", b)
+	}
+	os.WriteFile(r.config, []byte(`{"harnesses": {"codex": {"pass_env": ["OPENAI_API_KEY"]}}}`), 0o600)
+	r.run(t, fake{name: "codex", agentMode: "turn"}, nil)
+	if b, _ := os.ReadFile(r.prompts + ".env"); !strings.Contains(string(b), "keys=OPENAI_API_KEY\n") {
+		t.Fatalf("opt-in: %q", b)
 	}
 }

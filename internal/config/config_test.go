@@ -71,3 +71,15 @@ func TestChecksAndJudge(t *testing.T) {
 		}
 	}
 }
+
+func TestPassEnv(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	os.WriteFile(p, []byte(`{"harnesses": {"codex": {"pass_env": ["OPENAI_API_KEY"]}}}`), 0o600)
+	if c, err := Load(p); err != nil || c.For("codex").PassEnv[0] != "OPENAI_API_KEY" {
+		t.Fatalf("%+v %v", c, err)
+	}
+	os.WriteFile(p, []byte(`{"harnesses": {"codex": {"pass_env": ["AWS_SECRET_ACCESS_KEY"]}}}`), 0o600)
+	if _, err := Load(p); err == nil {
+		t.Fatal("pass_env accepted a variable that is not a provider key")
+	}
+}

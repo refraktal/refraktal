@@ -182,7 +182,7 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 		// REFRAKTAL_RUN tags the child's processes for logs only (the session
 		// sweep finds leftovers). REFRAKTAL_BUDGET is what a child Refraktal
 		// may use.
-		env:       childEnv(e.root, e.o, e.run.ID+"-"+name, string(childBudget)),
+		env:       childEnv(e.root, e.o, hcfg, e.run.ID+"-"+name, string(childBudget)),
 		prefixExe: e.o.ShellPrefix,
 		onPermission: func(_ context.Context, req acp.PermissionRequest) string {
 			d := pol.Decide(req)
@@ -484,8 +484,13 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 			if !ok {
 				return
 			}
+			if err := c.root.Mkdir("check-tmp", 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+				c.Checks = append(c.Checks, CheckResult{Name: "setup", Status: CheckError, Exit: -1})
+				return
+			}
+			env := checkEnv(filepath.Join(e.run.Dir, c.Harness, "check-tmp"))
 			for _, s := range plan.Steps {
-				r := runCheck(cctx, c.wt.Dir, c.root, "check-"+s.Name+".log", e.o.LiveDir,
+				r := runCheck(cctx, c.wt.Dir, env, c.root, "check-"+s.Name+".log", e.o.LiveDir,
 					map[string]string{"run": e.run.ID, "harness": c.Harness, "check": s.Name}, s, plan.Timeout)
 				c.Checks = append(c.Checks, r)
 				if r.Status != CheckPassed {

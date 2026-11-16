@@ -194,7 +194,7 @@ func (a *agent) handle(m message, line string) {
 		a.cwd = p.Cwd
 		if f := os.Getenv("ACPTEST_PROMPTS"); f != "" { // the shell-prefix variables this agent was given, for tests
 			os.WriteFile(f+".env", []byte("prefix="+os.Getenv("CLAUDE_CODE_SHELL_PREFIX")+" helper="+os.Getenv("REFRAKTAL_HELPER")+
-				" nest="+os.Getenv("REFRAKTAL_NEST")+"\n"), 0o600)
+				" nest="+os.Getenv("REFRAKTAL_NEST")+" keys="+keysSet()+"\n"), 0o600)
 		}
 		if f := os.Getenv("ACPTEST_PROMPTS"); f != "" { // also record each session folder, for tests
 			if fh, err := os.OpenFile(f+".cwd", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err == nil {
@@ -393,4 +393,15 @@ func (a *agent) permission() string {
 			{"optionId": "once", "name": "Allow", "kind": "allow_once"},
 			{"optionId": "no", "name": "Reject", "kind": "reject_once"},
 		}})
+}
+
+// keysSet names the provider API keys present in the agent's environment.
+func keysSet() string {
+	var set []string
+	for _, k := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"} {
+		if os.Getenv(k) != "" {
+			set = append(set, k)
+		}
+	}
+	return strings.Join(set, ",")
 }

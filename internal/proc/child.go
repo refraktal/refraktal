@@ -21,9 +21,10 @@ import (
 // inherits them behaves as if it were nested inside that session.
 var sessionMarkers = []string{"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT",
 	// API keys: a harness or tool must not silently bill a key instead of the
-	// subscription. A nested Refraktal gets the routing key only by explicit
-	// opt-in (REFRAKTAL_PASS_GEMINI_KEY=1; docs/DESIGN.md).
-	"GEMINI_API_KEY", "GOOGLE_API_KEY"}
+	// subscription. A harness gets a key only by explicit opt-in (pass_env in
+	// the config; a nested Refraktal's routing key by
+	// REFRAKTAL_PASS_GEMINI_KEY=1; docs/DESIGN.md).
+	"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"}
 
 // ScrubEnv returns env without the parent's session markers and API keys.
 func ScrubEnv(env []string) []string {

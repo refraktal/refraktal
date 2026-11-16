@@ -20,6 +20,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -47,6 +48,10 @@ type Check struct {
 	Test        []string `json:"test,omitempty"`
 	TimeoutMins float64  `json:"timeout_mins,omitempty"` // per command; default DefaultCheckMins
 }
+
+// ProviderKeys are the API keys no harness receives unless its pass_env
+// names them.
+var ProviderKeys = []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"}
 
 // DefaultCheckMins is the per-check time limit when none is set.
 const DefaultCheckMins = 10
@@ -113,6 +118,11 @@ type Harness struct {
 	// run instead of its bundled one (CLAUDE_CODE_EXECUTABLE, CODEX_PATH),
 	// or the agy binary.
 	Executable string `json:"executable,omitempty"`
+	// PassEnv names provider API keys this harness may receive from the
+	// environment (OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY,
+	// GOOGLE_API_KEY). By default none is passed, so no harness silently
+	// bills an API key instead of the subscription.
+	PassEnv []string `json:"pass_env,omitempty"`
 }
 
 // For returns the settings for a harness, with defaults filled in.
@@ -155,6 +165,11 @@ func Load(path string) (Config, error) {
 		case "claude", "codex", "agy":
 		default:
 			return c, fmt.Errorf("%s: unknown harness %q (want claude, codex or agy)", path, name)
+		}
+		for _, k := range h.PassEnv {
+			if !slices.Contains(ProviderKeys, k) {
+				return c, fmt.Errorf("%s: harnesses.%s.pass_env: %q is not one of %s", path, name, k, strings.Join(ProviderKeys, ", "))
+			}
 		}
 		switch h.MCP {
 		case "", MCPIsolated, MCPInherit:

@@ -611,8 +611,15 @@ func RepoInput(root, task string) route.Input {
 // it no child gets an API key (proc.ScrubEnv).
 const PassKeyEnv = "REFRAKTAL_PASS_GEMINI_KEY"
 
-func childEnv(root string, o RunOptions, tag, budgetJSON string) []string {
+func childEnv(root string, o RunOptions, hcfg config.Harness, tag, budgetJSON string) []string {
 	env := []string{"REFRAKTAL_RUN=" + tag, "REFRAKTAL_BUDGET=" + budgetJSON}
+	// Provider keys are scrubbed from every child (proc.ScrubEnv); the
+	// config's pass_env opts one harness in to a named key.
+	for _, k := range hcfg.PassEnv {
+		if v := os.Getenv(k); v != "" {
+			env = append(env, k+"="+v)
+		}
+	}
 	getenv := o.Getenv
 	if getenv == nil {
 		getenv = os.Getenv

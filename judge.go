@@ -16,7 +16,6 @@ import (
 	"refraktal.dev/refraktal/internal/config"
 	"refraktal.dev/refraktal/internal/proc"
 	"refraktal.dev/refraktal/internal/route"
-	"refraktal.dev/refraktal/internal/safegit"
 	"refraktal.dev/refraktal/internal/worktree"
 )
 
@@ -204,10 +203,10 @@ func goModToolchainChanged(diff []byte) bool {
 // runCheck runs one check command in a candidate's worktree as a harness
 // child is run: a session of its own under the process tracker and the
 // session sweep, no GIT_* variables or API keys, stopped at the deadline.
-// Its environment is the one Refraktal's own git commands get
-// (safegit.Env). Its output goes to logName in logRoot, the candidate's
-// pinned folder in the run folder.
-func runCheck(ctx context.Context, dir string, logRoot *os.Root, logName, liveDir string, labels map[string]string, s checkStep, limit time.Duration) CheckResult {
+// Its environment is env (checkEnv: an allow-list, nothing else). Its output
+// goes to logName in logRoot, the candidate's pinned folder in the run
+// folder.
+func runCheck(ctx context.Context, dir string, env []string, logRoot *os.Root, logName, liveDir string, labels map[string]string, s checkStep, limit time.Duration) CheckResult {
 	r := CheckResult{Name: s.Name, Exit: -1}
 	start := time.Now()
 	if logRoot == nil {
@@ -226,7 +225,7 @@ func runCheck(ctx context.Context, dir string, logRoot *os.Root, logName, liveDi
 		r.Status = CheckTimedOut
 		return r
 	}
-	c, err := proc.Start(proc.Spec{Argv: s.Argv, Dir: dir, BaseEnv: safegit.Env(), Stderr: f, LiveDir: liveDir, Labels: labels})
+	c, err := proc.Start(proc.Spec{Argv: s.Argv, Dir: dir, BaseEnv: env, Stderr: f, LiveDir: liveDir, Labels: labels})
 	if err != nil {
 		fmt.Fprintf(f, "not started: %v\n", err)
 		r.Status = CheckError
@@ -255,6 +254,30 @@ func runCheck(ctx context.Context, dir string, logRoot *os.Root, logName, liveDi
 		r.Status = CheckFailed
 	}
 	return r
+}
+
+// checkVars are the variables a check inherits; LC_* too. Everything else
+// (other providers' keys, tokens, GIT_*) stays out.
+var checkVars = []string{"PATH", "HOME", "USER", "LANG", "TERM",
+	"GOPATH", "GOROOT", "GOCACHE", "GOMODCACHE", "GOFLAGS", // Go toolchain
+	"npm_config_cache", "NPM_CONFIG_CACHE", // npm
+	"CARGO_HOME", "RUSTUP_HOME"} // cargo
+
+func checkEnvAllowed(name string) bool {
+	return slices.Contains(checkVars, name) || strings.HasPrefix(name, "LC_") || name == "TMPDIR"
+}
+
+// checkEnv is a check's whole environment: the allow-listed variables from
+// Refraktal's own environment, and TMPDIR in the run folder.
+func checkEnv(tmp string) []string {
+	env := []string{"TMPDIR=" + tmp}
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if name != "TMPDIR" && checkEnvAllowed(name) {
+			env = append(env, kv)
+		}
+	}
+	return env
 }
 
 // Ranks: a candidate that passed every check ranks above one with no check
