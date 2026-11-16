@@ -381,7 +381,10 @@ func TestBudgetUntrustedTurnsFindingReproduction(t *testing.T) {
 
 // The response boundary is explored separately from concurrent reservations:
 // USD and turn grants 1..4, report turns -1..5, finite costs {0,1,3,6},
-// retained amounts {0,1,3,5}, and negative/NaN/infinite/non-USD cost classes.
+// retained amounts {0,1,3,5}, and negative/NaN/infinite/non-USD cost classes,
+// plus the wire forms acp.parseUpdate sees: a non-numeric or non-object cost
+// and an absent cost (priced from tokens, abstracted here as $0). The parse
+// step maps the wire class to what runEnv.child sees.
 // A child gets allowance-1 turns after the parent's prompt (runEnv.child,
 // fanout.go; childLimits and server.prompt/finish, acpserver.go). Costs larger
 // than the grant remain valid: final-turn overrun is never clamped. Classes
@@ -389,6 +392,7 @@ func TestBudgetUntrustedTurnsFindingReproduction(t *testing.T) {
 // This is a bounded response-boundary check, not arbitrary wire/protocol input.
 type reportState struct {
 	Phase                                    uint8
+	WireCost                                 int // the cost class as sent; CostClass is what the parser hands on
 	USD, Allowance, ReportTurns              int
 	CostClass, RetainedClass                 int
 	Turns, Held, Charged, Retained           int
@@ -396,14 +400,33 @@ type reportState struct {
 	Cancelled, Untrusted, Exhausted, Retried bool
 }
 
+// Cost classes: 0..3 finite amounts; 4 negative, 5 NaN, 6 infinite, 7 not
+// USD, 8 not a number or not an object (on the wire only); 9 absent.
+const (
+	costNonNumeric = 8
+	costAbsent     = 9
+	costClasses    = 10
+)
+
 func reportCost(class int) (int, bool) {
 	switch class {
 	case 0, 1, 2, 3:
 		return [...]int{0, 1, 3, 6}[class], true
-	default: // negative, NaN, infinity, wrong currency
+	case costAbsent: // no cost field: token pricing, abstracted as $0
+		return 0, true
+	default: // negative, NaN, infinity, wrong currency, non-numeric
 		return 0, false
 	}
 }
+
+type reportMutation string
+
+const (
+	reportFaithful reportMutation = ""
+	// Pre-run-5 acp.parseUpdate: a negative or non-numeric cost was dropped
+	// as if absent, so the child's report was priced from tokens.
+	reportDropMalformedCost reportMutation = "parser drops a malformed cost as absent"
+)
 
 func reportRetained(class int) (int, bool) {
 	switch class {
@@ -414,9 +437,9 @@ func reportRetained(class int) (int, bool) {
 	}
 }
 
-func reportModel() model[reportState] {
+func reportModel(mutation reportMutation) model[reportState] {
 	return model[reportState]{
-		Name: "budget child-report validation",
+		Name: "budget child-report validation " + string(mutation),
 		Key:  func(s reportState) string { return fmt.Sprintf("%v", s) },
 		Next: func(s reportState) []transition[reportState] {
 			var out []transition[reportState]
@@ -431,10 +454,10 @@ func reportModel() model[reportState] {
 				for usd := 1; usd <= ledgerUSD; usd++ {
 					for allowance := 1; allowance <= ledgerTurns; allowance++ {
 						for turns := -1; turns <= ledgerTurns+1; turns++ {
-							for costClass := 0; costClass < 8; costClass++ {
+							for costClass := 0; costClass < costClasses; costClass++ {
 								for retainedClass := 0; retainedClass < 7; retainedClass++ {
 									for _, cancelled := range []bool{false, true} {
-										n := reportState{Phase: 1, USD: usd, Allowance: allowance,
+										n := reportState{Phase: 1, USD: usd, Allowance: allowance, WireCost: costClass,
 											ReportTurns: turns, CostClass: costClass, RetainedClass: retainedClass,
 											Cancelled: cancelled, Turns: 1, Held: allowance - 1, Reserved: usd}
 										add("reserve, begin prompt and receive child response", n)
@@ -449,10 +472,15 @@ func reportModel() model[reportState] {
 				// Ledger.Charge (internal/budget/budget.go): real charges precede
 				// forfeiture and keep the entire overrun. Invalid cost uses the
 				// modeled unpriced fallback ($0); token pricing is abstracted.
+				// acp.parseUpdate (internal/acp/types.go) hands a present but
+				// unusable cost on as CostInvalid, never as absent.
 				n := s
 				n.Phase = 2
-				n.Charged, _ = reportCost(s.CostClass)
-				add("charge valid cost in full before validating report", n)
+				if mutation == reportDropMalformedCost && (s.WireCost == 4 || s.WireCost == costNonNumeric) {
+					n.CostClass = costAbsent
+				}
+				n.Charged, _ = reportCost(n.CostClass)
+				add("parse the wire cost, then charge a valid cost in full before validating report", n)
 			case 2:
 				// runEnv.child (fanout.go), validCost (run.go), Ledger.AddTurns
 				// and Ledger.forfeit (internal/budget/budget.go): validate first,
@@ -512,6 +540,9 @@ func reportModel() model[reportState] {
 			if s.Phase == 0 {
 				return nil
 			}
+			if _, ok := reportCost(s.WireCost); s.Phase >= 3 && !ok && !s.Untrusted {
+				return fmt.Errorf("a present but malformed cost was accepted as absent: wire class %d", s.WireCost)
+			}
 			if s.Turns < 1 || s.Turns > s.Allowance || s.Held < 0 || s.Phase < 5 && s.Turns+s.Held != s.Allowance {
 				return fmt.Errorf("reported turns escaped grant: turns=%d held=%d allowance=%d", s.Turns, s.Held, s.Allowance)
 			}
@@ -541,9 +572,9 @@ func reportModel() model[reportState] {
 }
 
 func TestBudgetChildReportValidation(t *testing.T) {
-	m := reportModel()
+	m := reportModel(reportFaithful)
 	next := m.Next
-	var valid, invalidTurns, invalidCost, invalidRetained, overrunForfeited, retained bool
+	var valid, invalidTurns, invalidCost, invalidRetained, overrunForfeited, retained, nonNumeric, absent bool
 	m.Next = func(s reportState) []transition[reportState] {
 		if s.Phase == 5 {
 			_, costOK := reportCost(s.CostClass)
@@ -554,6 +585,8 @@ func TestBudgetChildReportValidation(t *testing.T) {
 			invalidRetained = invalidRetained || s.Untrusted && (!retainedOK || r > s.USD)
 			overrunForfeited = overrunForfeited || s.Untrusted && s.Charged > s.USD && s.ForfeitedUSD == 0
 			retained = retained || !s.Untrusted && s.Retained > 0
+			nonNumeric = nonNumeric || s.Untrusted && s.WireCost == costNonNumeric
+			absent = absent || !s.Untrusted && s.WireCost == costAbsent
 		}
 		return next(s)
 	}
@@ -562,7 +595,17 @@ func TestBudgetChildReportValidation(t *testing.T) {
 	if r.Violation != nil {
 		t.Fatal(r.String())
 	}
-	if !valid || !invalidTurns || !invalidCost || !invalidRetained || !overrunForfeited || !retained {
-		t.Fatalf("missing report witness: valid=%v invalidTurns=%v invalidCost=%v invalidRetained=%v overrunForfeited=%v retained=%v", valid, invalidTurns, invalidCost, invalidRetained, overrunForfeited, retained)
+	if !valid || !invalidTurns || !invalidCost || !invalidRetained || !overrunForfeited || !retained || !nonNumeric || !absent {
+		t.Fatalf("missing report witness: valid=%v invalidTurns=%v invalidCost=%v invalidRetained=%v overrunForfeited=%v retained=%v nonNumeric=%v absent=%v", valid, invalidTurns, invalidCost, invalidRetained, overrunForfeited, retained, nonNumeric, absent)
+	}
+}
+
+// Run-5 #4: the old parser dropped a negative or non-numeric cost, so a
+// nested report with one was accepted and priced from tokens.
+func TestBudgetChildReportMalformedCostMutation(t *testing.T) {
+	r := check(reportModel(reportDropMalformedCost))
+	t.Log(r.String())
+	if r.Violation == nil || !strings.Contains(r.Violation.Error(), "a present but malformed cost was accepted as absent") {
+		t.Fatalf("want the malformed-cost counterexample: %s", r.String())
 	}
 }

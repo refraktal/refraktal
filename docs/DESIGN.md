@@ -750,7 +750,12 @@ client, including a parent Refraktal, can drive it.
 - **A child's report is untrusted.** The parent accepts it only if the
   turns are within 0 and the child's remaining allowance (the allowance it
   was given), the cost is finite and not negative, and `retained_usd` is
-  finite, not negative and within the grant. Anything else charges the
+  finite, not negative and within the grant. A cost field that is present
+  but malformed (negative, not a number, not an object, no amount, or
+  dropped with a malformed `used` or `size` in the same update) is an
+  untrusted report, not an absent cost: it is never priced from tokens
+  instead. An absent cost (no field, or `null`) is priced from tokens as
+  for any harness. Anything else charges the
   child its whole grant (the unspent dollars as a `forfeited` charge, and
   every unused turn; its real costs are charged first and stand in full, so
   an overrun is never capped), marks it `budget_exhausted` with a notice, and the run

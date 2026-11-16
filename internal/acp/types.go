@@ -77,6 +77,11 @@ type Update struct {
 	Used      *int64          // usage_update: context fill, not a billing figure
 	Size      *int64          // usage_update: context size
 	Cost      *Cost           // usage_update: set only when the harness reports a cost
+	// CostInvalid: the update has a cost field (not null) that was not
+	// applied: malformed, negative, not finite, or dropped with a malformed
+	// used or size. A present but unusable cost is not an absent one: a
+	// child Refraktal that sends one is untrusted.
+	CostInvalid bool
 }
 
 func parseUpdate(params json.RawMessage) Update {
@@ -105,9 +110,13 @@ func parseUpdate(params json.RawMessage) Update {
 			Currency string   `json:"currency"`
 		} `json:"cost"`
 	}
+	var present map[string]json.RawMessage
+	json.Unmarshal(p.Update, &present) // an object: its kind parsed above
+	hasCost := present["cost"] != nil && string(present["cost"]) != "null"
 	if json.Unmarshal(p.Update, &a) != nil ||
 		(a.Used != nil && *a.Used < 0) || (a.Size != nil && *a.Size < 0) ||
 		(a.Cost != nil && (a.Cost.Amount == nil || *a.Cost.Amount < 0 || math.IsNaN(*a.Cost.Amount) || math.IsInf(*a.Cost.Amount, 0))) {
+		out.CostInvalid = hasCost
 		return out
 	}
 	out.Used, out.Size = a.Used, a.Size

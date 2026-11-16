@@ -222,6 +222,7 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 	pol := policy.Policy{Worktree: cwd, ReadOnly: sp.judge}
 	var mu sync.Mutex
 	var reply strings.Builder
+	costInvalid := false // a cost that was present but malformed (acp.Update.CostInvalid)
 	// The prompt about to be sent counts as one of the turns: a child
 	// Refraktal has the rest.
 	childBudget, _ := json.Marshal(map[string]any{"usd": grant.USD, "turns": max(0, grant.Turns-1),
@@ -249,11 +250,12 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 			return d.OptionID
 		},
 		onUpdate: func(u acp.Update) {
+			mu.Lock()
+			defer mu.Unlock()
 			if u.Kind == "agent_message_chunk" {
-				mu.Lock()
 				reply.WriteString(chunkText(u))
-				mu.Unlock()
 			}
+			costInvalid = costInvalid || u.CostInvalid
 		}})
 	c.MCP = s.launch.MCP
 	closeSession := func(grace time.Duration) proc.ShutdownReport {
@@ -318,12 +320,20 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 		}
 	}
 	// A child Refraktal's report is untrusted: its turns must be within its
-	// remaining allowance, its cost and retained amount finite and not
-	// negative, retained within the grant. Anything else charges the child
+	// remaining allowance, its cost (if present at all) well-formed, finite
+	// and not negative, its retained amount finite, not negative and within
+	// the grant. Anything else charges the child
 	// its whole grant (dollars and turns) and marks it exhausted.
 	untrusted := ""
+	mu.Lock()
+	malformedCost := costInvalid
+	mu.Unlock()
 	if ch := turn.Child; ch != nil {
 		switch {
+		case malformedCost:
+			// Present on the wire but unusable: not an absent cost, so
+			// never priced from tokens instead.
+			untrusted = "a malformed cost"
 		case turn.Cost != nil && !validCost(turn.Cost):
 			untrusted = "an invalid cost"
 		case math.IsNaN(ch.Retained) || math.IsInf(ch.Retained, 0) || ch.Retained < 0 || ch.Retained > grant.USD:
