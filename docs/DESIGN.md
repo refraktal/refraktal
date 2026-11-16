@@ -653,6 +653,22 @@ could run, exits 2 (`budget_exhausted`) with the candidates kept: when a
 planned candidate could not run, nothing is chosen or applied, even from the
 candidates that did. This is reported ahead of `no_changes`.
 
+- **Outcome precedence.** When more than one condition holds, the run's
+  outcome is the highest row that applies, for one candidate and for a
+  fan-out:
+
+  | Rank | Condition | Outcome | Exit | Applied | Kept |
+  | ---: | --- | --- | ---: | --- | --- |
+  | 1 | `--mins` ran out (during a candidate's turn, the checks, the judge, or before the apply) | `timed_out` | 2 | nothing | every candidate with changes, and every failed collect |
+  | 2 | A budget was spent before a candidate or the judge could run, or a child Refraktal sent an untrusted report | `budget_exhausted` | 2 | nothing | every candidate with changes, and every failed collect |
+  | 3 | No harness could be started | `unusable` | 3 | nothing | nothing to keep |
+  | 4 | A candidate failed with changes (failed turn, failed collect, refused result) and no candidate is applicable | `failed` | 1 | nothing | every candidate with changes |
+  | 5 | Otherwise: `applied`, `kept`, `apply_failed`, `no_winner`, `no_changes` as described above | | | | |
+
+  A collect failure or a refused result is recorded beside the candidate's
+  outcome: in its error and the `collected` event. It keeps the candidate's
+  work. It never changes rank 1 or 2: a candidate that timed out or was
+  exhausted stays so, so the run still exits 2 and no sibling is applied.
 - **Collect after every child has stopped.** No candidate is collected until
   every child of the run (each candidate harness) has stopped and been swept:
   a still-running harness shares the repository's `.git` and could add a

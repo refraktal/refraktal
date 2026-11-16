@@ -431,13 +431,25 @@ func (e *runEnv) collect(c *Candidate) {
 	if len(r.Diff) > 0 {
 		e.run.WriteFile(resultName(c.suffix), r.Diff, 0o600)
 	}
+	// Outcome precedence (DESIGN.md): a turn that ended for budget or --mins
+	// keeps that outcome; a collect failure or a refused result is recorded
+	// beside it and keeps the work, but never makes it failed (exit 1) or,
+	// through a sibling, applied.
+	budgetStop := c.Outcome == candExhausted || c.Outcome == candTimedOut
+	fail := func(why string) {
+		if budgetStop {
+			c.Error = strings.TrimPrefix(c.Error+"; "+why, "; ")
+			return
+		}
+		c.Outcome, c.Error = candFailed, why
+	}
 	switch {
 	case cerr != nil:
-		c.Outcome, c.Error, c.collectFailed = candFailed, cerr.Error(), true
+		c.collectFailed = true
+		fail(cerr.Error())
 	case len(outside(e.subtree, r.Files)) > 0:
 		// Confined to the session's folder: a change outside it is refused.
-		c.Outcome = candFailed
-		c.Error = fmt.Sprintf("the result changes %d files outside the session folder %s: refused", len(outside(e.subtree, r.Files)), e.subtree)
+		fail(fmt.Sprintf("the result changes %d files outside the session folder %s: refused", len(outside(e.subtree, r.Files)), e.subtree))
 	case c.Outcome == candNoChanges && len(r.Files) > 0:
 		c.Outcome = candChanges
 	}
