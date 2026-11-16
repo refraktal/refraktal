@@ -216,9 +216,9 @@ func TestRecordedLeaderWithAChangedCommandIsStillSwept(t *testing.T) {
 	}
 }
 
-// 7. A record appended after the first read of the sessions file is swept by
-// the second read.
-func TestARecordAppendedLateIsSwept(t *testing.T) {
+// 7. The second read sees a late record, but its reaped leader cannot prove
+// that an unseen reparented member belongs to the original session.
+func TestARecordAppendedLateIsReportedUnknown(t *testing.T) {
 	sessions := filepath.Join(t.TempDir(), "sessions")
 	leaderPID, member := startSessionWithMember(t)
 	orig := betweenRecordedReads
@@ -228,9 +228,9 @@ func TestARecordAppendedLateIsSwept(t *testing.T) {
 	defer func() { betweenRecordedReads = orig }()
 	c := helperEvery(t, "deaf", time.Hour)
 	c.sessions = sessions
-	c.Shutdown(100 * time.Millisecond)
-	if running(t, member) {
-		t.Fatal("a session recorded after the first read survived")
+	r := c.Shutdown(100 * time.Millisecond)
+	if !running(t, member) || !slices.Contains(pids(r.Swept.Unknown), member) || slices.Contains(pids(r.Swept.Killed), member) {
+		t.Fatalf("late unproven member was killed or omitted: %+v", r.Swept)
 	}
 }
 

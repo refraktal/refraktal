@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // A live record is one file per running child in a shared folder (by default
@@ -17,10 +18,11 @@ import (
 
 // Record is the content of a live record.
 type Record struct {
-	Owner   Proc              `json:"owner"`   // the Refraktal process that started the child
-	Child   Proc              `json:"child"`   // the harness process itself
-	Tracked []Proc            `json:"tracked"` // its descendants and session members seen so far
-	Labels  map[string]string `json:"labels,omitempty"`
+	Owner              Proc              `json:"owner"`   // the Refraktal process that started the child
+	Child              Proc              `json:"child"`   // the harness process itself
+	Tracked            []Proc            `json:"tracked"` // its descendants and session members seen so far
+	Labels             map[string]string `json:"labels,omitempty"`
+	UnresolvedSessions []Proc            `json:"unresolved_sessions,omitempty"` // observed only, never Kill targets
 }
 
 // DefaultLiveDir is os.UserConfigDir()/refraktal/live.
@@ -118,6 +120,22 @@ func CleanLeftovers(dir string) (CleanupReport, error) {
 		if err != nil {
 			r.Errors = append(r.Errors, fmt.Sprintf("%s: %v", e.Name(), err))
 			continue
+		}
+		// These IDs are inspected only for emptiness. Their current members are
+		// never promoted into targets: the original session may have been reused.
+		for _, leader := range rec.UnresolvedSessions {
+			_, occupied, inspectErr := sessionOf(leader)
+			if inspectErr == nil && !occupied {
+				time.Sleep(50 * time.Millisecond)
+				_, occupied, inspectErr = sessionOf(leader)
+			}
+			if inspectErr != nil || occupied {
+				kr.Unknown = append(kr.Unknown, leader)
+				r.Kill.Unknown = append(r.Kill.Unknown, leader)
+			}
+			if inspectErr != nil {
+				r.Errors = append(r.Errors, fmt.Sprintf("%s: %v", e.Name(), inspectErr))
+			}
 		}
 		if len(kr.Alive) == 0 && len(kr.Unknown) == 0 {
 			os.Remove(path)

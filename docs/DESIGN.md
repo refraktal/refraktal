@@ -294,28 +294,34 @@ process-group kill does not reach them.
 - **ACP frames** are at most 16 MiB; a harness that writes more without a
   newline has its connection closed with a clear error. A response that
   arrives together with the agent's exit is still delivered.
-- **Session sweep (closes the detach gap).** A process that detaches and is
-  reparented between two samples, with its group leader never seen, escapes
-  parent-PID tracking: M3's survival test hit it on Claude. So each harness
-  starts as the leader of a new session, and at shutdown, after the tree kill
-  and the process-group kill, Refraktal kills, with the identity check, every
-  process of the current user still in that session, whatever its parent or
-  process group. A session ID is inherited through forks, reparenting and new
-  process groups, and survives the leader's exit.
-  - **A session ID is a PID, and can be reused once the session empties.**
-    So: the harness is not reaped until its session has been swept (Refraktal
-    learns of the exit with `waitid(WNOWAIT)`, and the zombie keeps the ID
-    reserved); every session is polled about once a second and dropped for
-    good once it is seen empty (confirmed by a second look), and only
-    sessions never seen empty are swept; a leader is matched on PID and start
-    time, and if its PID now has another start time the session is not
-    swept; a member that started before the leader is skipped. Residual risk:
-    a session that empties and has its ID reused within one poll interval.
-  - **Dead runs are never swept by session ID.** `run` and `doctor` clean up
-    a dead run by killing only the processes its live record names by
-    identity; the session poll keeps the members it sees in that record.
+- **Session sweep (closes the detach gap where ownership is provable).** A
+  process that detaches and is reparented between samples can escape parent-PID
+  tracking. Each harness starts as a new session leader. At shutdown, after
+  the tree and process-group kills, the sweep signals only provable members:
+  identities recorded while the session was known to be ours, or descendants
+  linked by PPID chains to a currently verified tracked or recorded process.
+  A matching live leader proves ownership throughout a membership sample;
+  the harness's own unreaped leader also reserves its session ID. This keeps
+  detached children reachable while that reservation holds. Each individual
+  target still passes the birth-identity check before signalling.
+  - **A session ID can be reused between polls.** Never having seen a session
+    empty does not prove current membership belongs to it. The poller records
+    members only with the ownership proof above. Sessions seen empty twice
+    are retired permanently. A changed leader identity is never swept.
+  - **Unknown means kept.** Members without proof are not signalled. They are
+    reported as `unknown`, and the live record is kept. Unresolved session IDs
+    are stored separately from trusted process identities: an unknown stranger
+    never becomes a future kill target. A missed or reparented child whose
+    ownership cannot be proved may remain running; safety takes precedence
+    over complete cleanup.
+  - **Dead runs are never swept by session ID.** `run` and `doctor` kill only
+    the identities listed as trusted in the live record. Unresolved session
+    IDs are inspected only to establish emptiness, never to select targets;
+    their records stay until two empty observations succeed. A reused ID can
+    therefore keep an unresolved record indefinitely while occupied.
   - **Known limit:** a process that calls `setsid()` itself, as
-    pseudo-terminal launchers do, leaves the session and escapes.
+    pseudo-terminal launchers do, leaves the session. It is reachable only
+    if its identity or a provable PPID chain was recorded.
   - **Claude's tool commands: recorded sessions.** Claude's Bash tool starts
     each command's shell as the leader of a new session (seen live: the tool
     shell's session ID equals its own PID), so a command's background
