@@ -384,6 +384,9 @@ func (a *agent) writes() {
 // must be denied.
 func (a *agent) judge(id json.RawMessage, reply string) {
 	a.writes()
+	if f := os.Getenv("ACPTEST_JUDGE_RAWWRITE"); f != "" { // writes without asking: a sandbox that failed
+		os.WriteFile(filepath.Join(a.cwd, f), []byte("judge was here\n"), 0o644)
+	}
 	if reply == "hang" {
 		a.chunk("thinking")
 		<-a.cancel

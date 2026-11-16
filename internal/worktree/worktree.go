@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"refraktal.dev/refraktal/internal/safegit"
 )
@@ -82,6 +83,24 @@ func readGitfile(dir string) (string, error) {
 	return path, nil
 }
 
+// repoLocks serialises the git commands that read or change a repository's
+// list of worktrees (worktree add, worktree remove, branch -D). Run in
+// parallel, one can read another's half-written administrative folder and
+// fail ("failed to read .git/worktrees/<id>/commondir"). Within one
+// process only: two Refraktal runs on one repository are not serialised.
+var repoLocks sync.Map // canonical repository path -> *sync.Mutex
+
+func lockRepo(repo string) (unlock func()) {
+	key := repo
+	if r, err := filepath.EvalSymlinks(repo); err == nil {
+		key = r
+	}
+	m, _ := repoLocks.LoadOrStore(key, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
 // Root returns the top level of the git repository containing dir.
 func Root(ctx context.Context, dir string) (string, error) {
 	out, err := git(ctx, dir, "rev-parse", "--show-toplevel")
@@ -135,7 +154,10 @@ func CreateAt(ctx context.Context, repo, dir, branch, base string) (Worktree, er
 	if err != nil {
 		return Worktree{}, err
 	}
-	if _, err := g.Run(ctx, nil, "worktree", "add", "--quiet", "--no-checkout", "-b", branch, dir, w.Base); err != nil {
+	unlock := lockRepo(repo)
+	_, err = g.Run(ctx, nil, "worktree", "add", "--quiet", "--no-checkout", "-b", branch, dir, w.Base)
+	unlock()
+	if err != nil {
 		return Worktree{}, err
 	}
 	// Git chooses the administrative id (including a suffix on collisions).
@@ -241,6 +263,26 @@ func (w Worktree) Apply(ctx context.Context, r Result) (string, error) {
 	return "", nil
 }
 
+// Changed lists every path that differs from the worktree's HEAD: modified,
+// deleted, untracked and ignored files alike. A judge's worktree must have
+// none.
+func (w Worktree) Changed(ctx context.Context) ([]string, error) {
+	if w.gitDir == "" {
+		return nil, errors.New("worktree: missing recorded git directory")
+	}
+	out, err := gitOperation(w.Dir, w.gitDir, true).Run(ctx, nil, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--no-renames")
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, rec := range strings.Split(string(out), "\x00") {
+		if len(rec) > 3 {
+			paths = append(paths, rec[3:])
+		}
+	}
+	return paths, nil
+}
+
 // CheckApply reports whether a result's diff applies cleanly to the user's
 // working tree (git apply --check), changing nothing.
 func (w Worktree) CheckApply(ctx context.Context, r Result) error {
@@ -253,6 +295,7 @@ func (w Worktree) CheckApply(ctx context.Context, r Result) error {
 
 // Remove deletes the worktree and its branch.
 func (w Worktree) Remove(ctx context.Context) error {
+	defer lockRepo(w.Repo)()
 	g := gitOperation(w.Repo, "", false)
 	if _, err := g.Run(ctx, nil, "worktree", "remove", "--force", w.Dir); err != nil {
 		return err

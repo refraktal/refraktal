@@ -763,3 +763,20 @@ func TestJudgeRunsInTheHarnessReadOnlyMode(t *testing.T) {
 		t.Fatalf("verdict %+v", v)
 	}
 }
+
+// A judge must leave its worktree unchanged. If it changed anything (its
+// harness's sandbox and the policy both failed), its answer is not used: the
+// checks ranking decides, with a notice, and the changed paths are recorded.
+func TestAJudgeThatWroteIsNotTrusted(t *testing.T) {
+	r := newRunRig(t)
+	r.checkConfig(t, "")
+	res := r.fan(t, []harness.Harness{writer("claude", "out.txt=good-1", "ACPTEST_JUDGE=WINNER: B", "ACPTEST_JUDGE_RAWWRITE=judge-was-here.txt"),
+		writer("codex", "out.txt=good-2")}, nil)
+	if res.Harness != "claude" || res.Verdict.Method != "checks" || res.Judge == nil ||
+		strings.Join(res.Judge.Files, ",") != "judge-was-here.txt" || !strings.Contains(strings.Join(res.Notices, "\n"), "changed its worktree") {
+		t.Fatalf("%+v verdict %+v judge %+v notices %v", res.Outcome, res.Verdict, res.Judge, res.Notices)
+	}
+	if exists(filepath.Join(r.repo, "judge-was-here.txt")) {
+		t.Fatal("the judge's write reached the working tree")
+	}
+}

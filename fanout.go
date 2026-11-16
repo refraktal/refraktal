@@ -275,9 +275,22 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 	default:
 		c.Outcome = candNoChanges
 	}
-	if sp.judge { // the judge's worktree is never collected
+	if sp.judge { // the judge's worktree is never collected, but must be unchanged
+		sctx, scancel := e.opCtx()
+		changed, err := wt.Changed(sctx)
+		scancel()
+		if err != nil || len(changed) > 0 {
+			c.Files = changed
+			c.Outcome = candFailed
+			c.Error = "the judge changed its worktree, so its answer is not used"
+			if err != nil {
+				c.Error = "the judge's worktree could not be checked, so its answer is not used"
+			}
+			e.notice(fmt.Sprintf("%s: %s (%d paths)", name, c.Error, len(changed)))
+		}
 		removeWT()
-		e.log.Event("child_end", map[string]any{"harness": name, "outcome": c.Outcome, "judge": true, "swept": c.swept})
+		e.log.Event("child_end", map[string]any{"harness": name, "outcome": c.Outcome, "judge": true, "swept": c.swept,
+			"changed": len(c.Files), "allowed": c.Allowed, "denied": c.Denied})
 		return c
 	}
 	// Retain the result even after cancellation, with a bounded collection.
@@ -591,7 +604,10 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 			// Cancelled, max_tokens or an ACP error: its answer does not
 			// count. The checks ranking decides; a flagged candidate cannot
 			// win that way.
-			why := cmpOr(j.StopReason, "error")
+			why := "the judge did not finish (" + cmpOr(j.StopReason, "error") + ")"
+			if len(j.Files) > 0 || strings.HasPrefix(j.Error, "the judge") {
+				why = "the judge's answer is not used (it changed its worktree, or it could not be checked)"
+			}
 			for _, c := range close {
 				if c.Flagged == "" {
 					winner = c
@@ -599,15 +615,15 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 				}
 			}
 			if winner == nil {
-				v.Method, v.Reason = "none", "the judge did not finish ("+why+") and no candidate in the close call can win on checks"
+				v.Method, v.Reason = "none", why+" and no candidate in the close call can win on checks"
 				res.Verdict = &v
 				e.notice(v.Reason)
 				finish(RunNoWinner, v.Reason, true)
 				return
 			}
 			v.Winner, v.Method = winner.Harness, "checks"
-			v.Reason = "the judge did not finish (" + why + "); the checks ranking decides"
-			e.notice(fmt.Sprintf("the judge did not finish (%s): falling back to the checks ranking, which puts %s first", why, winner.Harness))
+			v.Reason = why + "; the checks ranking decides"
+			e.notice(fmt.Sprintf("%s: falling back to the checks ranking, which puts %s first", why, winner.Harness))
 		case w == "" || w == "none":
 			v.Method = "judge"
 			if w == "none" {

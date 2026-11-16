@@ -169,7 +169,7 @@ func TestReadOnlyPolicy(t *testing.T) {
 	wt := t.TempDir()
 	p := Policy{Worktree: wt, ReadOnly: true}
 	opts := []acp.PermissionOption{{ID: "a", Kind: "allow_once"}, {ID: "r", Kind: "reject_once"}}
-	for kind, want := range map[string]bool{"read": true, "search": true, "edit": false, "execute": false, "delete": false, "other": false} {
+	for kind, want := range map[string]bool{"switch_mode": false, "read": true, "search": true, "edit": false, "execute": false, "delete": false, "other": false} {
 		req := acp.PermissionRequest{Options: opts}
 		req.ToolCall.Kind, req.ToolCall.Title = kind, "x"
 		req.ToolCall.RawInput = []byte(`{"file_path":"` + wt + `/a.txt","command":"ls"}`)

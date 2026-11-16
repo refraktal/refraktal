@@ -42,8 +42,9 @@ type Decision struct {
 // Policy decides for one child.
 type Policy struct {
 	Worktree string // absolute path of the child's worktree
-	// ReadOnly allows only the read-only tool kinds: every edit, command and
-	// unknown tool kind is denied. The judge runs so.
+	// ReadOnly allows only the read-only tool kinds, without switch_mode:
+	// every edit, command, mode switch and unknown tool kind is denied. The
+	// judge runs so, in its harness's own read-only mode as well.
 	ReadOnly bool
 }
 
@@ -73,7 +74,10 @@ func (p Policy) Decide(req acp.PermissionRequest) Decision {
 	in := rawInput(req.ToolCall.RawInput)
 	d.Paths = paths(req, in)
 	switch {
-	case p.ReadOnly && !readOnlyKinds[d.Kind]:
+	case p.ReadOnly && (!readOnlyKinds[d.Kind] || d.Kind == "switch_mode"):
+		// switch_mode changes nothing on disk, but in a read-only session it
+		// would leave the harness's read-only mode (Claude asks to exit plan
+		// mode before acting): deny it there.
 		d.Command = command(in, req.ToolCall.Title)
 		d.Allow, d.Reason = false, "read-only: only reads, searches and fetches are allowed"
 	default:

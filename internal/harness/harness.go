@@ -30,9 +30,12 @@ const (
 type Harness interface {
 	Name() string
 	Mode() string // the permission mode set on every session (docs/DESIGN.md)
-	// ReadOnlyMode is the harness's own read-only mode, set on a judge's
-	// session on top of the policy gate: Claude and Antigravity plan, Codex
-	// read-only (codex-acp then sends a read-only sandbox).
+	// ReadOnlyMode is the mode a judge's session runs in, under the read-only
+	// policy: Codex read-only (codex-acp then sends a read-only sandbox, and
+	// asks before writing), Antigravity plan (no action; its plan file goes
+	// to its per-run state folder), Claude default (every edit and shell
+	// command is asked, and denied). Claude's plan mode is not used: it
+	// writes a plan file into ~/.claude/plans without asking.
 	ReadOnlyMode() string
 	// Prepare finds or installs what is needed to launch the harness.
 	Prepare(ctx context.Context, o Options) (Launch, error)
@@ -70,7 +73,7 @@ type Launch struct {
 // Adapters are installed under cacheDir.
 func Defaults(cacheDir string) []Harness {
 	return []Harness{
-		&adapted{name: "claude", mode: "default", roMode: "plan", cli: "claude", exeEnv: "CLAUDE_CODE_EXECUTABLE",
+		&adapted{name: "claude", mode: "default", roMode: "default", cli: "claude", exeEnv: "CLAUDE_CODE_EXECUTABLE",
 			pkg: "@agentclientprotocol/claude-agent-acp", version: "0.107.0", bin: "claude-agent-acp",
 			bundled: "@anthropic-ai/claude-agent-sdk-*/claude", cache: cacheDir, isolate: isolateClaude},
 		&adapted{name: "codex", mode: "workspace-write", roMode: "read-only", cli: "codex", exeEnv: "CODEX_PATH",

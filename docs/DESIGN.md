@@ -468,6 +468,10 @@ worktree of its own on branch `refraktal/<run id>-<harness>`.
 - With one candidate there is nothing to choose: it is applied as in M3, with
   no checks or judge.
 
+Git's worktree-list commands (`worktree add`, `worktree remove`, `branch
+-D`) are serialised per repository within a run: in parallel, one can read
+another's half-written administrative folder and fail.
+
 **Budgets across children.** Each child reserves what is left divided by the
 children still to start, so parallel children split `--usd`. `--turns` and
 `--mins` belong to the whole run: every prompt counts against one `--turns`,
@@ -536,11 +540,21 @@ changes. In order:
    judged its own candidate (`judged_own`, also a notice) and any judges
    that could not be started, in `--json`, the run log and, from M7,
    `show`. It runs in a fresh worktree of its own with its own grant,
-   read-only twice over: in the harness's own read-only mode (Claude and
-   Antigravity `plan`, Codex `read-only`, so codex-acp sends a read-only
-   sandbox instead of workspace-write; a harness whose session does not
-   offer that mode cannot judge), and under the policy, which denies every
-   edit and command. Its prompt holds the task and the candidates' diffs
+   read-only twice over: in a judge mode per harness, and under the
+   read-only policy, which denies every edit, command and mode switch
+   (`switch_mode`: Claude otherwise asks to leave its mode). The modes,
+   from a live probe that ordered each harness in its judge setup to write
+   a file and run `touch`: Codex `read-only` (codex-acp sends a read-only
+   sandbox; Codex asked to run the command and was denied); Antigravity
+   `plan` (it took no action; its plan file goes to its own state folder in
+   the run's scratch); Claude `default` (it asked for the edit and the
+   command, both denied). Claude's `plan` mode is not used: it writes a
+   plan file into `~/.claude/plans` without asking, and asks to leave plan
+   mode before acting. A harness whose session does not offer its judge
+   mode cannot judge. After the turn the judge's worktree must be
+   unchanged (modified, untracked and ignored files alike); if not, its
+   answer is not used, the changed paths are recorded, and the checks
+   ranking decides. Its prompt holds the task and the candidates' diffs
    under anonymous letters. Only the final line of its reply counts, and
    only exactly `WINNER: <letter>` or `WINNER: none`. Its worktree is never
    collected. A judge turn that did not end normally (cancelled,
