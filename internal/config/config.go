@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -159,6 +160,12 @@ func Load(path string) (Config, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&c); err != nil {
 		return c, fmt.Errorf("%s: %w", path, err)
+	}
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
+		if err == nil {
+			return c, fmt.Errorf("%s: expected EOF after first JSON value", path)
+		}
+		return c, fmt.Errorf("%s: expected EOF after first JSON value: %w", path, err)
 	}
 	for name, h := range c.Harnesses {
 		switch name {

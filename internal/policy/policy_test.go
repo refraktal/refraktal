@@ -178,3 +178,57 @@ func TestReadOnlyPolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestFileEditResolvesSymlinksBeforeParentComponents(t *testing.T) {
+	base := t.TempDir()
+	wt := filepath.Join(base, "worktree")
+	outside := filepath.Join(base, "outside")
+	for _, dir := range []string{wt, filepath.Join(wt, "sub"), filepath.Join(outside, "sub")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	links := map[string]string{
+		"dangling":       filepath.Join(outside, "missing.txt"),
+		"link":           filepath.Join(outside, "sub"),
+		"chain":          "dangling",
+		"absolute":       outside,
+		"relative":       "../outside/missing.txt",
+		"inside":         "sub",
+		"inside-chain":   "inside",
+		"inside-missing": "sub/missing.txt",
+		"loop-a":         "loop-b",
+		"loop-b":         "loop-a",
+	}
+	for name, target := range links {
+		if err := os.Symlink(target, filepath.Join(wt, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := Policy{Worktree: wt}
+	for _, tc := range []struct {
+		name  string
+		path  string
+		allow bool
+	}{
+		{"dangling_final_symlink", "dangling", false},
+		{"parent_after_symlink", "link/../x", false},
+		{"absolute_parent_after_symlink", wt + "/link/../x", false},
+		{"symlink_chain", "chain", false},
+		{"absolute_symlink", "absolute/x", false},
+		{"relative_escape", "relative", false},
+		{"inside_symlink", "inside/x", true},
+		{"inside_symlink_chain", "inside-chain/x", true},
+		{"inside_dangling_symlink", "inside-missing", true},
+		{"inside_parent_after_symlink", "inside/../x", true},
+		{"new_nested_path", "new/nested/x", true},
+		{"symlink_loop", "loop-a", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := p.Decide(request(t, "edit", map[string]any{"file_path": tc.path}))
+			if d.Allow != tc.allow {
+				t.Fatalf("allow=%v (%s), want %v", d.Allow, d.Reason, tc.allow)
+			}
+		})
+	}
+}

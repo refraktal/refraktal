@@ -83,3 +83,42 @@ func TestPassEnv(t *testing.T) {
 		t.Fatal("pass_env accepted a variable that is not a provider key")
 	}
 }
+
+func TestLoadRejectsTrailingJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tail string
+	}{
+		{"concatenated_object", `{}`},
+		{"second_object", ` {"harnesses":{"codex":{"mcp":"inherit"}}}`},
+		{"array", ` []`},
+		{"null", ` null`},
+		{"number", ` 1`},
+		{"boolean", ` true`},
+		{"string", ` "extra"`},
+		{"malformed_value", ` {`},
+		{"trailing_text", ` invalid`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(`{}`+tc.tail), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), "after first JSON value") || !strings.Contains(err.Error(), path) {
+				t.Fatalf("want an error identifying trailing data and the config path, got %v", err)
+			}
+		})
+	}
+
+	t.Run("trailing_whitespace", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte("{\"harnesses\":{\"codex\":{\"mcp\":\"inherit\"}}}\n\t\r "), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := Load(path)
+		if err != nil || c.For("codex").MCP != MCPInherit {
+			t.Fatalf("trailing whitespace must preserve the config: %+v, %v", c, err)
+		}
+	})
+}

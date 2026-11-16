@@ -35,6 +35,9 @@ Exit codes: 0 winner applied (or kept with `--no-apply`), 1 no candidate passed
 the judge, 2 budget exhausted, 3 nothing usable. `judge` is an internal step,
 not a command.
 
+The release installer refuses a directory or unwritable destination and checks
+that the final installed file is executable before reporting success.
+
 ## Harnesses (v1)
 
 | Harness | Launch | Notes |
@@ -124,8 +127,10 @@ requests that reach it by policy. Never use `auto`, `acceptEdits`, `agent`,
 Policy (`internal/policy`); every request is logged with its decision:
 
 - Reads, searches, fetches and thinking: allowed.
-- File edits, deletes and moves: allowed only when every path, cleaned and
-  with symlinks resolved, is inside the child's worktree.
+- File edits, deletes and moves: allowed only when every resolved path is
+  inside the child's worktree. Resolve components in order, including dangling
+  symlink targets, and apply `..` after preceding symlinks; missing paths are
+  allowed for new files, while other lookup errors and symlink loops are denied.
 - Shell commands: allowed unless the deny-list matches anywhere in the
   command after quotes are removed (pushing, publishing, releasing,
   `git config`, `git -c`, `--config-env`, `GIT_*`, `HOME` or
@@ -372,9 +377,9 @@ process-group kill does not reach them.
 
 - The config file is JSON, read with the standard library, at
   `os.UserConfigDir()` joined with `refraktal/config.json`. A missing file
-  means defaults; unknown fields and bad values are errors. Only the user's
-  own config is read: a repository cannot change how its children are
-  isolated.
+  means defaults; unknown fields, bad values and any non-whitespace after the
+  first JSON value are errors. Only the user's own config is read: a repository
+  cannot change how its children are isolated.
 - `checks`: per repository path (`~` allowed), `{"build": [argv],
   "test": [argv], "timeout_mins": N}`, the commands judging runs in each
   candidate. `judge`: `{"margin": 0.10}`.
@@ -390,7 +395,10 @@ process-group kill does not reach them.
 - `refraktal run --harness <name> [--no-apply] [--json] [task]`. Flags may
   come before or after the task. The task comes from the argument, stdin, or
   both; stdin is read only when it is a pipe or a regular file, never a
-  terminal or a socket (an open socket that never closes would hang).
+  terminal or a socket (an open socket that never closes would hang). `--`
+  ends option parsing; every argument after it is literal task text.
+  Ctrl-C interrupts stdin collection even while the producer keeps its pipe
+  open, and exits 130.
 - **Worktree** at `os.UserCacheDir()` joined with
   `refraktal/worktrees/<run id>`, on branch `refraktal/<run id>`, from the
   repository's `HEAD`: uncommitted changes in the user's tree are not part of
@@ -401,6 +409,8 @@ process-group kill does not reach them.
   fsmonitor, signing, filters, external diff, textconv, pager and ssh command.
   Creation uses `git worktree add --no-checkout`, then discovers drivers in
   the new worktree before populating it with `git reset --hard --quiet HEAD`.
+  If setup fails after registration, bounded cleanup removes the checkout,
+  administrative entry and branch; a failed cleanup reports their identity.
   Conditional `onbranch:` and `gitdir:` includes therefore match the new
   branch and path during discovery. Creation records the new worktree's Git
   directory under the repository's common `worktrees/<id>` directory. Every
@@ -558,9 +568,10 @@ changes. In order:
    `~/.claude/plans` without asking, and asks to leave plan mode before
    acting. A harness whose session does not offer its judge
    mode cannot judge. After the turn the judge's worktree must be
-   unchanged (modified, untracked and ignored files alike); if not, its
-   answer is not used, the changed paths are recorded, and the checks
-   ranking decides. Its prompt holds the task and the candidates' diffs
+   unchanged (modified, untracked and ignored files alike), with `HEAD` still
+   equal to its recorded base commit; if not, its answer is not used, the
+   changed paths are recorded, and the checks ranking decides. Its prompt holds
+   the task and the candidates' diffs
    under anonymous letters. Only the final line of its reply counts, and
    only exactly `WINNER: <letter>` or `WINNER: none`. Its worktree is never
    collected. A judge turn that did not end normally (cancelled,
@@ -649,7 +660,9 @@ each candidate and the judge with their outcomes (and a child Refraktal's
 prompts), the check source, the verdict (winner, method, reason, judge and
 whether it judged its own candidate), costs by source with turns, the
 result's harness, files and branch, then each nested child run, indented.
-`--json` prints the same as one object with nested runs inside.
+`--json` prints the same as one object with nested runs inside. Runs are
+ordered by their first event's timestamp, with the run ID breaking ties;
+actual spend and retained reservations are separate fields in text and JSON.
 
 - Run logs are untrusted (a child process wrote the nested ones): show
   walks the tree through pinned handles, opening each folder and log only
@@ -658,10 +671,11 @@ result's harness, files and branch, then each nested child run, indented.
   follows nested runs only under the `refraktal` scratch folder. One
   budget covers the whole walk: 64 MiB of log, 200,000 events, 10,000
   folder entries and eight levels; past one, the run is marked truncated
-  and show says so. It drops from every value it prints, and from the run
-  names in its errors, the control characters (terminal escapes and
-  newlines, so a value cannot forge a line) and the bidi and format
-  characters.
+  and show says so. An incomplete enumeration also marks the selected run
+  truncated and warns that latest-run selection may be incomplete. It drops
+  from every value it prints, and from the run names in its errors, the control
+  characters (terminal escapes and newlines, so a value cannot forge a line)
+  and the bidi and format characters.
 
 ## Doctor
 
