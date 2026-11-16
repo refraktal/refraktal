@@ -2,6 +2,7 @@ package refraktal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -567,7 +568,7 @@ func chunkText(u acp.Update) string {
 			Text string `json:"text"`
 		} `json:"content"`
 	}
-	if jsonUnmarshal(u.Raw, &c) == nil && c.Content.Type == "text" {
+	if json.Unmarshal(u.Raw, &c) == nil && c.Content.Type == "text" {
 		return c.Content.Text
 	}
 	return ""
@@ -633,13 +634,6 @@ func validUsage(u *acp.Usage) bool {
 		}
 	}
 	return u.TotalTokens >= 0 && u.InputTokens >= 0 && u.OutputTokens >= 0
-}
-
-func cmpOr(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
 
 // turnErrorCode is the structured code for a failed prompt.

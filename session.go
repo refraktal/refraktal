@@ -193,8 +193,6 @@ func statusOf(err error) string {
 	return StatusError
 }
 
-func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
-
 // checkShellPrefix makes sure the shell prefix is an executable file and,
 // inside a test binary, the test binary itself: its TestMain must call
 // proc.MaybeShellPrefix first. Any other program would be run by the harness

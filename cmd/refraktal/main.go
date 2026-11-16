@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -267,7 +268,7 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 		fmt.Fprintln(stdout)
 	}
 	if v := res.Verdict; v != nil {
-		fmt.Fprintf(stdout, "verdict: %s by %s (%s)", cmpOr(v.Winner, "no winner"), v.Method, v.Reason)
+		fmt.Fprintf(stdout, "verdict: %s by %s (%s)", cmp.Or(v.Winner, "no winner"), v.Method, v.Reason)
 		if v.Judge != "" {
 			fmt.Fprintf(stdout, "; judge %s", v.Judge)
 			if v.JudgedOwn {
@@ -279,7 +280,7 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 		}
 		fmt.Fprintln(stdout)
 	}
-	fmt.Fprintf(stdout, "%s: %s", cmpOr(res.Harness, "run"), res.Outcome)
+	fmt.Fprintf(stdout, "%s: %s", cmp.Or(res.Harness, "run"), res.Outcome)
 	if len(res.Files) > 0 {
 		fmt.Fprintf(stdout, ", %d files: %s", len(res.Files), strings.Join(res.Files, " "))
 	}
@@ -415,11 +416,4 @@ func selfPath() string {
 		return ""
 	}
 	return p
-}
-
-func cmpOr(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }

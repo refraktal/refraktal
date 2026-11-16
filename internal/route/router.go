@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -266,7 +267,7 @@ func pick(d Decision, o Outcome) ([]string, []string) {
 	}
 	var out []string
 	add := func(label string) {
-		if name := ProductName(label); name != "" && !contains(out, name) && len(out) < width {
+		if name := ProductName(label); name != "" && !slices.Contains(out, name) && len(out) < width {
 			out = append(out, name)
 		}
 	}

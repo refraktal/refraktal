@@ -1,6 +1,7 @@
 package refraktal
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -294,7 +295,7 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 	tcancel()
 	sr := closeSession(10 * time.Second)
 	c.swept = len(sr.Swept.Killed)
-	c.Model = cmpOr(turn.Model, s.model)
+	c.Model = cmp.Or(turn.Model, s.model)
 	// A turn is cancelled if we sent session/cancel or the harness ended it
 	// as cancelled on its own (Codex does after a denial).
 	turn.Cancelled = turn.Cancelled || turn.StopReason == "cancelled"
@@ -734,7 +735,7 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 			// Cancelled, max_tokens or an ACP error: its answer does not
 			// count. The checks ranking decides; a flagged candidate cannot
 			// win that way.
-			why := "the judge did not finish (" + cmpOr(j.StopReason, "error") + ")"
+			why := "the judge did not finish (" + cmp.Or(j.StopReason, "error") + ")"
 			if len(j.Files) > 0 || strings.HasPrefix(j.Error, "the judge") {
 				why = "the judge's answer is not used (it changed its worktree, or it could not be checked)"
 			}

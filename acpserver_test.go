@@ -3,6 +3,7 @@ package refraktal
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -53,7 +54,7 @@ func (s acpChildSpec) harnesses() []harness.Harness {
 			hs = append(hs, harness.Refraktal(self, childACPArg, string(b)))
 			continue
 		}
-		hs = append(hs, fake{name: f.Name, agentMode: cmpOrS(f.Mode, "turn"), env: f.Env})
+		hs = append(hs, fake{name: f.Name, agentMode: cmp.Or(f.Mode, "turn"), env: f.Env})
 	}
 	return hs
 }
