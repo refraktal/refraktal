@@ -169,9 +169,11 @@ func Start(s Spec) (*Child, error) {
 		var written []Proc
 		for {
 			c.tracker.Poll()
-			if tracked := c.tracker.Tracked(); c.record != "" && !slices.Equal(tracked, written) {
-				if c.writeRecord() == nil {
-					written = tracked
+			if c.record != "" {
+				if tracked, changed := c.tracker.trackedIfChanged(written); changed {
+					if c.writeRecord() == nil {
+						written = tracked
+					}
 				}
 			}
 			select {
