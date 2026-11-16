@@ -61,7 +61,7 @@ func TestRealGitLFSEndToEnd(t *testing.T) {
 	if !isPointer(run(w.Dir, "cat-file", "-p", "HEAD:big.bin")) {
 		t.Fatal("Collect committed raw content instead of a pointer")
 	}
-	notice, err := w.Apply(ctx, res)
+	notice, err := w.Apply(ctx, res, snapStore(t))
 	if err != nil {
 		t.Fatal(err)
 	}

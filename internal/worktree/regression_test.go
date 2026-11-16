@@ -84,7 +84,7 @@ func TestConditionalIncludeDriversRunNothing(t *testing.T) {
 				t.Fatal(err)
 			}
 			checkMarker("collect")
-			if _, err := w.Apply(ctx, res); err != nil {
+			if _, err := w.Apply(ctx, res, snapStore(t)); err != nil {
 				t.Fatal(err)
 			}
 			checkMarker("apply")
@@ -175,7 +175,7 @@ func TestCollectLeavesUntouchedConvertedFile(t *testing.T) {
 			if !slices.Equal(res.Files, []string{"a.txt"}) || strings.Contains(string(res.Diff), "script.bat") {
 				t.Errorf("untouched file included: files %q, patch %q", res.Files, res.Diff)
 			}
-			if _, err := w.Apply(ctx, res); err != nil {
+			if _, err := w.Apply(ctx, res, snapStore(t)); err != nil {
 				t.Fatal(err)
 			}
 			if b, err := os.ReadFile(filepath.Join(r, "script.bat")); err != nil || string(b) != "echo original\r\n" {
@@ -205,7 +205,7 @@ func TestApplyWithUserAutocrlf(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.Apply(ctx, res); err != nil {
+	if _, err := w.Apply(ctx, res, snapStore(t)); err != nil {
 		t.Fatal(err)
 	}
 	if b, err := os.ReadFile(filepath.Join(r, "a.txt")); err != nil || string(b) != "one\r\ntwo\r\n" {
@@ -245,7 +245,7 @@ func TestCollectApplySparseCheckout(t *testing.T) {
 	if !slices.Equal(res.Files, []string{"inside/file.txt"}) {
 		t.Fatalf("files = %q", res.Files)
 	}
-	if _, err := w.Apply(ctx, res); err != nil {
+	if _, err := w.Apply(ctx, res, snapStore(t)); err != nil {
 		t.Fatal(err)
 	}
 	if b, err := os.ReadFile(filepath.Join(r, "inside", "file.txt")); err != nil || string(b) != "changed\n" {
@@ -273,7 +273,7 @@ func TestResultFilesPreservesUnusualNames(t *testing.T) {
 	if !slices.Equal(res.Files, want) {
 		t.Errorf("files = %q; want %q", res.Files, want)
 	}
-	if _, err := w.Apply(ctx, res); err != nil {
+	if _, err := w.Apply(ctx, res, snapStore(t)); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range want {
@@ -335,7 +335,7 @@ func TestDriverConfigChangeDuringCommandFails(t *testing.T) {
 				case "collect":
 					_, err = w.Collect(ctx, "racing collect")
 				case "apply":
-					_, err = w.Apply(ctx, res)
+					_, err = w.Apply(ctx, res, snapStore(t))
 				}
 				if err == nil || !strings.Contains(err.Error(), "driver configuration changed") {
 					t.Fatalf("config change did not fail operation: %v", err)

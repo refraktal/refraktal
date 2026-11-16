@@ -73,7 +73,7 @@ func TestCreateCollectApplyRemove(t *testing.T) {
 		t.Fatal("the repository's git hook ran")
 	}
 
-	if _, err := w.Apply(ctx, res); err != nil {
+	if _, err := w.Apply(ctx, res, snapStore(t)); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(r, "a.txt")); string(b) != "one\ntwo\n" {
@@ -115,7 +115,7 @@ func TestNoChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := w.Collect(ctx, "refraktal")
-	_, applyErr := w.Apply(ctx, res)
+	_, applyErr := w.Apply(ctx, res, snapStore(t))
 	if err != nil || len(res.Files) != 0 || res.Commit != "" || applyErr != nil {
 		t.Fatalf("%+v %v", res, err)
 	}
@@ -137,7 +137,7 @@ func TestApplyConflictChangesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.WriteFile(filepath.Join(r, "a.txt"), []byte("mine\n"), 0o644)
-	if _, err := w.Apply(ctx, res); err == nil {
+	if _, err := w.Apply(ctx, res, snapStore(t)); err == nil {
 		t.Fatal("want a conflict")
 	}
 	if b, _ := os.ReadFile(filepath.Join(r, "a.txt")); string(b) != "mine\n" {
@@ -178,7 +178,7 @@ func TestPoisonedConfigRunsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.Apply(ctx, res); err != nil {
+	if _, err := w.Apply(ctx, res, snapStore(t)); err != nil {
 		t.Fatal(err)
 	}
 	w.Remove(ctx)
@@ -244,7 +244,7 @@ func TestGitIgnoresInheritedRepositoryAndConfig(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := w.Apply(ctx, res); err != nil {
+			if _, err := w.Apply(ctx, res, snapStore(t)); err != nil {
 				t.Fatal(err)
 			}
 			if b, err := os.ReadFile(filepath.Join(r, "a.txt")); err != nil || string(b) != "isolated\n" {
@@ -338,7 +338,7 @@ func TestConfiguredFiltersRunNothing(t *testing.T) {
 			if _, err := os.Stat(marker); !os.IsNotExist(err) {
 				t.Fatalf("configured driver ran during collect: %v", err)
 			}
-			if _, err := w.Apply(ctx, res); err != nil {
+			if _, err := w.Apply(ctx, res, snapStore(t)); err != nil {
 				t.Fatal(err)
 			}
 			if b, err := os.ReadFile(filepath.Join(r, "nested", "new.txt")); err != nil || string(b) != "new\n" {
@@ -434,7 +434,7 @@ func TestStagingPreservesNamesModesAndLinks(t *testing.T) {
 	if err != nil || again.Commit != res.Commit {
 		t.Fatalf("second collect: commit %q, %v; want %q", again.Commit, err, res.Commit)
 	}
-	if _, err := w.Apply(ctx, res); err != nil {
+	if _, err := w.Apply(ctx, res, snapStore(t)); err != nil {
 		t.Fatal(err)
 	}
 	if b, err := os.ReadFile(filepath.Join(r, name)); err != nil || string(b) != content {
@@ -570,7 +570,7 @@ func TestPatchIgnoresUserDiffFormatting(t *testing.T) {
 	if !strings.HasPrefix(string(res.Diff), "diff --git a/a.txt b/a.txt\n") || strings.Contains(string(res.Diff), "\x1b") {
 		t.Fatalf("patch has configured prefixes or color: %q", res.Diff)
 	}
-	if _, err := w.Apply(ctx, res); err != nil {
+	if _, err := w.Apply(ctx, res, snapStore(t)); err != nil {
 		t.Fatal(err)
 	}
 	if b, err := os.ReadFile(filepath.Join(r, "a.txt")); err != nil || string(b) != "formatted safely\n" {

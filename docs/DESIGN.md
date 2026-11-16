@@ -636,6 +636,21 @@ candidates that did. This is reported ahead of `no_changes`.
   branch whatever the run's outcome. A fan-out that ends with no applicable
   winner while such a candidate exists ends `failed` (exit 1), never
   `no_changes` or `no_winner`: partial work was produced and not used.
+- **Never half-applied.** `git apply` writes file by file, so a failure
+  after the first file (a full disk, a folder it cannot write) would leave
+  the user's tree half-applied. Before the apply, every path the patch
+  touches is snapshotted into `apply-snapshot[-<harness>]/` in the run
+  folder, through its pinned root: content, permissions, link target, file
+  or folder or absent, and the permissions of the folders above. On any
+  apply failure every path is restored byte for byte, the files and folders
+  the apply created are removed, and each path is checked against the
+  snapshot; the run is `apply_failed` (exit 1) and the result stays on its
+  branch. The restore works through `os.Root` and never through a symlink
+  the failed apply left. If the restore itself fails, the error names the
+  paths not restored and the snapshot folder, which is kept with a
+  `manifest.json`; otherwise the snapshot is removed. Known limits: a
+  folder's ownership and timestamps are not restored, and another process
+  writing the same paths during the apply is not detected.
 - **A cancel stops before apply.** A cancel (Ctrl-C, or an ACP client's
   `session/cancel`) that arrives during judging or collection stops before
   the apply: the run fails (exit 1) and the result stays on its branch.

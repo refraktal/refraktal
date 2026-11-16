@@ -486,7 +486,25 @@ func (e *runEnv) apply(c *Candidate) (string, error) {
 	}
 	ctx, cancel := e.opCtx()
 	defer cancel()
-	return c.wt.Apply(ctx, c.result)
+	// The snapshot of every path the patch touches, for a rollback, goes in
+	// the run folder (never $TMPDIR), through its pinned root. It stays only
+	// if a failed apply could not be fully restored.
+	name := "apply-snapshot"
+	if c.suffix != "" {
+		name += "-" + c.suffix
+	}
+	if err := e.run.Mkdir(name, 0o700); err != nil {
+		return "", fmt.Errorf("the apply snapshot folder: %w", err)
+	}
+	store, err := e.run.OpenRoot(name)
+	if err != nil {
+		return "", fmt.Errorf("the apply snapshot folder: %w", err)
+	}
+	defer func() {
+		store.Close()
+		os.Remove(filepath.Join(e.run.Dir, name)) // only if empty
+	}()
+	return c.wt.Apply(ctx, c.result, store)
 }
 
 // errMinsExpired: --mins ran out before the winner could be applied.

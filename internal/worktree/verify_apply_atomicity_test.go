@@ -7,14 +7,12 @@ import (
 	"testing"
 )
 
-// TestVerifyApplyAtomicityFilesystemError is an opt-in, intentionally failing
-// reproduction of the lifecycle model's faithful half-apply counterexample.
-// No harness or linked worktree is started. Enable REFRAKTAL_VERIFY_FINDINGS=1
-// to check the requested invariant against the current implementation.
+// TestVerifyApplyAtomicityFilesystemError reproduces the lifecycle model's
+// faithful half-apply counterexample against the real Apply; it is enforced
+// now that Apply rolls back (root bypasses the permission: see
+// TestFailedApplyIsRolledBackViaSeam for the variant that runs as root).
+// No harness or linked worktree is started.
 func TestVerifyApplyAtomicityFilesystemError(t *testing.T) {
-	if os.Getenv("REFRAKTAL_VERIFY_FINDINGS") != "1" {
-		t.Skip("known half-apply finding; set REFRAKTAL_VERIFY_FINDINGS=1 to reproduce")
-	}
 	if os.Geteuid() == 0 {
 		t.Skip("requires filesystem permissions that root can bypass")
 	}
@@ -30,7 +28,7 @@ func TestVerifyApplyAtomicityFilesystemError(t *testing.T) {
 	if err := w.CheckApply(context.Background(), result); err != nil {
 		t.Fatalf("fixture must pass git apply --check: %v", err)
 	}
-	_, err := w.Apply(context.Background(), result)
+	_, err := w.Apply(context.Background(), result, snapStore(t))
 	if err == nil {
 		t.Fatal("fixture requires the second file write to fail")
 	}

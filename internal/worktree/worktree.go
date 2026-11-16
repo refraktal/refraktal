@@ -237,9 +237,13 @@ func (w Worktree) Collect(ctx context.Context, message string) (Result, error) {
 }
 
 // Apply applies a result's diff to the user's working tree, without staging
-// it. It checks first, so a diff that does not apply cleanly changes nothing.
+// it. It checks first, so a diff that does not apply cleanly changes nothing,
+// and it is never left half-applied: every path the patch touches is
+// snapshotted into snapshot (an empty folder, pinned; the caller puts it in
+// the run folder) and restored if the apply fails (*ApplyError). The folder
+// is emptied unless a restore failed, when it holds the originals.
 // It returns a notice naming LFS paths left as pointers, or an empty string.
-func (w Worktree) Apply(ctx context.Context, r Result) (string, error) {
+func (w Worktree) Apply(ctx context.Context, r Result, snapshot *os.Root) (string, error) {
 	if len(r.Diff) == 0 {
 		return "", nil
 	}
@@ -262,11 +266,23 @@ func (w Worktree) Apply(ctx context.Context, r Result) (string, error) {
 	if err := checkLFS(); err != nil {
 		return "", err
 	}
-	for _, args := range [][]string{{"apply", "--check", "--binary"}, {"apply", "--binary"}} {
-		if _, err := g.Run(ctx, r.Diff, args...); err != nil {
-			return "", err
-		}
+	if _, err := g.Run(ctx, r.Diff, "apply", "--check", "--binary"); err != nil {
+		return "", err // a conflict: nothing was written
 	}
+	// git apply writes file by file: snapshot every touched path first, and
+	// restore them all on any failure, so the tree is never half-applied.
+	snap, err := takeSnapshot(w.Repo, r.Files, snapshot)
+	if err != nil {
+		return "", err
+	}
+	_, err = g.Run(ctx, r.Diff, "apply", "--binary")
+	if err == nil && testAfterGitApply != nil {
+		err = testAfterGitApply(w.Repo)
+	}
+	if err != nil {
+		return "", snap.rollback(w.Repo, err)
+	}
+	snap.clear()
 	// Include both the user's attributes and attributes added by the patch;
 	// removing an attribute must not suppress the notice either.
 	if err := checkLFS(); err != nil {
@@ -280,6 +296,10 @@ func (w Worktree) Apply(ctx context.Context, r Result) (string, error) {
 	}
 	return "", nil
 }
+
+// testAfterGitApply, set by tests, runs after git apply succeeds; an error
+// it returns is an apply failure (a seam that works as root too).
+var testAfterGitApply func(repo string) error
 
 // Changed lists modified, deleted, untracked and ignored paths, including
 // committed changes from Base. A HEAD other than the recorded base is an
