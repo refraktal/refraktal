@@ -195,9 +195,15 @@ func provenDescendants(all map[int]Proc, known []Proc) []Proc {
 			if _, ok := trusted[pid]; ok {
 				continue
 			}
-			if _, ok := trusted[p.PPID]; ok {
-				trusted[pid] = p
-				changed = true
+			if parent, ok := trusted[p.PPID]; ok {
+				// ps rows are sampled at different times. An older child
+				// cannot belong to a replacement parent born after it.
+				childBirth, childValid := startTime(p.Start)
+				parentBirth, parentValid := startTime(parent.Start)
+				if childValid && parentValid && !childBirth.Before(parentBirth) {
+					trusted[pid] = p
+					changed = true
+				}
 			}
 		}
 	}

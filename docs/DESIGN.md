@@ -283,8 +283,8 @@ process-group kill does not reach them.
   failed pidfd open), Go falls back to signalling by PID. macOS has no pidfd,
   so its final identity-check-to-signal window remains. Process-group signals
   also use a group ID, with the check-to-signal window on both systems.
-  The harness, a process-group and session leader, stays unreaped until its group and session have been
-  cleaned up, so neither ID can be reused between the check and the signal.
+  The harness, a process-group and session leader, stays unreaped until its
+  group and session have been cleaned up, so neither ID can be reused between the check and the signal.
   (On a system without `waitid(WNOWAIT)` the child is reaped at once and
   that guarantee falls back to the identity checks.)
 - **Run events and errors.** Durable run events never carry a harness's raw
@@ -300,6 +300,8 @@ process-group kill does not reach them.
   the tree and process-group kills, the sweep signals only provable members:
   identities recorded while the session was known to be ours, or descendants
   linked by PPID chains to a currently verified tracked or recorded process.
+  Each chain link must have valid birth times, with the child born no earlier
+  than its parent; stale PPID rows cannot link to a newer replacement parent.
   A matching live leader proves ownership throughout a membership sample;
   the harness's own unreaped leader also reserves its session ID. This keeps
   detached children reachable while that reservation holds. Each individual
@@ -767,8 +769,8 @@ prompts), the check source, the verdict (winner, method, reason, judge and
 whether it judged its own candidate), costs by source with turns, the
 result's harness, files and branch, then each nested child run, indented.
 `--json` prints the same as one object with nested runs inside. If writing
-that object fails, `show` reports the error on stderr and exits nonzero. Runs are
-ordered by their first event's timestamp, with the run ID breaking ties;
+that object fails, `show` reports the error on stderr and exits nonzero. Runs
+are ordered by their first event's timestamp, with the run ID breaking ties;
 actual spend and retained reservations are separate fields in text and JSON.
 
 - Run logs are untrusted (a child process wrote the nested ones): show

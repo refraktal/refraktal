@@ -81,12 +81,12 @@ func TestMain(m *testing.M) {
 			os.Exit(2)
 		}
 		fmt.Println(kid.Process.Pid)
-	case "prefixed": // like Claude: run a tool command in a new session, through the shell prefix in PREFIX
+	case "prefixed": // like Claude, but keep the tool leader alive until a release line
 		time.Sleep(300 * time.Millisecond) // after the tracker's first poll, so only the recorded-session sweep can find it
-		sh := exec.Command("sh", "-c", `"$PREFIX" 'sleep 30 >/dev/null 2>&1 & echo $!'`)
+		sh := exec.Command("sh", "-c", `"$PREFIX" 'sleep 30 >/dev/null 2>&1 & echo $!'; read release`)
 		sh.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 		sh.Env = append(os.Environ(), HelperEnv+"=shell-prefix") // as Claude passes its environment to the prefix
-		sh.Stdout = os.Stdout
+		sh.Stdin, sh.Stdout = os.Stdin, os.Stdout
 		if sh.Run() != nil {
 			os.Exit(2)
 		}

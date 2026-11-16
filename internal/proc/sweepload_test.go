@@ -102,25 +102,45 @@ func TestSweepSessionOutlastsForksDuringTheSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 	if s := survivors(t, dir); len(s) != 0 {
-		t.Fatalf("%d chain members survived the sweep (reported alive: %d)", len(s), len(kr.Alive))
+		t.Fatalf("%d chain members survived the sweep (reported alive/unknown: %d/%d)", len(s), len(kr.Alive), len(kr.Unknown))
 	}
 }
 
-// A session that never empties within the sweep's time is reported: the
-// members of the last listing come back as alive, so the record is kept for
-// retry and the run reports them; a survivor is never silent. (A process
-// forked after the last listing cannot be named by this sweep, but its
-// parent is.)
+// A session that never empties within the sweep's time remains reported.
+// Stable, proved members are Alive; unresolved occupancy is Unknown. Both
+// outcomes keep the live record. A clean report would lose the next generation.
 func TestSweepSessionReportsWhatOutlivesIt(t *testing.T) {
 	defer func(d time.Duration) { sweepFor = d }(sweepFor)
 	sweepFor = 500 * time.Millisecond
 	leader, dir := startChain(t, 1_000)
-	kr, _ := SweepSession(leader)
-	if s := survivors(t, dir); len(s) > 0 && len(kr.Alive) == 0 {
-		t.Fatalf("%d members outlived the sweep, and none was reported alive", len(s))
+	kr, err := SweepSession(leader)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(kr.Alive) == 0 {
-		t.Fatal("the sweep ended inside its time although members kept forking")
+	pending := len(kr.Alive) + len(kr.Unknown)
+	if s := survivors(t, dir); len(s) > 0 && pending == 0 {
+		t.Fatalf("%d members outlived the sweep without an alive or unknown report", len(s))
+	}
+	if pending == 0 {
+		t.Fatal("the sweep reported clean although members kept forking")
+	}
+	// Unknown may name the occupied session when no stable member can be
+	// identified. Otherwise it must name a member of this owned chain.
+	owned := chainMembers(dir)
+	for _, p := range kr.Unknown {
+		if p.Same(leader) {
+			continue
+		}
+		found := false
+		for _, pid := range owned {
+			if pid == p.PID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("unknown report names a process outside this chain: %d", p.PID)
+		}
 	}
 }
 

@@ -204,3 +204,34 @@ func TestSessionPollKeepsNewestVerifiedBirth(t *testing.T) {
 		t.Fatalf("stale identity replaced new verified birth: %+v", c.members)
 	}
 }
+
+// ps is not an atomic snapshot: an old child's PPID can be captured before
+// that PID is reused, and the replacement parent's row can be captured later.
+func TestSessionSweepRejectsParentBornAfterMember(t *testing.T) {
+	leader := Proc{PID: 990001, Start: "Sun Nov 15 15:45:51 2026"}
+	parent := Proc{PID: 990002, Start: "Sun Nov 15 15:45:54 2026"}
+	stranger := Proc{PID: 990003, PPID: parent.PID, Start: "Sun Nov 15 15:45:52 2026"}
+	fakePS(t, fmt.Sprintf("echo '%d 1 990001 %d S %s parent'; echo '%d %d 990001 %d S %s stranger'", parent.PID, os.Getuid(), parent.Start, stranger.PID, stranger.PPID, os.Getuid(), stranger.Start))
+	savedMembers, savedCheck, savedList := membersOf, recheckPID, listForKill
+	t.Cleanup(func() { membersOf, recheckPID, listForKill = savedMembers, savedCheck, savedList })
+	present := true
+	membersOf = func(int) ([]Proc, bool, error) {
+		if present {
+			return []Proc{stranger}, true, nil
+		}
+		return nil, false, nil
+	}
+	recheckPID = func(int) (Proc, error) { return stranger, nil }
+	listForKill = func() (map[int]Proc, error) { return map[int]Proc{}, nil }
+	sent := interceptSignals(t)
+	intercept := signal
+	signal = func(pid int, sig syscall.Signal) error {
+		present = false
+		return intercept(pid, sig)
+	}
+	c := &Child{leader: leader, members: map[int]Proc{parent.PID: parent}, dropped: map[string]bool{}}
+	r, err := c.sweepSessions()
+	if err != nil || len(*sent) != 0 || len(r.Killed) != 0 || !slices.Contains(pids(r.Unknown), stranger.PID) {
+		t.Fatalf("impossible parent chain proved ownership: signals %v, report %+v, err %v", *sent, r, err)
+	}
+}
