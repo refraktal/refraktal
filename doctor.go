@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -161,6 +162,12 @@ func Doctor(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 		rep.Decider = checkDecider(ctx, o)
 		return rep, err
 	}
+	// Reject the shared location before any harness can prepare or start.
+	// Keep this as a check result so cleanup and the Decider still run.
+	var neutralErr error
+	if len(o.Harnesses) > 0 {
+		o.Neutral, neutralErr = prepareDoctorFolder(o.Neutral)
+	}
 	rep.Harnesses = make([]HarnessCheck, len(o.Harnesses))
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -169,6 +176,11 @@ func Doctor(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 		rep.Decider = checkDecider(ctx, o)
 	}()
 	for i, h := range o.Harnesses {
+		if neutralErr != nil {
+			rep.Harnesses[i] = HarnessCheck{Name: h.Name(), Mode: h.Mode(), MCP: cfg.For(h.Name()).MCP,
+				Status: StatusUnavailable, Reason: neutralErr.Error()}
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -251,6 +263,48 @@ func defaultRoot() (string, error) {
 	return cwd, nil
 }
 
+// prepareDoctorFolder returns the absolute real folder that may be handed to
+// a harness. Inspect only filesystem markers, never Git or repository config.
+// The returned path avoids reusing a configured symlink after the check; it
+// cannot prevent concurrent changes to real ancestors or later .git creation.
+func prepareDoctorFolder(path string) (real string, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("doctor session folder %q is unusable: %w; point XDG_CACHE_HOME outside any repository (on macOS, move HOME/Library/Caches outside any repository)", path, err)
+		}
+	}()
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(abs, 0o700); err != nil {
+		return "", err
+	}
+	real, err = filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	for dir := real; ; dir = filepath.Dir(dir) {
+		info, err := os.Stat(dir)
+		if err != nil {
+			return "", err
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("%q is not a directory", dir)
+		}
+		_, err = os.Lstat(filepath.Join(dir, ".git"))
+		switch {
+		case err == nil:
+			return "", fmt.Errorf("resolved folder %q is inside repository %q (.git marker)", real, dir)
+		case !errors.Is(err, os.ErrNotExist):
+			return "", err
+		}
+		if filepath.Dir(dir) == dir {
+			return real, nil
+		}
+	}
+}
+
 func checkHarness(ctx context.Context, h harness.Harness, hcfg config.Harness, o DoctorOptions, run runlog.Run, log *runlog.Log) HarnessCheck {
 	c := HarnessCheck{Name: h.Name(), Mode: h.Mode(), MCP: hcfg.MCP}
 	scratch := filepath.Join(run.Dir, h.Name())
@@ -258,11 +312,17 @@ func checkHarness(ctx context.Context, h harness.Harness, hcfg config.Harness, o
 	// (and Claude runs project hooks) from the session folder, and doctor must
 	// not run a repository's code.
 	cwd := filepath.Join(o.Neutral, run.ID+"-"+h.Name())
-	if err := os.MkdirAll(cwd, 0o700); err != nil {
-		c.Status, c.Reason = StatusError, err.Error()
+	// Never adopt an existing session folder or a symlink at its name.
+	if err := os.Mkdir(cwd, 0o700); err != nil {
+		c.Status, c.Reason = StatusUnavailable, fmt.Sprintf("doctor session folder %q: %v", cwd, err)
 		return c
 	}
 	defer os.RemoveAll(cwd)
+	cwd, err := prepareDoctorFolder(cwd)
+	if err != nil {
+		c.Status, c.Reason = StatusUnavailable, err.Error()
+		return c
+	}
 	if err := run.Mkdir(h.Name(), 0o700); err != nil {
 		c.Status, c.Reason = StatusError, err.Error()
 		return c
