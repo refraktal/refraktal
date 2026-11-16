@@ -143,16 +143,16 @@ type KillReport struct {
 	Unknown []Proc `json:"unknown"` // lookup failed: identity or exit could not be confirmed
 }
 
-// Kill sends SIGKILL to each process that is still running as recorded: same
-// PID and start time, checked again immediately before its own signal, so the
-// window for a PID reuse is as small as one ps call. A process whose PID has
-// been reused is not touched. Kill never targets this process or PID 1.
 // killConfirm is how long Kill waits for killed processes to disappear.
 const killConfirm = 5 * time.Second
 
 // listForKill lists processes for Kill's confirmation (a variable for tests).
 var listForKill = List
 
+// Kill sends SIGKILL to each process that is still running as recorded: same
+// PID and start time, checked again immediately before its own signal, so the
+// window for a PID reuse is as small as one ps call. A process whose PID has
+// been reused is not touched. Kill never targets this process or PID 1.
 func Kill(procs []Proc) (KillReport, error) {
 	r := KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}, Unknown: []Proc{}}
 	var lookupErr error

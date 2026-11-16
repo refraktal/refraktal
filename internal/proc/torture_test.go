@@ -28,7 +28,10 @@ func startTorture(t *testing.T, s acptest.TortureSpec, role string, sessions boo
 	sp := Spec{Argv: argv, Env: env, PollEvery: time.Hour, SessionPollEvery: time.Hour,
 		LiveDir: filepath.Join(s.Dir, "live")}
 	if role == "cycle" {
-		sp.PollEvery, sp.SessionPollEvery = 20*time.Millisecond, 30*time.Millisecond
+		// Exercise both background pollers at production defaults. Faster
+		// tickers make four workers compete on hundreds of global ps scans
+		// per second (an occupied session needs two), before shutdown's scans.
+		sp.PollEvery, sp.SessionPollEvery = 0, 0
 	}
 	if sessions {
 		sp.SessionsFile = filepath.Join(s.Dir, "sessions")
@@ -118,6 +121,43 @@ func fdCount(t *testing.T) int {
 	return len(names)
 }
 
+// tortureCycleDiagnostics keeps command lines out of test output. A fresh
+// listing distinguishes a still-live untracked leaf from an expired fixture,
+// and its duration distinguishes slow process enumeration from enrollment.
+func tortureCycleDiagnostics(t *testing.T, s acptest.TortureSpec, c *Child, leaf int, elapsed time.Duration) {
+	t.Helper()
+	exited, reaped := false, false
+	select {
+	case <-c.exited:
+		exited = true
+	default:
+	}
+	select {
+	case <-c.reaped:
+		reaped = true
+	default:
+	}
+	t.Logf("cycle discovery: Poll elapsed=%s, tracker error=%v, root=%d exited=%t reaped=%t, fixture expiry in=%s, inventory=%+v",
+		elapsed, c.tracker.Err(), c.PID(), exited, reaped, time.Until(s.Deadline), acptest.TortureInventory(s))
+	logProc := func(source string, p Proc) {
+		t.Logf("%s: pid=%d ppid=%d pgid=%d uid=%d start=%q", source, p.PID, p.PPID, p.PGID, p.UID, p.Start)
+	}
+	tracked := c.Tracked()
+	t.Logf("tracker saw %d processes", len(tracked))
+	for _, p := range tracked {
+		logProc("tracked", p)
+	}
+	start := time.Now()
+	all, err := List()
+	t.Logf("fresh listing: elapsed=%s, processes=%d, error=%v, root present=%t, leaf %d present=%t",
+		time.Since(start), len(all), err, all[c.PID()].PID != 0, leaf, all[leaf].PID != 0)
+	for _, p := range all {
+		if p.PID == c.PID() || p.PID == leaf || p.PPID == c.PID() || acptest.TortureMatches(s, p.Cmd) {
+			logProc("listed", p)
+		}
+	}
+}
+
 func TestTortureStartKillCycles(t *testing.T) {
 	checkSentinel := acptest.StartSentinel(t)
 	cycles, workers := 20, 4
@@ -142,12 +182,29 @@ func TestTortureStartKillCycles(t *testing.T) {
 					s := acptest.NewTortureSpec(t, *torture)
 					c := startTorture(t, s, "cycle", false)
 					tortureReady(t, s, 2)
-					acptest.WaitFor(t, 5*time.Second, "tracked cycle child", func() bool {
-						if err := c.tracker.Poll(); err != nil {
-							t.Fatal(err)
-						}
-						return len(c.Tracked()) == 1
+					inventory := acptest.TortureInventory(s)
+					root := slices.IndexFunc(inventory, func(p acptest.TortureProcess) bool {
+						return p.Role == "cycle" && p.PID == c.PID()
 					})
+					leaf := slices.IndexFunc(inventory, func(p acptest.TortureProcess) bool {
+						return p.Role == "leaf" && p.Parent == c.PID()
+					})
+					if root < 0 || leaf < 0 {
+						t.Fatalf("cycle %d: invalid root/leaf inventory: %+v", i, inventory)
+					}
+					// Inventory is written after exec. The leaf stays a direct
+					// child until the shared safety expiry, so one successful
+					// post-ready scan must enroll it. Repeated Poll calls only
+					// add global ps load; List already bounds its own command.
+					start := time.Now()
+					err := c.tracker.Poll()
+					elapsed := time.Since(start)
+					tracked := c.Tracked()
+					if err != nil || len(tracked) != 1 || tracked[0].PID != inventory[leaf].PID || tracked[0].PPID != c.PID() {
+						tortureCycleDiagnostics(t, s, c, inventory[leaf].PID, elapsed)
+						t.Fatalf("cycle %d: post-ready Poll took %s: error=%v, tracked PIDs=%v, want only leaf %d of root %d",
+							i, elapsed, err, pids(tracked), inventory[leaf].PID, c.PID())
+					}
 					tortureReport(t, c.Shutdown(5*time.Millisecond))
 					tortureGone(t, s)
 					if entries, err := os.ReadDir(filepath.Join(s.Dir, "live")); err != nil || len(entries) != 0 {
