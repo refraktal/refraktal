@@ -30,8 +30,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.mod
@@ -44,8 +46,10 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.mod
@@ -57,7 +61,7 @@ jobs:
       - name: verify checksums
         working-directory: dist
         run: sha256sum -c SHA256SUMS
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-assets
           path: dist/
@@ -71,7 +75,7 @@ jobs:
     permissions:
       contents: write # to create the draft release
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-assets
           path: dist
@@ -81,6 +85,11 @@ jobs:
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
-          gh release create "$TAG" --repo "$REPO" --draft --verify-tag --title "Refraktal $TAG" \
-            --notes "Assets built by the Release workflow. Verify with: sha256sum -c SHA256SUMS. The Homebrew formula (refraktal.rb) goes to the tap by hand: see docs/RELEASING.md." \
-            dist/*.tar.gz dist/SHA256SUMS dist/refraktal.rb
+          # A tag with a hyphen (v0.2.0-rc.1) is a prerelease: never marked
+          # latest, so neither GitHub's latest release nor the installer's
+          # default ever picks it.
+          kind=(--latest)
+          case "$TAG" in *-*) kind=(--prerelease --latest=false) ;; esac
+          gh release create "$TAG" --repo "$REPO" --draft --verify-tag "${kind[@]}" --title "Refraktal $TAG" \
+            --notes "Assets built by the Release workflow. To verify one archive: grep ' refraktal_<version>_<os>_<arch>.tar.gz\$' SHA256SUMS | sha256sum -c - (on macOS: shasum -a 256 -c -). See docs/RELEASING.md." \
+            dist/*.tar.gz dist/SHA256SUMS dist/install.sh dist/refraktal.rb

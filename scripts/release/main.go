@@ -121,6 +121,10 @@ class Refraktal < Formula
     end
   end
 
+  # The ACP adapters for Claude Code and Codex are npm packages, installed on
+  # first use with npm.
+  depends_on "node"
+
   def install
     bin.install "refraktal"
   end
@@ -168,7 +172,7 @@ func main() {
 	version := flag.String("version", "", "release version, a semver tag such as v0.1.0")
 	out := flag.String("out", "dist", "output folder (must not exist yet)")
 	flag.Parse()
-	if !semver.MatchString(*version) {
+	if !ValidVersion(*version) {
 		fmt.Fprintf(os.Stderr, "release: -version %q is not a semver tag like v0.1.0\n", *version)
 		os.Exit(2)
 	}
@@ -213,6 +217,14 @@ func run(version, out string) error {
 	if err := os.RemoveAll(filepath.Join(out, "build")); err != nil {
 		return err
 	}
+	install, err := os.ReadFile(filepath.Join("scripts", "install.sh"))
+	if err != nil {
+		return err
+	}
+	files["install.sh"] = install // attached to the release, so it can be fetched from the tag
+	if err := os.WriteFile(filepath.Join(out, "install.sh"), install, 0o755); err != nil {
+		return err
+	}
 	if err := os.WriteFile(filepath.Join(out, "SHA256SUMS"), []byte(Sums(files)), 0o644); err != nil {
 		return err
 	}
@@ -223,6 +235,33 @@ func run(version, out string) error {
 	if err := os.WriteFile(filepath.Join(out, "refraktal.rb"), []byte(f), 0o644); err != nil {
 		return err
 	}
-	fmt.Printf("release %s: %d archives, SHA256SUMS and refraktal.rb in %s\n", version, len(archives), out)
+	fmt.Printf("release %s: %d archives, install.sh, SHA256SUMS and refraktal.rb in %s\n", version, len(archives), out)
 	return nil
 }
+
+// ValidVersion reports whether v is a release tag: vMAJOR.MINOR.PATCH with
+// no leading zeros, and an optional SemVer prerelease (dot-separated
+// identifiers, none empty, numeric ones without leading zeros). Build
+// metadata (+...) is refused: Go module versions cannot carry it.
+func ValidVersion(v string) bool {
+	if !semver.MatchString(v) {
+		return false
+	}
+	_, pre, ok := strings.Cut(v, "-")
+	if !ok {
+		return true
+	}
+	for _, id := range strings.Split(pre, ".") {
+		if id == "" {
+			return false
+		}
+		numeric := strings.Trim(id, "0123456789") == ""
+		if numeric && len(id) > 1 && id[0] == '0' {
+			return false
+		}
+	}
+	return true
+}
+
+// Prerelease reports whether v is a prerelease tag.
+func Prerelease(v string) bool { return strings.Contains(v, "-") }
