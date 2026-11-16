@@ -174,3 +174,17 @@ func TestReserveShareSplitsAcrossChildren(t *testing.T) {
 		t.Fatalf("turns were split: %d", gs[1].Turns)
 	}
 }
+
+// Review (8): before every prompt the run-wide settled spend is checked too,
+// so a child holding an untouched reservation stops once the run is spent.
+func TestBeginTurnStopsWhenTheRunIsSpent(t *testing.T) {
+	l, _ := New(Limits{USD: 4, Turns: 10, Wall: time.Minute}, nil)
+	a, _ := l.ReserveShare(2)
+	b, _ := l.ReserveShare(1)
+	l.BeginTurn(a)
+	l.Charge(a, Charge{USD: 5, Source: Reported}) // a turn cannot be stopped for cost: an overrun
+	l.Settle(a, false)
+	if err := l.BeginTurn(b); !exhausted(err, "usd") {
+		t.Fatalf("the run spent $5 of $4, yet a held reservation may still start a turn: %v", err)
+	}
+}

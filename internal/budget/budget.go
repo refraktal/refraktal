@@ -172,6 +172,10 @@ func (l *Ledger) BeginTurn(g Grant) error {
 		return &Exhausted{"turns"}
 	case st.spent >= g.USD:
 		return &Exhausted{"usd"}
+	case l.spent+st.spent >= l.lim.USD:
+		// The run as a whole is spent (another child overran): a held
+		// reservation does not keep this child going.
+		return &Exhausted{"usd"}
 	}
 	l.turns++
 	return nil
