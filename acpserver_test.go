@@ -1,6 +1,8 @@
 package refraktal
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -527,5 +529,105 @@ func TestSessionSubfolderIsEnforced(t *testing.T) {
 	turn, _ := c.Prompt(context.Background(), open(t, c, sub), "x")
 	if turn.StopReason == "end_turn" || exists(filepath.Join(r.repo, "escape.txt")) || exists(filepath.Join(sub, "ok.txt")) {
 		t.Fatalf("a change outside the session folder was applied: %+v", turn)
+	}
+}
+
+// Review M7 (4): a client that stops reading cannot hold the server: writes
+// are bounded, a stuck transport cancels the runs, their harnesses are shut
+// down, and ServeACP returns.
+func TestServeACPClientThatStopsReading(t *testing.T) {
+	r := newRunRig(t)
+	o := r.serveOptions(fake{name: "claude", agentMode: "hang", mcp: harness.MCPInherit}, nil) // the MCP notice is written mid-run
+	o.WriteTimeout = 500 * time.Millisecond
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- ServeACP(context.Background(), inR, outW, o) }()
+	t.Cleanup(func() { inW.Close(); outR.Close() })
+	for _, m := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"` + r.repo + `","mcpServers":[]}}`,
+	} {
+		io.WriteString(inW, m+"\n")
+	}
+	buf := make([]byte, 1<<16)
+	for got := ""; strings.Count(got, `"id":`) < 2; { // read the two responses, then stop reading
+		n, err := outR.Read(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got += string(buf[:n])
+	}
+	io.WriteString(inW, `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"refraktal-1","prompt":[{"type":"text","text":"x"}]}}`+"\n")
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("ServeACP returned no error for a client that stopped reading")
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("a client that stopped reading held the server")
+	}
+	if entries, _ := os.ReadDir(r.live); len(entries) != 0 {
+		t.Fatalf("%d live records left: the harness was stranded", len(entries))
+	}
+}
+
+// Review M7 (12): an idle server honours Ctrl-C (its context): the pending
+// read does not hold it.
+func TestIdleServeACPHonoursCancel(t *testing.T) {
+	inR, inW := io.Pipe()
+	defer inW.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- ServeACP(ctx, inR, io.Discard, ServeOptions{}) }()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("an idle server ignored its context")
+	}
+}
+
+// Review M7 (7): a large result never makes a frame past MaxFrame: the
+// accounting (cost) goes first in its own small frame, then the summary in
+// pieces, then the response.
+func TestServeACPSplitsLargeSummaries(t *testing.T) {
+	old := maxChunkBytes
+	maxChunkBytes = 1000
+	defer func() { maxChunkBytes = old }()
+	var out bytes.Buffer
+	s := &server{w: bufio.NewWriter(&out)}
+	s.start()
+	big := strings.Repeat("é<\x01", 5000) // multibyte and escaped characters
+	s.finish("s1", json.RawMessage(`7`), big, 0.5, acp.ChildReport{Turns: 1}, "end_turn")
+	s.stop()
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	var text strings.Builder
+	for i, l := range lines {
+		if len(l) > 8*maxChunkBytes {
+			t.Fatalf("frame %d is %d bytes", i, len(l))
+		}
+		var m struct {
+			ID     json.RawMessage `json:"id"`
+			Params struct {
+				Update struct {
+					Kind    string `json:"sessionUpdate"`
+					Content struct{ Text string }
+				} `json:"update"`
+			} `json:"params"`
+		}
+		json.Unmarshal([]byte(l), &m)
+		switch {
+		case i == 0 && m.Params.Update.Kind != "usage_update":
+			t.Fatalf("the first frame is %q, want the usage_update", l[:min(len(l), 80)])
+		case i == len(lines)-1 && string(m.ID) != "7":
+			t.Fatal("the response is not last")
+		case m.Params.Update.Kind == "agent_message_chunk":
+			text.WriteString(m.Params.Update.Content.Text)
+		}
+	}
+	if text.String() != big || len(lines) < 10 {
+		t.Fatalf("summary reassembled to %d bytes in %d frames", len(text.String()), len(lines))
 	}
 }
