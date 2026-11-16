@@ -71,6 +71,7 @@ type Candidate struct {
 	root             *os.Root // the candidate's scratch folder in the run folder
 	result           worktree.Result
 	timedOut         bool
+	forfeited        string // why the child was charged its whole grant (an untrusted report)
 	swept            int
 }
 
@@ -105,7 +106,7 @@ func (e *runEnv) account(charged, retained float64, turns int) {
 	defer e.amu.Unlock()
 	e.charged += charged
 	e.retained += retained
-	e.turns += turns
+	e.turns = satAdd(e.turns, max(0, turns))
 }
 
 // figures copies this run's own figures into the result.
@@ -291,6 +292,9 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 	e.account(0, 0, 1)
 	tctx, tcancel := context.WithDeadline(e.ctx, grant.Deadline)
 	turn, perr := s.client.Prompt(tctx, s.id, sp.prompt)
+	if testChildTurn != nil {
+		testChildTurn(h.Name(), &turn)
+	}
 	c.timedOut = errors.Is(tctx.Err(), context.DeadlineExceeded)
 	tcancel()
 	sr := closeSession(10 * time.Second)
@@ -301,6 +305,8 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 	turn.Cancelled = turn.Cancelled || turn.StopReason == "cancelled"
 	var cost sessionCost // a fresh session: its first report is the whole cost
 	charged, childRetained := 0.0, 0.0
+	// Real charges first, in full (an overrun included): forfeiting below
+	// adds only the unspent rest of the grant, never caps them.
 	for _, ch := range cost.charges(h.Name(), c.Model, turn, e.prices) {
 		e.ledger.Charge(grant, ch)
 		if ch.Source != budget.Estimated {
@@ -311,18 +317,43 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 			e.notice(fmt.Sprintf("warning: no price for model %q; its tokens count as $0 against --usd", ch.Model))
 		}
 	}
+	// A child Refraktal's report is untrusted: its turns must be within its
+	// remaining allowance, its cost and retained amount finite and not
+	// negative, retained within the grant. Anything else charges the child
+	// its whole grant (dollars and turns) and marks it exhausted.
+	untrusted := ""
 	if ch := turn.Child; ch != nil {
-		// A child Refraktal's own prompts count against --turns too, and
-		// the reservations its cancelled children kept are held here, not
-		// reported as spent.
-		e.ledger.AddTurns(grant, ch.Turns)
-		e.account(0, 0, ch.Turns)
-		if ch.Retained > 0 && !math.IsNaN(ch.Retained) && !math.IsInf(ch.Retained, 0) {
-			e.ledger.Charge(grant, budget.Charge{USD: ch.Retained, Source: budget.Retained, Note: "kept by the child Refraktal's cancelled children"})
-			e.account(0, ch.Retained, 0)
-			childRetained = ch.Retained
+		switch {
+		case turn.Cost != nil && !validCost(turn.Cost):
+			untrusted = "an invalid cost"
+		case math.IsNaN(ch.Retained) || math.IsInf(ch.Retained, 0) || ch.Retained < 0 || ch.Retained > grant.USD:
+			untrusted = "an invalid retained amount"
+		default:
+			if err := e.ledger.AddTurns(grant, ch.Turns); err != nil {
+				untrusted = fmt.Sprintf("%d turns, outside its remaining allowance of %d", ch.Turns, max(0, grant.Turns-1))
+			}
 		}
-		e.log.Event("child_run", map[string]any{"harness": name, "turns": ch.Turns, "outcome": ch.Outcome, "exit": ch.Exit})
+		if untrusted == "" {
+			// Its own prompts count against --turns too (counted above), and
+			// the reservations its cancelled children kept are held here,
+			// not reported as spent.
+			e.account(0, 0, ch.Turns)
+			if ch.Retained > 0 {
+				e.ledger.Charge(grant, budget.Charge{USD: ch.Retained, Source: budget.Retained, Note: "kept by the child Refraktal's cancelled children"})
+				e.account(0, ch.Retained, 0)
+				childRetained = ch.Retained
+			}
+		}
+		e.log.Event("child_run", map[string]any{"harness": name, "turns": ch.Turns, "outcome": ch.Outcome, "exit": ch.Exit, "untrusted": untrusted})
+	}
+	if untrusted != "" {
+		// AddTurns may already have forfeited; Forfeit returns the amount
+		// either way.
+		charged += e.ledger.Forfeit(grant, "untrusted child report: "+untrusted)
+		e.account(0, 0, max(0, grant.Turns-1)) // its whole allowance
+		c.forfeited = "budget exhausted: " + name + " sent an untrusted report (" + untrusted + "); charged its whole grant"
+		e.notice(fmt.Sprintf("%s: untrusted report (%s): charged its whole grant ($%.4f, %d turns); the run ends as budget exhausted",
+			name, untrusted, grant.USD, grant.Turns))
 	}
 	settle(turn.Cancelled)
 	e.account(charged, 0, 0)
@@ -340,6 +371,8 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 		"usage": turn.Usage, "cost": turn.Cost, "last_used": turn.LastUsed, "error": errEvent(turnErrorCode(perr), errString(perr)),
 		"left_running": c.LeftRunning, "unknown": c.Unknown, "exited_on_its_own": sr.ExitedOnItsOwn})
 	switch {
+	case c.forfeited != "":
+		c.Outcome, c.Error = candExhausted, c.forfeited
 	case c.timedOut:
 		c.Outcome = candTimedOut
 	case perr != nil || turn.StopReason != "end_turn":
@@ -453,7 +486,25 @@ func (e *runEnv) apply(c *Candidate) (string, error) {
 	}
 	ctx, cancel := e.opCtx()
 	defer cancel()
-	return c.wt.Apply(ctx, c.result)
+	// The snapshot of every path the patch touches, for a rollback, goes in
+	// the run folder (never $TMPDIR), through its pinned root. It stays only
+	// if a failed apply could not be fully restored.
+	name := "apply-snapshot"
+	if c.suffix != "" {
+		name += "-" + c.suffix
+	}
+	if err := e.run.Mkdir(name, 0o700); err != nil {
+		return "", fmt.Errorf("the apply snapshot folder: %w", err)
+	}
+	store, err := e.run.OpenRoot(name)
+	if err != nil {
+		return "", fmt.Errorf("the apply snapshot folder: %w", err)
+	}
+	defer func() {
+		store.Close()
+		os.Remove(filepath.Join(e.run.Dir, name)) // only if empty
+	}()
+	return c.wt.Apply(ctx, c.result, store)
 }
 
 // errMinsExpired: --mins ran out before the winner could be applied.
@@ -466,14 +517,32 @@ var testBeforeCollect func(dir string)
 // errCancelled: the run was cancelled before the result could be applied.
 var errCancelled = errors.New("cancelled before the result could be applied; it is kept on its branch")
 
+// testChildTurn, set by tests, edits a child's turn as it arrives: a seam to
+// forge a child Refraktal's report without a forging agent.
+var testChildTurn func(harness string, t *acp.Turn)
+
 // testBeforeApply, set by tests, runs just before the apply's deadline check.
 var testBeforeApply func(deadline time.Time)
+
+// failedWithChanges: the candidate's turn or collect failed, and it changed
+// something. Its work is never deleted.
+func (c *Candidate) failedWithChanges() bool {
+	return c.Outcome == candFailed && len(c.Files) > 0
+}
 
 // keep marks a candidate's worktree as kept for the user.
 func (c *Candidate) keep() {
 	if c.wt != nil {
 		c.Branch, c.Worktree = c.wt.Branch, c.wt.Dir
 	}
+}
+
+// satAdd adds two non-negative counts, saturating at math.MaxInt.
+func satAdd(a, b int) int {
+	if b > math.MaxInt-a {
+		return math.MaxInt
+	}
+	return a + b
 }
 
 // drop removes a candidate's worktree and branch unless it is kept.
@@ -543,13 +612,27 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 	}
 	res.Candidates = nil
 	res.Harness = "" // set only for a winner, never the pinned list
+	// A candidate that failed after making changes (max_tokens, an ACP
+	// error, a refused or failed collect) is always kept, and a run that
+	// ends with no applicable winner while one exists ends failed (exit 1),
+	// never as no changes or a plain no winner.
+	failedWithChanges := 0
+	for _, c := range cands {
+		if c.failedWithChanges() {
+			failedWithChanges++
+		}
+	}
 	finish := func(outcome, why string, keepAll bool) {
+		if failedWithChanges > 0 && (outcome == RunNoChanges || outcome == RunNoWinner) {
+			msg := fmt.Sprintf("%d candidate(s) failed after making changes (kept on their branches) and no candidate produced an applicable result", failedWithChanges)
+			outcome, why = RunFailed, strings.TrimPrefix(why+"; "+msg, "; ")
+		}
 		res.Outcome = outcome
 		if why != "" {
 			res.Error = why
 		}
 		for _, c := range cands {
-			if c.collectFailed || keepAll && (len(c.Files) > 0 || e.o.NoApply) {
+			if c.collectFailed || c.failedWithChanges() || keepAll && (len(c.Files) > 0 || e.o.NoApply) {
 				c.keep()
 			}
 			e.drop(c)

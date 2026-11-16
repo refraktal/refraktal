@@ -82,7 +82,12 @@ cancels and exits 2 (`timed_out`).
 - **`--turns`** counts prompts Refraktal sends to harnesses, across the tree.
   Not an agent's internal iterations.
 - **`--usd`** is checked before each turn starts, never inside one: no harness
-  reports cost mid-turn.
+  reports cost mid-turn. So each grant (each running harness: a candidate,
+  the judge, a child Refraktal's own harnesses within its grant) can cross
+  its share once, by its final turn's cost. The run-wide bound is
+  spent + reserved <= `--usd` + the sum of each grant's final-turn overrun:
+  a fan-out of N candidates can exceed `--usd` by up to N final turns (plus
+  the judge's), never by "one turn" for the whole run.
   - Claude reports a cumulative session cost: a turn's cost is the new figure
     minus the previous one.
   - Codex and Antigravity report tokens only, per turn, on the prompt
@@ -508,6 +513,9 @@ Claude's reported cost is cumulative for a session: when a session gets more
 than one prompt, each turn is charged the difference from the previous report.
 Before every prompt the run-wide settled spend is checked too, so a child
 holding a reservation stops once another child's overrun has spent the run.
+That check bounds new turns, not ones already running: parallel children
+each cross their share by at most their final turn, so the overruns add (see
+`--usd` above).
 Negative or non-finite usage and cost are rejected: a bad reported cost falls
 back to pricing the tokens, a negative token count is not priced (noted), and
 the ledger counts any such charge as $0.
@@ -630,6 +638,27 @@ candidates that did. This is reported ahead of `no_changes`.
 - **A failed collect keeps the work.** If collecting a candidate fails (a
   stale `index.lock`, say), its worktree and branch are kept and reported,
   whatever the run's outcome; a failed collect never deletes work.
+- **A candidate that failed with changes is kept.** A candidate whose turn
+  or collect failed after it changed files (`max_tokens`, an ACP error, a
+  result refused for leaving the session folder) keeps its worktree and
+  branch whatever the run's outcome. A fan-out that ends with no applicable
+  winner while such a candidate exists ends `failed` (exit 1), never
+  `no_changes` or `no_winner`: partial work was produced and not used.
+- **Never half-applied.** `git apply` writes file by file, so a failure
+  after the first file (a full disk, a folder it cannot write) would leave
+  the user's tree half-applied. Before the apply, every path the patch
+  touches is snapshotted into `apply-snapshot[-<harness>]/` in the run
+  folder, through its pinned root: content, permissions, link target, file
+  or folder or absent, and the permissions of the folders above. On any
+  apply failure every path is restored byte for byte, the files and folders
+  the apply created are removed, and each path is checked against the
+  snapshot; the run is `apply_failed` (exit 1) and the result stays on its
+  branch. The restore works through `os.Root` and never through a symlink
+  the failed apply left. If the restore itself fails, the error names the
+  paths not restored and the snapshot folder, which is kept with a
+  `manifest.json`; otherwise the snapshot is removed. Known limits: a
+  folder's ownership and timestamps are not restored, and another process
+  writing the same paths during the apply is not detected.
 - **A cancel stops before apply.** A cancel (Ctrl-C, or an ACP client's
   `session/cancel`) that arrives during judging or collection stops before
   the apply: the run fails (exit 1) and the result stays on its branch.
@@ -663,7 +692,10 @@ client, including a parent Refraktal, can drive it.
 - **Transport:** one writer drains a queue; a write that takes longer than
   10 s (a client that stopped reading), or a full queue, fails the
   transport, which cancels every run (their harnesses are shut down as on
-  any cancel) and ends the server with an error. The read loop never holds
+  any cancel) and ends the server with an error. This holds through the
+  final drain after stdin closes: the watchdog stays on, and a drain that
+  cannot finish within the write timeout ends the server with an error,
+  never success for an undelivered response. The read loop never holds
   the server: Ctrl-C ends it at once, even idle. A prompt ends with the
   cost in its own small frame, then the summary in chunks of at most
   256 KiB of text, then the response, so no frame nears the 16 MiB limit.
@@ -677,6 +709,15 @@ client, including a parent Refraktal, can drive it.
   `retained_usd`: what its cancelled children keep reserved beyond their
   cost. The parent holds that as a `retained` charge: counted against
   `--usd`, not reported as spent.
+- **A child's report is untrusted.** The parent accepts it only if the
+  turns are within 0 and the child's remaining allowance (the allowance it
+  was given), the cost is finite and not negative, and `retained_usd` is
+  finite, not negative and within the grant. Anything else charges the
+  child its whole grant (the unspent dollars as a `forfeited` charge, and
+  every unused turn; its real costs are charged first and stand in full, so
+  an overrun is never capped), marks it `budget_exhausted` with a notice, and the run
+  follows the exhaustion rule: exit 2, candidates kept, nothing applied.
+  Turn counts saturate rather than wrap.
 - **Budgets:** the `acp` flags (`--usd --turns --mins --depth`), shrunk to
   the parent's `REFRAKTAL_BUDGET` (each the smaller; a deadline already
   past refuses the prompt). With a grant, the server keeps one ledger made

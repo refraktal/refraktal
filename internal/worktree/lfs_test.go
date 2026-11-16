@@ -120,7 +120,7 @@ func TestApplyLFSNotice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	notice, err := w.Apply(ctx, res)
+	notice, err := w.Apply(ctx, res, snapStore(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestApplyLFSNotice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	notice, err = w.Apply(ctx, res)
+	notice, err = w.Apply(ctx, res, snapStore(t))
 	if err != nil || notice != "" {
 		t.Errorf("plain patch notice = %q, error = %v", notice, err)
 	}
@@ -163,7 +163,7 @@ func TestApplyLFSNotice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	notice, err = w.Apply(ctx, res)
+	notice, err = w.Apply(ctx, res, snapStore(t))
 	if err != nil || !strings.Contains(notice, "data.dat") {
 		t.Errorf("removed LFS attribute hid notice: %q, %v", notice, err)
 	}
@@ -248,7 +248,7 @@ func TestLFSSmudgeIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("Collect", "1", "clean")
-	if _, err := w.Apply(ctx, res); err != nil {
+	if _, err := w.Apply(ctx, res, snapStore(t)); err != nil {
 		t.Fatal(err)
 	}
 	check("Apply", "1", "smudge")
@@ -335,7 +335,7 @@ func TestLFSAllowList(t *testing.T) {
 				t.Fatal(err)
 			}
 			checkMarker()
-			if _, err := w.Apply(ctx, res); err != nil {
+			if _, err := w.Apply(ctx, res, snapStore(t)); err != nil {
 				t.Fatal(err)
 			}
 			if variant != "standard" {

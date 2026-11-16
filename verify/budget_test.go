@@ -2,7 +2,6 @@ package verify
 
 import (
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -344,14 +343,11 @@ func TestBudgetLedgerRealWitness(t *testing.T) {
 }
 
 // The parser accepts ChildReport.Turns without checking its grant; runEnv.child
-// (fanout.go) forwards it to Ledger.AddTurns (internal/budget/budget.go). Keep the
-// strict desired invariant as an opt-in failing reproduction until that protocol
-// trust boundary is resolved. Counting an overreport is documented by AddTurns;
-// clamping it would merely hide the report, not prevent already executed prompts.
+// (fanout.go) forwards it to Ledger.AddTurns (internal/budget/budget.go), which
+// now refuses a report outside 0..the grant's remaining allowance and forfeits
+// the whole grant instead. This reproduction is enforced: --turns can no longer
+// be exceeded by a report.
 func TestBudgetUntrustedTurnsFindingReproduction(t *testing.T) {
-	if os.Getenv("REFRAKTAL_VERIFY_FINDINGS") != "1" {
-		t.Skip("known finding; set REFRAKTAL_VERIFY_FINDINGS=1 to reproduce")
-	}
 	l, err := budget.New(budget.Limits{USD: ledgerUSD, Turns: ledgerTurns, Wall: time.Minute}, nil)
 	if err != nil {
 		t.Fatal(err)

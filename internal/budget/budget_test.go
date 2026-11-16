@@ -214,3 +214,55 @@ func TestBeginTurnStopsWhenTheRunIsSpent(t *testing.T) {
 		t.Fatalf("the run spent $5 of $4, yet a held reservation may still start a turn: %v", err)
 	}
 }
+
+// V3 (run-4 #4): a child's turn report outside 0..its remaining allowance
+// (math.MaxInt here, which wrapped the counters negative) forfeits its whole
+// grant, dollars and turns: nothing wraps and the grant can start nothing
+// more. A report within the allowance counts as before.
+func TestChildTurnReportIsBounded(t *testing.T) {
+	for _, n := range []int{math.MaxInt, -1, 10} { // 10: one past the 9 left
+		l, _ := New(Limits{USD: 10, Turns: 20, Wall: time.Minute}, nil)
+		a, _ := l.ReserveShare(2) // 10 turns, $5
+		l.BeginTurn(a)            // the prompt to the child: 9 turns left
+		err := l.AddTurns(a, n)
+		if !exhausted(err, "turns") {
+			t.Errorf("report %d: accepted: %v", n, err)
+		}
+		if s := l.Summary(); s.Turns != a.Turns {
+			t.Errorf("report %d: turns used %d, want the whole grant %d", n, s.Turns, a.Turns)
+		}
+		if err := l.BeginTurn(a); err == nil {
+			t.Errorf("report %d: the forfeited grant started another turn", n)
+		}
+		if st := l.Settle(a, false); st.Spent != a.USD || st.Returned != 0 {
+			t.Errorf("report %d: settlement %+v, want the whole grant $%v spent", n, st, a.USD)
+		}
+		if s := l.Summary(); s.Turns < 0 || s.Spent != a.USD {
+			t.Errorf("report %d: summary %+v", n, s)
+		}
+	}
+	l, _ := New(Limits{USD: 10, Turns: 20, Wall: time.Minute}, nil)
+	a, _ := l.ReserveShare(2)
+	l.BeginTurn(a)
+	if err := l.AddTurns(a, 8); err != nil || l.Summary().Turns != 9 {
+		t.Fatalf("a valid report: %v, turns %d", err, l.Summary().Turns)
+	}
+	if st := l.Settle(a, false); st.Spent != 0 {
+		t.Fatalf("a valid report was charged: %+v", st)
+	}
+}
+
+// Forfeit charges a grant's unspent dollars and unused turns, once.
+func TestForfeitChargesTheWholeGrant(t *testing.T) {
+	l, _ := New(Limits{USD: 10, Turns: 20, Wall: time.Minute}, nil)
+	a, _ := l.ReserveShare(2)
+	l.BeginTurn(a)
+	l.Charge(a, Charge{USD: 1, Source: Reported})
+	l.Forfeit(a, "invalid report")
+	l.Forfeit(a, "again")
+	st := l.Settle(a, false)
+	s := l.Summary()
+	if st.Spent != a.USD || s.Turns != a.Turns || s.Reported != a.USD {
+		t.Fatalf("settlement %+v summary %+v, want $%v and %d turns", st, s, a.USD, a.Turns)
+	}
+}

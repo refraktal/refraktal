@@ -281,14 +281,17 @@ func (s *server) start() {
 	}()
 }
 
-// stop flushes what is queued (bounded: a stuck writer is abandoned).
+// stop flushes what is queued (bounded: a stuck writer is abandoned). The
+// watchdog stays on through the drain, and a drain that cannot finish is a
+// transport failure: an undelivered response is never reported as success.
 func (s *server) stop() {
-	close(s.quit)
 	close(s.out)
+	defer close(s.quit)
 	select {
 	case <-s.wdone:
 	case <-s.dead:
 	case <-time.After(s.timeout()):
+		s.broken(errors.New("acp: the client stopped reading; the final responses were not delivered"))
 	}
 }
 
