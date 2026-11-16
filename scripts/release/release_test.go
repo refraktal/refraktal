@@ -121,12 +121,14 @@ func TestInstallScript(t *testing.T) {
 	name := Archive("v0.1.0", Target{runtime.GOOS, runtime.GOARCH})
 	a := archive(t, []byte("#!/bin/sh\necho refraktal-fake\n"))
 	var sums atomic.Value
-	latest := "v0.1.0"
+	var latest atomic.Value // read by the server's handler goroutines
+	latest.Store("v0.1.0")
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tag := latest.Load().(string)
 		switch r.URL.Path {
 		case "/releases/latest":
-			http.Redirect(w, r, "/releases/tag/"+latest, http.StatusFound)
-		case "/releases/tag/" + latest:
+			http.Redirect(w, r, "/releases/tag/"+tag, http.StatusFound)
+		case "/releases/tag/" + tag:
 			w.Write([]byte("ok"))
 		case "/download/v0.1.0/" + name:
 			w.Write(a)
@@ -190,7 +192,7 @@ func TestInstallScript(t *testing.T) {
 		t.Fatal("the installer wrote through a planted symlink")
 	}
 	// Review M8 (4): "latest" never installs a prerelease.
-	latest = "v0.2.0-rc.1"
+	latest.Store("v0.2.0-rc.1")
 	if _, out, err := install(good); err == nil || !strings.Contains(out, "prerelease") {
 		t.Fatalf("latest resolved to a prerelease and was installed: %v %s", err, out)
 	}
