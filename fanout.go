@@ -320,10 +320,24 @@ func (e *runEnv) remove(wt worktree.Worktree) error {
 // apply applies a candidate to the working tree: checked first, never
 // stopped halfway. It returns a notice about LFS pointers, if any.
 func (e *runEnv) apply(c *Candidate) (string, error) {
+	if testBeforeApply != nil {
+		testBeforeApply(e.ledger.Deadline())
+	}
+	// Never apply once --mins has expired: the apply itself is quick and
+	// atomic, so this is the last point to stop.
+	if !time.Now().Before(e.ledger.Deadline()) {
+		return "", errMinsExpired
+	}
 	ctx, cancel := e.opCtx()
 	defer cancel()
 	return c.wt.Apply(ctx, c.result)
 }
+
+// errMinsExpired: --mins ran out before the winner could be applied.
+var errMinsExpired = errors.New("--mins ran out before the result could be applied; it is kept on its branch")
+
+// testBeforeApply, set by tests, runs just before the apply's deadline check.
+var testBeforeApply func(deadline time.Time)
 
 // keep marks a candidate's worktree as kept for the user.
 func (c *Candidate) keep() {
@@ -433,8 +447,10 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 	case changed == 0 && unusable == len(cands):
 		finish(RunUnusable, "no harness could be started", false)
 		return
-	case changed == 0 && exhausted > 0 && nochange == 0:
-		finish(RunExhausted, "budget exhausted before the candidates could run", true)
+	case changed == 0 && exhausted > 0:
+		// A spent budget is reported before "no changes": the run did not
+		// get to try everything it planned.
+		finish(RunExhausted, "budget exhausted before every candidate could run", true)
 		return
 	case changed == 0 && nochange > 0:
 		finish(RunNoChanges, "", e.o.NoApply)
@@ -618,6 +634,11 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 		res.Branch, res.Worktree = winner.wtKept(res.Candidates)
 	default:
 		n, err := e.apply(winner)
+		if errors.Is(err, errMinsExpired) {
+			finish(RunTimedOut, err.Error(), true)
+			res.Branch, res.Worktree = winner.wtKept(res.Candidates)
+			return
+		}
 		if err != nil {
 			finish(RunApplyFailed, err.Error(), true)
 			res.Branch, res.Worktree = winner.wtKept(res.Candidates)

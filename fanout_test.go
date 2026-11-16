@@ -51,6 +51,9 @@ func fakeCheck(args []string) int {
 		return 0
 	case "hang":
 		time.Sleep(time.Hour)
+	case "touch": // touch <file>: proves the check ran
+		os.WriteFile(args[1], []byte("ran\n"), 0o644)
+		return 0
 	}
 	return 2
 }
@@ -657,5 +660,50 @@ func TestInvalidUsageAndCostAreRejected(t *testing.T) {
 	l.Charge(g, budget.Charge{USD: math.NaN(), Source: budget.Computed})
 	if s := l.Settle(g, false); !near(s.Spent, 0.5) {
 		t.Fatalf("spend lowered or poisoned: %+v", s)
+	}
+}
+
+// Review (10): never apply after --mins has expired, even when the turn
+// ended in time. One candidate and a fan-out winner alike are kept instead.
+func TestNoApplyAfterTheDeadline(t *testing.T) {
+	for _, fan := range []bool{false, true} {
+		r := newRunRig(t)
+		testBeforeApply = func(deadline time.Time) { time.Sleep(time.Until(deadline) + 50*time.Millisecond) }
+		var res RunResult
+		if fan {
+			r.checkConfig(t, "")
+			res = r.fan(t, []harness.Harness{writer("claude", "out.txt=good"), writer("codex", "out.txt=bad")},
+				func(o *RunOptions) { o.Budget.Wall = 5 * time.Second })
+		} else {
+			res = r.run(t, writer("claude", "out.txt=good"), func(o *RunOptions) { o.Budget.Wall = 5 * time.Second })
+		}
+		testBeforeApply = nil
+		if res.Outcome != RunTimedOut || res.ExitCode() != ExitBudget || exists(filepath.Join(r.repo, "out.txt")) || res.Branch == "" {
+			t.Errorf("fan=%v: applied after --mins expired: %+v", fan, res)
+		}
+	}
+}
+
+// Review (11): a check refuses to start once the deadline has passed.
+func TestCheckRefusesToStartAfterTheDeadline(t *testing.T) {
+	dir := t.TempDir()
+	root, _ := os.OpenRoot(dir)
+	defer root.Close()
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	marker := filepath.Join(dir, "ran")
+	r := runCheck(ctx, dir, root, "check.log", t.TempDir(), nil, checkStep{"test", []string{self(t), fakeCheckArg, "touch", marker}}, time.Minute)
+	if exists(marker) || r.Status != CheckTimedOut {
+		t.Fatalf("a check started after the deadline: %+v (ran: %v)", r, exists(marker))
+	}
+}
+
+// Review (12): budget exhaustion is reported before "no changes".
+func TestExhaustionIsReportedBeforeNoChanges(t *testing.T) {
+	r := newRunRig(t)
+	res := r.fan(t, []harness.Harness{fake{name: "claude", agentMode: "turn"}, fake{name: "codex", agentMode: "turn"}},
+		func(o *RunOptions) { o.Budget.Turns = 1 })
+	if res.Outcome != RunExhausted || res.ExitCode() != ExitBudget {
+		t.Fatalf("one child ran with no changes, the other found the budget spent: %+v", res)
 	}
 }

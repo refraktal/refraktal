@@ -436,7 +436,9 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		case o.NoApply:
 			res.Outcome = RunKept
 		default:
-			if n, err := env.apply(c); err != nil {
+			if n, err := env.apply(c); errors.Is(err, errMinsExpired) {
+				res.Outcome, res.Error = RunTimedOut, err.Error()
+			} else if err != nil {
 				res.Outcome, res.Error = RunApplyFailed, err.Error()
 			} else {
 				res.Outcome = RunApplied

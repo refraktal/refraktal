@@ -221,6 +221,11 @@ func runCheck(ctx context.Context, dir string, logRoot *os.Root, logName, liveDi
 	}
 	defer f.Close()
 	fmt.Fprintf(f, "$ %s\n", strings.Join(s.Argv, " "))
+	if ctx.Err() != nil { // the run's deadline has passed: never start
+		fmt.Fprintln(f, "not started: --mins has run out")
+		r.Status = CheckTimedOut
+		return r
+	}
 	c, err := proc.Start(proc.Spec{Argv: s.Argv, Dir: dir, BaseEnv: safegit.Env(), Stderr: f, LiveDir: liveDir, Labels: labels})
 	if err != nil {
 		fmt.Fprintf(f, "not started: %v\n", err)
