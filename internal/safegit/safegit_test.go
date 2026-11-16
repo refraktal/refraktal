@@ -15,7 +15,7 @@ import (
 
 func TestCommandStaticProtections(t *testing.T) {
 	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\"\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nprintf '%s\\n' \"GIT_NO_LAZY_FETCH=$GIT_NO_LAZY_FETCH\" \"$@\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -26,12 +26,15 @@ func TestCommandStaticProtections(t *testing.T) {
 				t.Fatal(err)
 			}
 			args := strings.Split(strings.TrimSpace(string(out)), "\n")
+			if !slices.Contains(args, "GIT_NO_LAZY_FETCH=1") {
+				t.Errorf("lazy fetch is not disabled in %q", args)
+			}
 			if !slices.Contains(args, "--no-replace-objects") {
 				t.Errorf("missing --no-replace-objects in %q", args)
 			}
 			for _, setting := range []string{
 				"core.hooksPath=/dev/null", "core.fsmonitor=false", "core.pager=cat",
-				"core.sshCommand=false", "diff.external=", "commit.gpgSign=false", "tag.gpgSign=false",
+				"core.sshCommand=false", "diff.external=", "commit.gpgSign=false", "tag.gpgSign=false", "protocol.allow=never",
 			} {
 				i := slices.Index(args, setting)
 				if i < 1 || args[i-1] != "-c" {

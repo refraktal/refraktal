@@ -454,6 +454,9 @@ process-group kill does not reach them.
 - The child shares the repository's `.git` (a linked worktree). Refraktal's
   own git commands discard inherited `GIT_*` variables and disable hooks,
   fsmonitor, signing, filters, external diff, textconv, pager and ssh command.
+  Every command sets `GIT_NO_LAZY_FETCH=1` and `-c protocol.allow=never`.
+  Refraktal uses the local object database only: a missing promised Git object
+  fails with a missing-object error instead of fetching it through a transport.
   Creation uses `git worktree add --no-checkout`, then discovers drivers in
   the new worktree before populating it with `git reset --hard --quiet HEAD`.
   If setup fails after registration, bounded cleanup removes the checkout,
