@@ -2,9 +2,9 @@ package price
 
 import (
 	"context"
+	"io"
 	"math"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,18 +58,16 @@ func TestParseAndCost(t *testing.T) {
 func TestLoadCachesAndFallsBack(t *testing.T) {
 	var hits atomic.Int32
 	var fail atomic.Bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := &http.Client{Transport: priceTestTransport(func(*http.Request) (*http.Response, error) {
 		hits.Add(1)
 		if fail.Load() {
-			http.Error(w, "down", http.StatusBadGateway)
-			return
+			return &http.Response{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader("down"))}, nil
 		}
-		w.Write([]byte(sample))
-	}))
-	defer srv.Close()
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(sample))}, nil
+	})}
 	cache := filepath.Join(t.TempDir(), "prices.json")
 	now := time.Now()
-	o := LoadOptions{CachePath: cache, URL: srv.URL, Now: func() time.Time { return now }}
+	o := LoadOptions{CachePath: cache, URL: "https://prices.invalid/table", Client: client, Now: func() time.Time { return now }}
 	ctx := context.Background()
 
 	tb, err := Load(ctx, o)
@@ -89,7 +87,9 @@ func TestLoadCachesAndFallsBack(t *testing.T) {
 	if _, _, ok := tb.Lookup("gpt-6.1-sol"); !ok {
 		t.Fatal("stale table lost its prices")
 	}
-	os.Remove(cache)
+	if err := os.Remove(cache); err != nil {
+		t.Fatal(err)
+	}
 	tb, err = Load(ctx, o)
 	if err == nil || tb.Source != "none" || !strings.Contains(err.Error(), "unpriced") {
 		t.Fatalf("no cache, no fetch: %s %v", tb.Source, err)

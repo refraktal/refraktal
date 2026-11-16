@@ -94,9 +94,20 @@ cancels and exits 2 (`timed_out`).
     response's `usage`. Refraktal prices them from LiteLLM's
     `model_prices_and_context_window.json`, cached at
     `os.UserCacheDir()/refraktal/prices.json` and fetched again after 24
-    hours (a failed fetch falls back to the stale copy, then to "everything
-    unpriced"), with per-model overrides in config (US dollars per million
-    tokens). The model comes from the session's `model` config option. Keys
+    hours. A refresh is parsed before publication, written to a unique temporary
+    file in the cache folder, synced, closed, then atomically renamed over
+    `prices.json`; failures remove the temporary file. Published files use mode
+    `0644`. Concurrent refreshes publish complete tables without a file lock:
+    a reader sees either the complete earlier or later table, and the last
+    successful rename wins. A failed fetch uses the valid stale cache file.
+    Invalid JSON or a table with no priced models is not a valid cache; if the
+    fetch also fails, a warning names the invalid cached copy and every model
+    is unpriced. A successful fetch replaces a corrupt cache only after the
+    fetched table passes parsing. A failed parse never replaces a good file.
+    No backup file is kept, and the cache directory is not synced for
+    power-loss durability.
+    Per-model overrides in config use US dollars per million tokens.
+    The model comes from the session's `model` config option. Keys
     tried: Codex `<model>`, Antigravity `gemini/<model>`.
   - Token accounting: `inputTokens` excludes cached tokens; cached reads and
     writes are priced at their own rates (input rate if the table has none);
