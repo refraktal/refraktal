@@ -50,6 +50,9 @@ const (
 	// Retained is a child Refraktal's reservation kept by its own cancelled
 	// children: held against --usd, but not reported as spent.
 	Retained Source = "retained"
+	// Forfeited is the unspent rest of a grant charged to a child whose
+	// report could not be trusted (a turn count or cost out of range).
+	Forfeited Source = "forfeited"
 )
 
 // Charge is one dollar figure for a child's turn.
@@ -77,9 +80,11 @@ type Settlement struct {
 }
 
 type grant struct {
-	spent float64
-	turns int // turns used
-	open  bool
+	spent        float64
+	turns        int // turns used
+	open         bool
+	forfeited    bool    // charged its whole grant (an untrusted report)
+	forfeitedUSD float64 // the unspent rest charged then
 }
 
 // Ledger tracks one run's budgets.
@@ -197,20 +202,70 @@ func (l *Ledger) BeginTurn(g Grant) error {
 }
 
 // AddTurns counts prompts a child sent on its own (a child Refraktal's
-// harness prompts), so --turns covers the whole tree. Like a cost overrun,
-// they are counted even past the limit: the next BeginTurn is refused.
-func (l *Ledger) AddTurns(g Grant, n int) {
-	if n <= 0 {
-		return
+// harness prompts), so --turns covers the whole tree. The report is
+// untrusted: a count outside 0..the grant's remaining allowance (it was told
+// that allowance) forfeits the whole grant (Forfeit) and returns Exhausted
+// turns, so no count can wrap or reach past the grant.
+func (l *Ledger) AddTurns(g Grant, n int) error {
+	if n == 0 {
+		return nil
 	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.turns += n
-	if st := l.grants[g.ID]; st != nil && st.open {
-		fromHeld := min(n, g.Turns-st.turns) // within the allowance: no longer held
-		l.held -= max(0, fromHeld)
-		st.turns += n
+	st := l.grants[g.ID]
+	if st == nil || !st.open {
+		l.mu.Unlock()
+		return fmt.Errorf("budget: grant %d is not open", g.ID)
 	}
+	if n < 0 || n > g.Turns-st.turns {
+		l.forfeit(g, st, fmt.Sprintf("a child reported %d turns, outside 0..%d", n, max(0, g.Turns-st.turns)))
+		l.mu.Unlock()
+		return &Exhausted{"turns"}
+	}
+	l.turns = satAdd(l.turns, n)
+	st.turns += n
+	l.held -= n // within the allowance: no longer held
+	l.mu.Unlock()
+	return nil
+}
+
+// Forfeit charges a child its whole grant: the dollars it has not spent (as
+// a Forfeited charge) and the turns it has not used. It is for a child whose
+// report cannot be trusted; the grant can start nothing more. Real charges
+// are made first and stand in full (an overrun included): only the unspent
+// rest is forfeited. It charges once; every call returns the dollars
+// forfeited for the grant, whichever call (or AddTurns) forfeited it.
+func (l *Ledger) Forfeit(g Grant, why string) float64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if st := l.grants[g.ID]; st != nil && st.open {
+		return l.forfeit(g, st, why)
+	}
+	return 0
+}
+
+func (l *Ledger) forfeit(g Grant, st *grant, why string) (usd float64) {
+	if st.forfeited {
+		return st.forfeitedUSD
+	}
+	st.forfeited = true
+	if left := g.USD - st.spent; left > 0 {
+		l.charges = append(l.charges, Charge{USD: left, Source: Forfeited, Note: why})
+		st.spent, st.forfeitedUSD, usd = g.USD, left, left
+	}
+	if left := g.Turns - st.turns; left > 0 {
+		l.turns = satAdd(l.turns, left)
+		l.held -= left
+		st.turns = g.Turns
+	}
+	return usd
+}
+
+// satAdd adds two non-negative counts, saturating at math.MaxInt.
+func satAdd(a, b int) int {
+	if b > math.MaxInt-a {
+		return math.MaxInt
+	}
+	return a + b
 }
 
 // Charge records a figure for a child's turn. Estimated figures are for

@@ -683,6 +683,15 @@ client, including a parent Refraktal, can drive it.
   `retained_usd`: what its cancelled children keep reserved beyond their
   cost. The parent holds that as a `retained` charge: counted against
   `--usd`, not reported as spent.
+- **A child's report is untrusted.** The parent accepts it only if the
+  turns are within 0 and the child's remaining allowance (the allowance it
+  was given), the cost is finite and not negative, and `retained_usd` is
+  finite, not negative and within the grant. Anything else charges the
+  child its whole grant (the unspent dollars as a `forfeited` charge, and
+  every unused turn; its real costs are charged first and stand in full, so
+  an overrun is never capped), marks it `budget_exhausted` with a notice, and the run
+  follows the exhaustion rule: exit 2, candidates kept, nothing applied.
+  Turn counts saturate rather than wrap.
 - **Budgets:** the `acp` flags (`--usd --turns --mins --depth`), shrunk to
   the parent's `REFRAKTAL_BUDGET` (each the smaller; a deadline already
   past refuses the prompt). With a grant, the server keeps one ledger made
