@@ -15,9 +15,11 @@ import (
 // process group.
 //
 // A process is tracked when its parent is the root or a tracked process that
-// is still alive, or when it is in a process group whose leader (the process
-// with PID == PGID) is the root or is tracked. The second rule catches a tool's
-// background child that was reparented to PID 1 after its shell exited,
+// is still alive, with valid birth times proving the child is no older than
+// that parent in the same snapshot, or when it is in a process group whose
+// leader (the process with PID == PGID) is the root or is tracked. The second
+// rule catches a tool's background child reparented to PID 1 after its shell
+// exited,
 // provided the shell, as group leader, was seen first. Membership alone never
 // widens tracking: a tracked process in someone else's group does not pull in
 // that group's other members.
@@ -107,7 +109,16 @@ func (t *Tracker) add(all map[int]Proc) {
 				continue
 			}
 			_, group := t.groups[p.PGID]
-			if (p.PPID == t.root && rootUp) || alive(p.PPID) || group {
+			parent, present := all[p.PPID]
+			parentOwned := present && ((p.PPID == t.root && rootUp) || alive(p.PPID))
+			if parentOwned {
+				// ps rows are sampled at different times. A child's stale
+				// PPID cannot prove ownership by a newer replacement parent.
+				childBirth, childValid := startTime(p.Start)
+				parentBirth, parentValid := startTime(parent.Start)
+				parentOwned = childValid && parentValid && !childBirth.Before(parentBirth)
+			}
+			if parentOwned || group {
 				t.seen[pid] = p
 				changed = true
 			}

@@ -145,3 +145,70 @@ func TestTrackerRefreshesVerifiedGroupMembership(t *testing.T) {
 		t.Fatal("a verified change of process group was not retained for continuity")
 	}
 }
+
+func TestReviewTrackerStalePPIDTargetsUnrelatedProcess(t *testing.T) {
+	root := Proc{PID: 62000, PPID: 1, PGID: 62000, Start: "Sun Nov 15 15:45:50 2026"}
+	parent := Proc{PID: 63000, PPID: root.PID, PGID: 63000, Start: "Sun Nov 15 15:45:54 2026"}
+	stranger := Proc{PID: 64000, PPID: parent.PID, PGID: 64000, Start: "Sun Nov 15 15:45:52 2026"}
+	tr := NewTracker(root.PID, func() bool { return true })
+	tr.ownPGID = 1
+	snapshot := map[int]Proc{root.PID: root, parent.PID: parent, stranger.PID: stranger}
+	tr.add(snapshot)
+	sent := interceptSignals(t)
+	oldCheck, oldList := recheckPID, listForKill
+	t.Cleanup(func() { recheckPID, listForKill = oldCheck, oldList })
+	recheckPID = func(pid int) (Proc, error) { return snapshot[pid], nil }
+	listForKill = func() (map[int]Proc, error) { return map[int]Proc{}, nil }
+	report, err := Kill(tr.Tracked())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("tracked=%v signalled=%v killed=%v", pids(tr.Tracked()), *sent, pids(report.Killed))
+	if slices.Contains(*sent, stranger.PID) {
+		t.Fatal("unrelated older child was enrolled through a reused PPID and passed the kill identity check")
+	}
+}
+
+func TestTrackerPPIDEnrollmentNeedsBirthOrder(t *testing.T) {
+	for _, relation := range []string{"root", "tracked parent"} {
+		for _, tc := range []struct {
+			name, parentStart, childStart string
+			present, want                 bool
+		}{
+			{"equal births", trackerStart, trackerStart, true, true},
+			{"later child", trackerStart, "Sun Nov 15 15:45:52 2026", true, true},
+			{"older child", "Sun Nov 15 15:45:52 2026", trackerStart, true, false},
+			{"missing child birth", trackerStart, "", true, false},
+			{"invalid child birth", trackerStart, "invalid", true, false},
+			{"missing parent birth", "", trackerStart, true, false},
+			{"invalid parent birth", "invalid", trackerStart, true, false},
+			{"missing parent row", trackerStart, trackerStart, false, false},
+		} {
+			t.Run(relation+"/"+tc.name, func(t *testing.T) {
+				root := Proc{PID: 62000, PPID: 1, PGID: 62000, Start: trackerStart}
+				parent := root
+				parent.Start = tc.parentStart
+				tr := NewTracker(root.PID, func() bool { return true })
+				tr.ownPGID = 1
+				if relation == "tracked parent" {
+					parent.PID, parent.PPID, parent.PGID = 63000, root.PID, 63000
+					// A historical identity alone cannot prove a PPID edge without
+					// a current, valid and chronologically possible parent row.
+					tr.seen[parent.PID] = parent
+				}
+				child := Proc{PID: 64000, PPID: parent.PID, PGID: 64000, Start: tc.childStart}
+				all := trackerSnapshot(child)
+				if relation == "tracked parent" {
+					all[root.PID] = root
+				}
+				if tc.present {
+					all[parent.PID] = parent
+				}
+				tr.add(all)
+				if got := slices.Contains(pids(tr.Tracked()), child.PID); got != tc.want {
+					t.Fatalf("child enrolled=%v, want %v", got, tc.want)
+				}
+			})
+		}
+	}
+}

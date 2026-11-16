@@ -245,6 +245,10 @@ process-group kill does not reach them.
 - While a child runs, record its descendants by parent PID, whatever their
   process group. Walk the tree once more just before shutdown, while lineage is
   still visible, then kill every tracked descendant and the harness.
+  Every new PPID ownership edge requires a currently verified parent row,
+  valid birth times for both processes, and a child born no earlier than its
+  parent. Missing or invalid times cannot prove enrollment; a stale child row
+  cannot attach to a newer process that reused its parent's PID.
 - **Kill only by tracked PID, after an identity check:** a process's identity
   is its birth identity, PID and start time, everywhere (tracker, live
   registry, kills, sweeps); the command line is kept for display only, since

@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// Three PID slots represent an unreaped harness, a recorded tool-session
-// leader and a member. Each reusable PID has two distinct births. Group and
+// The exit/reuse exploration uses three PID slots: an unreaped harness, a
+// recorded tool-session leader and a member. Each reusable PID has two distinct births. Group and
 // session IDs can be reused after their final holder exits. These bounds expose
 // both reuse windows without claiming a cutoff theorem for arbitrary trees.
 // Births are valid, distinct timestamps; the one-second ps alias is excluded.
@@ -15,6 +15,8 @@ import (
 // Known retains historical births like sweepSession's local known slice; across
 // polls it overapproximates Child.members (which retains the latest birth per
 // PID). With monotonic, nonreturning births this cannot trust a new stranger.
+// The separate tracker snapshot exploration below also includes invalid births
+// and three ordered valid birth ranks, with independently present parent rows.
 type killProc struct {
 	Birth, Parent, Group, Session int
 	Live, Owned                   bool
@@ -34,6 +36,7 @@ type killState struct {
 	Signals, GroupSignals                                               bool
 }
 type killOptions struct {
+	NoTrackerBirthOrder       bool // remove only child-not-older-than-parent from tracker enrollment
 	NoPIDFD                   bool // documented macOS/old-kernel limit, also the old PID-signal mutation
 	NoIdentityGuard           bool
 	NoEmptyGuard              bool
@@ -52,7 +55,7 @@ func killInitial() killState {
 
 // killPoll mirrors Tracker.add in internal/proc/tracker.go, including verified
 // group continuity, permanent retirement and the unreaped root's reservation.
-func killPoll(s killState) killState {
+func killPoll(s killState, o killOptions) killState {
 	for g, birth := range s.Groups {
 		if birth == 0 {
 			continue
@@ -76,7 +79,7 @@ func killPoll(s killState) killState {
 	for changed := true; changed; {
 		changed = false
 		for i, p := range s.P {
-			tracked := i == 0 || s.Seen[i].Birth == p.Birth
+			tracked := i == 0 || s.Seen[i] != (killRecord{}) && s.Seen[i].Birth == p.Birth
 			if p.Live && tracked && p.Group == i && !s.Retired[i] {
 				s.Groups[i] = p.Birth
 			}
@@ -85,8 +88,13 @@ func killPoll(s killState) killState {
 			if i == 0 || !p.Live {
 				continue
 			}
-			parent := p.Parent == 0 || p.Parent > 0 && s.P[p.Parent].Live && s.Seen[p.Parent].Birth == s.P[p.Parent].Birth
-			if s.Seen[i].Birth == p.Birth || parent || s.Groups[p.Group] != 0 {
+			parent := p.Parent >= 0 && s.P[p.Parent].Live && (p.Parent == 0 || s.Seen[p.Parent].Birth != 0 && s.Seen[p.Parent].Birth == s.P[p.Parent].Birth)
+			if parent {
+				// Tracker.add validates both timestamps and requires child >= parent
+				// for every PPID edge. Zero represents missing/malformed start time.
+				parent = p.Birth > 0 && s.P[p.Parent].Birth > 0 && (o.NoTrackerBirthOrder || p.Birth >= s.P[p.Parent].Birth)
+			}
+			if s.Seen[i] != (killRecord{}) && s.Seen[i].Birth == p.Birth || parent || s.Groups[p.Group] != 0 {
 				next := killRecord{p.Birth, p.Group}
 				if s.Seen[i] != next {
 					s.Seen[i] = next
@@ -237,7 +245,7 @@ func killModel(o killOptions) model[killState] {
 		switch s.Phase {
 		case 0:
 			// Tracker.Poll/add, internal/proc/tracker.go.
-			add("poll descendants and group continuity", killPoll(s))
+			add("poll descendants and group continuity", killPoll(s, o))
 			// Child.checkSessions and rememberMembers, internal/proc/child.go;
 			// provenMembers/provenDescendants, internal/proc/session.go.
 			for sid := 0; sid < 2; sid++ {
@@ -261,7 +269,7 @@ func killModel(o killOptions) model[killState] {
 				add(fmt.Sprintf("poll session %d; retain only proven identities", sid+2), n)
 			}
 			// Child.shutdown final tracker poll, internal/proc/child.go.
-			n := killPoll(s)
+			n := killPoll(s, o)
 			n.Phase = 5
 			n.At = 0
 			n.Targets[0] = 1
@@ -578,5 +586,138 @@ func TestKillSafetyLegacyRetirementGuardIsolation(t *testing.T) {
 		if mutated && (r.Violation == nil || r.Violation.Error() != "signalled an unrelated process") {
 			t.Fatal("legacy retirement mutation failed to reproduce stranger signal")
 		}
+	}
+}
+
+// Tracker enrollment consumes a mixed snapshot, not an atomic process tree.
+// Three rows model a pinned root, a possibly reused parent, and a child whose
+// PPID may still name the old parent. Zero birth means missing or malformed;
+// ranks 1..3 are valid timestamps. Every row/group has a separate PID/PGID so
+// group membership cannot independently grant the child's ownership.
+func killTrackerSnapshotModel(mutated bool) model[killState] {
+	return model[killState]{Name: "kill tracker mixed-snapshot enrollment", Initial: killState{Phase: -1},
+		Key: func(s killState) string { return fmt.Sprintf("%v", s) },
+		Invariant: func(s killState) error {
+			if s.Bad {
+				return fmt.Errorf("signalled an unrelated process")
+			}
+			if s.Phase >= 1 && s.Seen[2] != (killRecord{}) && s.P[2].Birth == 0 {
+				return fmt.Errorf("enrolled a child without a valid birth time")
+			}
+			return nil
+		}, Next: func(s killState) []transition[killState] {
+			switch s.Phase {
+			case -1:
+				var out []transition[killState]
+				// List/Tracker.Poll in internal/proc/ps.go and tracker.go:
+				// sampling can mix pre-reuse child rows and post-reuse parent rows.
+				for rootBirth := 1; rootBirth <= 3; rootBirth++ {
+					for parentBirth := 0; parentBirth <= 3; parentBirth++ {
+						for childBirth := 0; childBirth <= 3; childBirth++ {
+							for recorded := 0; recorded <= 3; recorded++ {
+								for present := 0; present < 4; present++ {
+									for linked := 0; linked <= 1; linked++ {
+										rootPresent, parentPresent := present&1 != 0, present&2 != 0
+										n := killState{P: [3]killProc{
+											{Birth: rootBirth, Parent: -1, Group: 0, Live: rootPresent, Owned: true},
+											{Birth: parentBirth, Parent: 0, Group: 1, Live: parentPresent},
+											{Birth: childBirth, Parent: -1, Group: 2, Live: true},
+										}}
+										if recorded != 0 {
+											n.Seen[1] = killRecord{Birth: recorded, Group: 1}
+										}
+										if linked == 1 {
+											n.P[2].Parent = 1
+										}
+										// Independent ownership oracle: an earlier valid parent record
+										// or a possible direct root edge proves the current parent;
+										// the child's age must then fit that same parent identity.
+										n.P[1].Owned = parentPresent && parentBirth > 0 && (recorded == parentBirth || rootPresent && parentBirth >= rootBirth)
+										n.P[2].Owned = n.P[1].Owned && linked == 1 && childBirth > 0 && childBirth >= parentBirth
+										out = append(out, transition[killState]{Action: "sample current births, historical parent and stale PPID", State: n})
+									}
+								}
+							}
+						}
+					}
+				}
+				return out
+			case 0:
+				// Tracker.add in internal/proc/tracker.go reaches a fixed point
+				// through verified parents, with birth validation on each PPID edge.
+				n := killPoll(s, killOptions{NoTrackerBirthOrder: mutated})
+				n.Phase = 1
+				n.At = 2
+				n.Targets[2] = n.Seen[2].Birth
+				return []transition[killState]{{Action: "enroll tracker descendants from mixed snapshot", State: n}}
+			case 1:
+				// Kill's FindProcess pins the current process before rechecking.
+				n := s
+				n.Phase = 2
+				n.Handle = s.P[2].Birth
+				return []transition[killState]{{Action: "open child process handle", State: n}}
+			case 2:
+				// Kill's recheckPID/Proc.Same succeeds for wrongly enrolled targets.
+				n := s
+				n.Phase = 3
+				n.Checked = s.Targets[2] != 0 && s.Targets[2] == s.P[2].Birth
+				return []transition[killState]{{Action: "recheck enrolled child birth identity", State: n}}
+			case 3:
+				// Kill sends through the already acquired handle. A handle guards
+				// reuse after recheck, but cannot repair wrong enrollment provenance.
+				n := killSend(s, killOptions{})
+				n.Phase = 4
+				return []transition[killState]{{Action: "signal enrolled child through handle", State: n}}
+			}
+			return nil
+		}}
+}
+
+func TestKillTrackerEnrollmentSnapshots(t *testing.T) {
+	m := killTrackerSnapshotModel(false)
+	var allowed, refusedStale, refusedInvalid, trackedParent bool
+	inv := m.Invariant
+	m.Invariant = func(s killState) error {
+		if s.Phase == 1 {
+			allowed = allowed || s.P[2].Owned && s.Targets[2] == s.P[2].Birth
+			refusedStale = refusedStale || s.P[2].Birth > 0 && s.P[2].Birth < s.P[1].Birth && s.Targets[2] == 0
+			refusedInvalid = refusedInvalid || s.P[1].Birth == 0 && s.Targets[2] == 0
+			trackedParent = trackedParent || s.P[1].Owned && s.Seen[1].Birth == s.P[1].Birth && s.P[1].Birth == 3
+		}
+		return inv(s)
+	}
+	r := check(m)
+	t.Log(r.String())
+	if r.Violation != nil {
+		t.Fatal(r.String())
+	}
+	if !allowed || !refusedStale || !refusedInvalid || !trackedParent {
+		t.Fatalf("missing tracker witnesses: allowed=%v stale-refused=%v invalid-refused=%v tracked-parent=%v", allowed, refusedStale, refusedInvalid, trackedParent)
+	}
+}
+
+func TestKillTrackerEnrollmentBirthOrderMutation(t *testing.T) {
+	r := check(killTrackerSnapshotModel(true))
+	t.Log(r.String())
+	if r.Violation == nil || r.Violation.Error() != "signalled an unrelated process" {
+		t.Fatal("removing tracker birth-order guard did not reproduce the unrelated-signal counterexample")
+	}
+	last := r.Trace[len(r.Trace)-2].State
+	if last.P[2].Birth <= 0 || last.P[2].Birth >= last.P[1].Birth || !last.Checked {
+		t.Fatal("mutation did not reach the reviewer's older-child/successful-identity-check counterexample")
+	}
+}
+
+func TestKillTrackerStalePPIDReproduction(t *testing.T) {
+	m := killTrackerSnapshotModel(false)
+	m.Initial = killState{P: [3]killProc{
+		{Birth: 1, Parent: -1, Group: 0, Live: true, Owned: true},
+		{Birth: 3, Parent: 0, Group: 1, Live: true, Owned: true},
+		{Birth: 2, Parent: 1, Group: 2, Live: true},
+	}}
+	r := check(m)
+	t.Log(r.String())
+	if r.Violation != nil {
+		t.Fatal(r.String())
 	}
 }
