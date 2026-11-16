@@ -1,6 +1,7 @@
 package proc
 
 import (
+	"path/filepath"
 	"bufio"
 	"errors"
 	"fmt"
@@ -31,6 +32,21 @@ func TestMain(m *testing.M) {
 	switch os.Getenv(helperEnv) {
 	case "":
 		os.Exit(m.Run())
+	case "chain": // in CHAIN_DIR: record member-<pid>; fork the next generation (same session) each time fork-<pid> appears
+		dir := os.Getenv("CHAIN_DIR")
+		self, _ := os.Executable()
+		os.WriteFile(filepath.Join(dir, fmt.Sprintf("member-%d", os.Getpid())), nil, 0o600)
+		trigger := filepath.Join(dir, fmt.Sprintf("fork-%d", os.Getpid()))
+		for {
+			if os.Remove(trigger) == nil {
+				kid := exec.Command(self)
+				kid.Env = os.Environ() // same session: no Setsid
+				if kid.Start() == nil {
+					go kid.Wait()
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
 	case "exit": // exit immediately without starting any descendants
 	case "detach": // start a child in a process group of its own, print its PID, exit when stdin closes
 		kid := exec.Command("sleep", "30")

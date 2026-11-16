@@ -109,7 +109,7 @@ type KillReport struct {
 	Killed  []Proc `json:"killed"`  // matched its record and was sent SIGKILL
 	Gone    []Proc `json:"gone"`    // had already exited
 	Changed []Proc `json:"changed"` // its PID now belongs to a different process: left alone
-	Alive   []Proc `json:"alive"`   // sent SIGKILL but still running a second later
+	Alive   []Proc `json:"alive"`   // sent SIGKILL but still running killConfirm (5 s) later
 	Unknown []Proc `json:"unknown"` // lookup failed: identity or exit could not be confirmed
 }
 
@@ -117,6 +117,12 @@ type KillReport struct {
 // PID and start time, checked again immediately before its own signal, so the
 // window for a PID reuse is as small as one ps call. A process whose PID has
 // been reused is not touched. Kill never targets this process or PID 1.
+// killConfirm is how long Kill waits for killed processes to disappear.
+const killConfirm = 5 * time.Second
+
+// listForKill lists processes for Kill's confirmation (a variable for tests).
+var listForKill = List
+
 func Kill(procs []Proc) (KillReport, error) {
 	r := KillReport{Killed: []Proc{}, Gone: []Proc{}, Changed: []Proc{}, Alive: []Proc{}, Unknown: []Proc{}}
 	var lookupErr error
@@ -143,8 +149,12 @@ func Kill(procs []Proc) (KillReport, error) {
 	if len(r.Killed) == 0 {
 		return r, lookupErr
 	}
-	for deadline := time.Now().Add(time.Second); ; time.Sleep(50 * time.Millisecond) {
-		after, err := List()
+	// A killed process must still be scheduled to exit, which on a loaded
+	// machine can take more than a second: wait up to killConfirm before
+	// calling it alive (a false "alive" keeps a live record for a process
+	// that is about to be gone).
+	for deadline := time.Now().Add(killConfirm); ; time.Sleep(50 * time.Millisecond) {
+		after, err := listForKill()
 		if err != nil {
 			r.Alive = r.Alive[:0]
 			r.Unknown = append(r.Unknown, r.Killed...)

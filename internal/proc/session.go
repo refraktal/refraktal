@@ -80,7 +80,12 @@ func SweepSession(leader Proc) (KillReport, error) {
 	if leader.PID <= 1 {
 		return r, nil
 	}
-	for pass := 0; pass < 3; pass++ { // a member may fork while the sweep runs
+	// A member may fork while the sweep runs, and on a loaded machine each
+	// pass is slow: sweep until the session is empty, for up to sweepFor.
+	// Whatever is still there then is reported alive (never left unreported),
+	// so the live record is kept and the run says so.
+	deadline := time.Now().Add(sweepFor)
+	for pass := 0; ; pass++ {
 		all, err := List()
 		if err != nil {
 			r.Unknown = append(r.Unknown, leader)
@@ -95,6 +100,11 @@ func SweepSession(leader Proc) (KillReport, error) {
 			return r, err
 		}
 		if len(members) == 0 {
+			r.Alive = r.Alive[:0]
+			break
+		}
+		if pass > 0 && time.Now().After(deadline) {
+			r.Alive = append(r.Alive[:0], members...)
 			break
 		}
 		kr, err := Kill(members)
@@ -137,3 +147,7 @@ func startTime(s string) (time.Time, bool) {
 	t, err := time.ParseInLocation("Mon Jan 2 15:04:05 2006", s, time.Local)
 	return t, err == nil
 }
+
+// sweepFor bounds how long one session sweep keeps going while members fork
+// (a variable for tests).
+var sweepFor = 5 * time.Second
