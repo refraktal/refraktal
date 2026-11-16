@@ -105,18 +105,34 @@ func Show(root, id string) (ShowRun, error) {
 	defer runs.Close()
 	w := &walk{bytes: showMaxBytes, events: showMaxEvents, entries: showMaxEntries}
 	if id == "" {
+		// The latest run: doctor writes folders here too, which are skipped.
 		ids := w.dirs(runs)
-		if len(ids) == 0 {
-			return ShowRun{}, ErrNoRun
+		for i := len(ids) - 1; i >= 0; i-- {
+			r, err := showOne(runs, ids[i], w)
+			if errors.Is(err, errDoctorCheck) {
+				continue
+			}
+			return r, err
 		}
-		id = ids[len(ids)-1]
+		return ShowRun{}, ErrNoRun
 	}
+	return showOne(runs, id, w)
+}
+
+// errDoctorCheck: the folder is a doctor check's, not a run's.
+var errDoctorCheck = errors.New("is a doctor check, not a run")
+
+func showOne(runs *os.Root, id string, w *walk) (ShowRun, error) {
 	d, err := openDir(runs, id)
 	if err != nil {
 		return ShowRun{}, fmt.Errorf("%w: %s", ErrNoRun, clean(id))
 	}
 	defer d.Close()
-	return readRun(d, id, filepath.Join(".refraktal", "runs", id), 0, w)
+	r, err := readRun(d, id, filepath.Join(".refraktal", "runs", id), 0, w)
+	if errors.Is(err, errDoctorCheck) {
+		return r, fmt.Errorf("%s %w (refraktal doctor wrote it)", clean(id), errDoctorCheck)
+	}
+	return r, err
 }
 
 // maxNesting bounds how deep show follows nested runs.
@@ -219,6 +235,7 @@ func readRun(d *os.Root, name, dir string, depth int, w *walk) (ShowRun, error) 
 	}
 	defer f.Close()
 	w.truncated = false
+	sawRun, sawDoctor := false, false
 	sc := bufio.NewScanner(&budgeted{r: f, w: w})
 	sc.Buffer(make([]byte, 64<<10), 16<<20)
 	for sc.Scan() {
@@ -237,7 +254,10 @@ func readRun(d *os.Root, name, dir string, depth int, w *walk) (ShowRun, error) 
 			return clean(s)
 		}
 		switch str("event") {
+		case "doctor":
+			sawDoctor = true
 		case "run_start":
+			sawRun = true
 			r.Task, r.Pinned = str("task"), str("harness")
 			json.Unmarshal(e["dry"], &r.Dry)
 		case "route":
@@ -293,6 +313,9 @@ func readRun(d *os.Root, name, dir string, depth int, w *walk) (ShowRun, error) 
 				cleanMap(r.Verdict)
 			}
 		}
+	}
+	if sawDoctor && !sawRun {
+		return r, errDoctorCheck
 	}
 	r.Truncated = w.truncated // this run's own log was cut short
 	// A child that ran but logged no child_end (it failed to start) still

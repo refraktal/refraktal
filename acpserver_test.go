@@ -726,3 +726,25 @@ func TestShowErrorsAreClean(t *testing.T) {
 		t.Fatalf("error %q", err)
 	}
 }
+
+// E2E finding: doctor writes a folder under .refraktal/runs too. show's
+// default is the latest run, never a doctor check, and naming a doctor
+// check says what it is.
+func TestShowSkipsDoctorChecks(t *testing.T) {
+	r := newRunRig(t)
+	res := r.run(t, fake{name: "codex", agentMode: "turn"}, nil)
+	time.Sleep(1100 * time.Millisecond) // run IDs sort by the second
+	rep, err := Doctor(context.Background(), DoctorOptions{Root: r.repo, LiveDir: r.live, Harnesses: []harness.Harness{},
+		Getenv: func(string) string { return "" }, Timeout: 5 * time.Second, Neutral: filepath.Join(t.TempDir(), "neutral"),
+		ConfigPath: r.config})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sr, err := Show(r.repo, "")
+	if err != nil || sr.ID != filepath.Base(res.Run) || sr.Outcome != RunNoChanges {
+		t.Fatalf("latest is %q (%s, %v), want the run %q", sr.ID, sr.Outcome, err, filepath.Base(res.Run))
+	}
+	if _, err := Show(r.repo, filepath.Base(rep.Run)); err == nil || !strings.Contains(err.Error(), "doctor") {
+		t.Fatalf("a doctor check shown as a run: %v", err)
+	}
+}

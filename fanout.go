@@ -492,6 +492,7 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 		c.Label = string(rune('A' + i))
 	}
 	res.Candidates = nil
+	res.Harness = "" // set only for a winner, never the pinned list
 	finish := func(outcome, why string, keepAll bool) {
 		res.Outcome = outcome
 		if why != "" {
@@ -635,6 +636,9 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 		prompt := judgePrompt(e.o.Task, close)
 		for _, jh := range judgeOrder(e.o.Harnesses, hs, cands, close) {
 			j = e.child(jh, childSpec{suffix: "judge-" + jh.Name(), share: 1, prompt: prompt, judge: true})
+			if j.Outcome == candExhausted {
+				break // refused before it started: no judge to name
+			}
 			if j.Outcome != candUnusable {
 				v.Judge = jh.Name()
 				break

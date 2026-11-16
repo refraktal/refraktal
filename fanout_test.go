@@ -233,6 +233,11 @@ func TestFanOutBudgetExhaustedMidway(t *testing.T) {
 	if res.Budget.Turns != 2 {
 		t.Fatalf("turns %d", res.Budget.Turns)
 	}
+	// E2E finding: a judge that never started is not named in the verdict,
+	// and a run with no winner names no harness (not the pinned list).
+	if res.Verdict == nil || res.Verdict.Judge != "" || res.Verdict.JudgedOwn || res.Harness != "" {
+		t.Fatalf("verdict %+v, harness %q: no judge ran and nothing won", res.Verdict, res.Harness)
+	}
 }
 
 // --mins running out while the judge decides: timed out, exit 2, the
