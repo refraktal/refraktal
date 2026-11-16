@@ -21,25 +21,29 @@ import (
 // widens tracking: a tracked process in someone else's group does not pull in
 // that group's other members.
 //
-// A leader's group counts while the leader is still running as recorded, or
-// after it has exited and its PID is unused. If its PID now runs a different
-// process, the ID may name a new group, so it does not count. A process that
-// detaches and is reparented between two polls, with its group leader never
-// seen, escapes.
+// A leader's group counts while the leader or an already verified member
+// still holds it. Once that continuity is lost, or the leader's identity
+// changes, the group is retired permanently: its ID may have been reused.
+// The unreaped root keeps its own group ID reserved even when List omits it
+// as a zombie. A process that detaches and is reparented between two polls,
+// with its group leader never seen, escapes.
 type Tracker struct {
 	root    int
 	rootUp  func() bool // reports whether the root has not yet been reaped (its PID cannot be reused until then)
 	ownPGID int
 
-	mu   sync.Mutex
-	seen map[int]Proc
-	err  error
+	mu      sync.Mutex
+	seen    map[int]Proc
+	groups  map[int]Proc // group leaders verified while they were tracked
+	retired map[int]bool // a retired group ID never widens tracking again
+	err     error
 }
 
 // NewTracker tracks the descendants of root. rootUp reports whether root is
 // still unreaped; while it is, root's PID cannot belong to another process.
 func NewTracker(root int, rootUp func() bool) *Tracker {
-	return &Tracker{root: root, rootUp: rootUp, ownPGID: syscall.Getpgrp(), seen: map[int]Proc{}}
+	return &Tracker{root: root, rootUp: rootUp, ownPGID: syscall.Getpgrp(), seen: map[int]Proc{},
+		groups: map[int]Proc{}, retired: map[int]bool{}}
 }
 
 // Poll lists the machine's processes once and adds any new descendants.
@@ -57,26 +61,52 @@ func (t *Tracker) Poll() error {
 
 func (t *Tracker) add(all map[int]Proc) {
 	rootUp := t.rootUp()
+	for pgid, leader := range t.groups {
+		now, present := all[pgid]
+		continuous := present && now.Same(leader) && now.PGID == pgid
+		if !present {
+			continuous = pgid == t.root && rootUp
+			for pid, p := range t.seen {
+				if q, ok := all[pid]; ok && p.Same(q) && p.PGID == pgid && q.PGID == pgid {
+					continuous = true
+					break
+				}
+			}
+		}
+		if !continuous {
+			t.retired[pgid] = true
+			delete(t.groups, pgid)
+		}
+	}
 	alive := func(pid int) bool { // a tracked process still running as recorded
 		p, ok := t.seen[pid]
 		return ok && p.Same(all[pid])
 	}
 	for changed := true; changed; {
 		changed = false
-		groups := map[int]bool{} // groups led by the root or a tracked process
+		// A previously unseen group needs a currently verified tracked
+		// leader. An old record of an exited leader cannot establish trust.
 		for pid, p := range t.seen {
-			if now, running := all[pid]; p.PGID == pid && pid != t.ownPGID && (!running || now.Same(p)) {
-				groups[pid] = true
+			if now, running := all[pid]; running && now.Same(p) && now.PGID == pid && pid != t.ownPGID && !t.retired[pid] {
+				t.groups[pid] = now
 			}
 		}
-		if q, ok := all[t.root]; ok && rootUp && q.PGID == t.root && q.PGID != t.ownPGID {
-			groups[t.root] = true
+		if q, ok := all[t.root]; ok && rootUp && q.PGID == t.root && q.PGID != t.ownPGID && !t.retired[t.root] {
+			t.groups[t.root] = q
 		}
 		for pid, p := range all {
-			if _, ok := t.seen[pid]; ok || pid == t.root {
+			if pid == t.root {
 				continue
 			}
-			if (p.PPID == t.root && rootUp) || alive(p.PPID) || groups[p.PGID] {
+			if previous, ok := t.seen[pid]; ok && previous.Same(p) {
+				if previous != p {
+					t.seen[pid] = p
+					changed = true
+				}
+				continue
+			}
+			_, group := t.groups[p.PGID]
+			if (p.PPID == t.root && rootUp) || alive(p.PPID) || group {
 				t.seen[pid] = p
 				changed = true
 			}

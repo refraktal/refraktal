@@ -87,7 +87,8 @@ type Child struct {
 
 	record     string // live record path, or ""
 	recordBase Record
-	recordErr  error // the last error writing the live record
+	rmu        sync.Mutex // serializes live record snapshots, writes and errors
+	recordErr  error      // the last error writing the live record, under rmu
 }
 
 // Start starts the child and begins tracking its descendants.
@@ -165,12 +166,13 @@ func Start(s Spec) (*Child, error) {
 		defer close(c.polling)
 		t := time.NewTicker(every)
 		defer t.Stop()
-		written := 0
+		var written []Proc
 		for {
 			c.tracker.Poll()
-			if n := len(c.tracker.Tracked()); c.record != "" && n != written {
-				c.writeRecord()
-				written = n
+			if tracked := c.tracker.Tracked(); c.record != "" && !slices.Equal(tracked, written) {
+				if c.writeRecord() == nil {
+					written = tracked
+				}
 			}
 			select {
 			case <-c.stop:
@@ -190,7 +192,9 @@ func (c *Child) startRecord(dir string, labels map[string]string) {
 		err = os.MkdirAll(dir, 0o700)
 	}
 	if err != nil {
+		c.rmu.Lock()
 		c.recordErr = err
+		c.rmu.Unlock()
 		return
 	}
 	self := os.Getpid()
@@ -199,19 +203,31 @@ func (c *Child) startRecord(dir string, labels map[string]string) {
 	c.writeRecord()
 }
 
-func (c *Child) writeRecord() {
+func (c *Child) writeRecord() error {
+	// Snapshot only after taking the writer lock: an older snapshot must not
+	// overwrite one another poller has already saved.
+	c.rmu.Lock()
+	defer c.rmu.Unlock()
 	r := c.recordBase
 	r.Tracked = c.tracker.Tracked()
 	c.smu.Lock()
 	for pid, p := range c.members {
-		if !slices.ContainsFunc(r.Tracked, func(q Proc) bool { return q.PID == pid }) {
+		if i := slices.IndexFunc(r.Tracked, func(q Proc) bool { return q.PID == pid }); i < 0 {
 			r.Tracked = append(r.Tracked, p)
+		} else if observed, valid := startTime(p.Start); valid {
+			// Each poller can retain an older identity after the other saw
+			// this PID reused. Preserve the most recent verified birth.
+			if previous, valid := startTime(r.Tracked[i].Start); valid && observed.After(previous) {
+				r.Tracked[i] = p
+			}
 		}
 	}
 	c.smu.Unlock()
 	if err := writeRecord(c.record, r); err != nil {
 		c.recordErr = err
+		return err
 	}
+	return nil
 }
 
 // reap waits for the child and frees its PID. It runs once.
@@ -250,7 +266,7 @@ func (c *Child) sessionLeaders() []Proc {
 }
 
 func (c *Child) checkSessions() {
-	grew := false
+	changed := false
 	for _, l := range c.sessionLeaders() {
 		c.smu.Lock()
 		dropped := c.dropped[sessionKey(l)]
@@ -274,14 +290,14 @@ func (c *Child) checkSessions() {
 			c.dropped[sessionKey(l)] = true
 		}
 		for _, m := range members {
-			if _, ok := c.members[m.PID]; !ok {
+			if previous, ok := c.members[m.PID]; !ok || previous != m {
 				c.members[m.PID] = m
-				grew = true
+				changed = true
 			}
 		}
 		c.smu.Unlock()
 	}
-	if grew && c.record != "" {
+	if changed && c.record != "" {
 		c.writeRecord()
 	}
 }
@@ -477,7 +493,9 @@ func (c *Child) shutdown(grace time.Duration) ShutdownReport {
 	c.Stdout.Close()
 	r.Swept = swept
 	if err == nil {
+		c.rmu.Lock()
 		err = c.recordErr
+		c.rmu.Unlock()
 	}
 	if c.record != "" && err == nil && len(kr.Alive) == 0 && len(kr.Unknown) == 0 && len(swept.Alive) == 0 && len(swept.Unknown) == 0 {
 		os.Remove(c.record) // clean exit; otherwise the record stays for CleanLeftovers

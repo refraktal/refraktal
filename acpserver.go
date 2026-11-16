@@ -380,7 +380,10 @@ func (s *server) handle(m rpc) {
 		var p struct {
 			Cwd string `json:"cwd"`
 		}
-		json.Unmarshal(m.Params, &p)
+		if err := json.Unmarshal(m.Params, &p); err != nil {
+			s.fail(m.ID, -32602, "session/new: invalid params")
+			return
+		}
 		if fi, err := os.Stat(p.Cwd); err != nil || !fi.IsDir() || !filepath.IsAbs(p.Cwd) {
 			s.fail(m.ID, -32602, "session/new: cwd must be an absolute path to a folder")
 			return
@@ -397,7 +400,10 @@ func (s *server) handle(m rpc) {
 			SessionID string `json:"sessionId"`
 			ModeID    string `json:"modeId"`
 		}
-		json.Unmarshal(m.Params, &p)
+		if err := json.Unmarshal(m.Params, &p); err != nil {
+			s.fail(m.ID, -32602, "session/set_mode: invalid params")
+			return
+		}
 		if s.session(p.SessionID) == nil {
 			s.fail(m.ID, -32602, "unknown session")
 			return
@@ -413,7 +419,10 @@ func (s *server) handle(m rpc) {
 		var p struct {
 			SessionID string `json:"sessionId"`
 		}
-		json.Unmarshal(m.Params, &p)
+		if err := json.Unmarshal(m.Params, &p); err != nil {
+			s.fail(m.ID, -32602, "session/cancel: invalid params")
+			return
+		}
 		s.mu.Lock()
 		if ss := s.sess[p.SessionID]; ss != nil && ss.cancel != nil {
 			ss.cancel()
@@ -451,7 +460,10 @@ func (s *server) prompt(m rpc) {
 			Text string `json:"text"`
 		} `json:"prompt"`
 	}
-	json.Unmarshal(m.Params, &p)
+	if err := json.Unmarshal(m.Params, &p); err != nil {
+		s.fail(m.ID, -32602, "session/prompt: invalid params")
+		return
+	}
 	var task []string
 	for _, b := range p.Prompt {
 		if b.Type == "text" {
@@ -542,8 +554,8 @@ func (s *server) sharedLedger() (*budget.Ledger, budget.Limits, error) {
 	return s.ledger, s.ledger.Limits(), nil
 }
 
-// summary is the final message of a prompt: the run's outcome, then the
-// winner's reply.
+// summary is the final message of a prompt: only Refraktal's structured
+// outcome, harness and files, never the child's raw reply.
 func summary(r RunResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "refraktal: %s", r.Outcome)
@@ -557,9 +569,6 @@ func summary(r RunResult) string {
 		// Never the text: harness errors can carry account details, and
 		// nothing from a child's harness crosses to the client verbatim.
 		b.WriteString("; the error is in the child's run log")
-	}
-	if r.Reply != "" {
-		b.WriteString("\n\n" + r.Reply)
 	}
 	return b.String()
 }

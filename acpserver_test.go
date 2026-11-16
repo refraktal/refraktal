@@ -590,6 +590,125 @@ func TestIdleServeACPHonoursCancel(t *testing.T) {
 	}
 }
 
+// Child replies and raw errors remain local; the client gets only safe
+// notices and Refraktal's structured summary.
+func TestServeACPSummaryDoesNotForwardChildReply(t *testing.T) {
+	const localPath = "/private/test-agent/session/account.json"
+	var out bytes.Buffer
+	s := &server{w: bufio.NewWriter(&out)}
+	s.start()
+	s.chunk("s1", "notice: the price table is unavailable\n")
+	s.finish("s1", json.RawMessage(`7`), summary(RunResult{
+		Outcome: RunApplied, Harness: "claude", Files: []string{"out.txt"},
+		Reply: "Read the local session at " + localPath,
+		Error: "private child error at " + localPath,
+	}), 0.5, acp.ChildReport{Turns: 1}, "end_turn")
+	s.stop()
+	var text strings.Builder
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		var m struct {
+			Params struct {
+				Update struct {
+					Kind    string `json:"sessionUpdate"`
+					Content struct{ Text string }
+				} `json:"update"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatal(err)
+		}
+		if m.Params.Update.Kind == "agent_message_chunk" {
+			text.WriteString(m.Params.Update.Content.Text)
+		}
+	}
+	want := "notice: the price table is unavailable\nrefraktal: applied (claude), 1 files: out.txt; the error is in the child's run log"
+	if got := text.String(); got != want {
+		t.Fatalf("client received text outside the structured summary and safe notices: %q", got)
+	}
+	if strings.Contains(out.String(), localPath) {
+		t.Fatal("the child's local path crossed to the client")
+	}
+}
+
+// A partially decoded parameter object must not start or cancel work,
+// create a session, or initialize the shared budget.
+func TestServeACPRejectsMalformedParametersBeforeStateChanges(t *testing.T) {
+	dir := t.TempDir()
+	cwd, err := json.Marshal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, method, params string
+		notification         bool
+	}{
+		{"new", "session/new", `{"cwd":` + string(cwd) + `,"cwd":7}`, false},
+		{"set mode", "session/set_mode", `{"sessionId":"s1","modeId":"default","modeId":7}`, false},
+		{"prompt", "session/prompt", `{"sessionId":"s1","prompt":[{"type":"text","text":"valid task"},{"type":"text","text":7}]}`, false},
+		{"cancel", "session/cancel", `{"sessionId":"s1","sessionId":7}`, false},
+		{"cancel notification", "session/cancel", `{"sessionId":"s1","sessionId":7}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			running, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			workStarted := false
+			release := make(chan struct{})
+			s := &server{
+				ctx: context.Background(), out: make(chan []byte, 8), dead: make(chan struct{}),
+				sess: map[string]*serverSession{"s1": {cwd: dir}},
+				o: ServeOptions{Now: time.Now, Getenv: func(string) string {
+					workStarted = true
+					<-release
+					// A dispatched malformed prompt must stop here, before Run
+					// can access the filesystem or launch any child process.
+					return `{"depth":-1}`
+				}},
+			}
+			if tc.method == "session/cancel" {
+				s.sess["s1"].cancel = cancel
+			}
+			id := json.RawMessage(`19`)
+			if tc.notification {
+				id = nil
+			}
+			s.handle(rpc{ID: id, Method: tc.method, Params: json.RawMessage(tc.params)})
+			s.mu.Lock()
+			promptStarted := tc.method == "session/prompt" && s.sess["s1"].cancel != nil
+			s.mu.Unlock()
+			close(release)
+			s.wg.Wait()
+			if workStarted || promptStarted {
+				t.Error("malformed parameters dispatched work")
+			}
+			if s.ledger != nil || s.lerr != nil {
+				t.Error("malformed parameters initialized the shared budget")
+			}
+			if s.next != 0 || len(s.sess) != 1 {
+				t.Error("malformed parameters created a session")
+			}
+			if running.Err() != nil {
+				t.Error("malformed parameters cancelled a running prompt")
+			}
+			if tc.notification {
+				if len(s.out) != 0 {
+					t.Fatal("a malformed notification received a response")
+				}
+				return
+			}
+			if len(s.out) != 1 {
+				t.Fatalf("got %d frames, want one invalid-params response", len(s.out))
+			}
+			var reply rpc
+			if err := json.Unmarshal(<-s.out, &reply); err != nil {
+				t.Fatal(err)
+			}
+			if string(reply.ID) != string(id) || reply.Error == nil || reply.Error.Code != -32602 {
+				t.Fatalf("malformed parameters did not return invalid params: %+v", reply)
+			}
+		})
+	}
+}
+
 // Review M7 (7): a large result never makes a frame past MaxFrame: the
 // accounting (cost) goes first in its own small frame, then the summary in
 // pieces, then the response.

@@ -37,11 +37,19 @@ func writeRecord(path string, r Record) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path) // readers never see a half-written record
+	defer os.Remove(f.Name())
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path) // readers never see a half-written record
 }
 
 // loadRecord keeps decoding separate from process lookup and cleanup. A bad
