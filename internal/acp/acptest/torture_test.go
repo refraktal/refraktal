@@ -52,6 +52,43 @@ func TestTortureFakeSelfExpires(t *testing.T) {
 	}
 }
 
+// The shell gate uses the same permanent slots as the Go fakes, and its
+// safety expiry must reap its child without ps or a cleanup signal.
+func TestTortureCheckScriptSharesSlotsAndSelfExpires(t *testing.T) {
+	s := NewTortureSpec(t, false)
+	s.Deadline = time.Now().Add(2 * time.Second).Truncate(time.Second)
+	if _, err := claimSlot(s); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.Dir, "check.sh")
+	if err := os.WriteFile(path, []byte(TortureCheckScript(s)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", path, s.Dir)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	WaitFor(t, time.Second, "the check shell and its child to claim shared slots", func() bool {
+		return len(TortureInventory(s)) == 2
+	})
+	if n := TortureSlots(t, s); n != 3 {
+		t.Fatalf("shell gate did not share the Go fake's reserved slot: %d", n)
+	}
+	select {
+	case err := <-done:
+		if e, ok := err.(*exec.ExitError); !ok || e.ExitCode() != 124 {
+			t.Fatalf("check gate did not exit at its safety expiry: %v", err)
+		}
+		if time.Now().Before(s.Deadline) || time.Since(s.Deadline) > 2*time.Second {
+			t.Fatal("check gate did not respect its own absolute expiry")
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("check gate did not self-expire; no process was signalled")
+	}
+}
+
 func TestTorturePermanentSlotsBoundConcurrentLaunches(t *testing.T) {
 	for _, heavy := range []bool{false, true} {
 		s := NewTortureSpec(t, heavy)
