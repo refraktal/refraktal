@@ -28,7 +28,8 @@
 //	          pushed.txt in the cwd); then end_turn
 //
 // In turn mode, ACPTEST_WRITE ("path=content|...") writes files in the cwd,
-// each after an edit permission request it must be allowed. A prompt that
+// each after an edit permission request it must be allowed; ACPTEST_RAWWRITE
+// (same format, paths relative to the cwd) writes without asking. A prompt that
 // starts "You are judging" is answered with ACPTEST_JUDGE when set: the reply
 // text, or "hang" to wait for session/cancel; "stop=<reason>\n<text>" ends
 // the turn with that stop reason, and stop=error with an ACP error.
@@ -372,6 +373,13 @@ func (a *agent) prompt(id json.RawMessage) {
 	}
 	a.chunk("Hello")
 	a.writes()
+	if w := os.Getenv("ACPTEST_RAWWRITE"); w != "" { // writes without asking: a sandbox that failed
+		for _, kv := range strings.Split(w, "|") {
+			path, content, _ := strings.Cut(kv, "=")
+			os.MkdirAll(filepath.Dir(filepath.Join(a.cwd, path)), 0o755)
+			os.WriteFile(filepath.Join(a.cwd, path), []byte(content+"\n"), 0o644)
+		}
+	}
 	a.update(obj{"sessionUpdate": "usage_update", "used": 1200, "size": 200000})
 	a.update(obj{"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Write note.txt", "kind": "edit", "status": "pending"})
 	a.chunk(" permission=" + a.permission())

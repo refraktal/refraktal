@@ -354,6 +354,7 @@ func (s *server) run(ctx context.Context, sessionID, cwd, task string) (RunResul
 		return RunResult{Outcome: RunUnusable}, err
 	}
 	o.Budget, o.Ledger, o.Task, o.Dir, o.NoApply, o.Dry = &lim, ledger, task, cwd, false, false
+	o.Confine = true // the session's folder, not the whole repository
 	if pr := s.o.Getenv(ParentRunEnv); pr != "" {
 		o.ParentRun = pr
 	}

@@ -505,3 +505,27 @@ func TestParentHoldsAChildsRetainedReservation(t *testing.T) {
 		t.Fatalf("budget %+v\n%s", res.Budget, b.String())
 	}
 }
+
+// Review M7 (3): a session whose folder is a subfolder of the repository
+// stays there: the harness works in that subfolder of its worktree, and a
+// result that changes anything outside it is refused, applying nothing.
+func TestSessionSubfolderIsEnforced(t *testing.T) {
+	r := newRunRig(t)
+	os.MkdirAll(filepath.Join(r.repo, "sub"), 0o755)
+	os.WriteFile(filepath.Join(r.repo, "sub", "keep"), []byte("k\n"), 0o644)
+	r.git(t, "add", "-A")
+	r.git(t, "commit", "-q", "-m", "sub")
+	sub := filepath.Join(r.repo, "sub")
+	c := serve(t, r.serveOptions(fake{name: "claude", agentMode: "turn", env: []string{"ACPTEST_RAWWRITE=here.txt=x"}}, nil), nil)
+	if turn, _ := c.Prompt(context.Background(), open(t, c, sub), "x"); turn.StopReason != "end_turn" {
+		t.Fatalf("inside: %+v", turn)
+	}
+	if !exists(filepath.Join(sub, "here.txt")) || exists(filepath.Join(r.repo, "here.txt")) {
+		t.Fatal("the harness did not work in the session's subfolder")
+	}
+	c = serve(t, r.serveOptions(fake{name: "claude", agentMode: "turn", env: []string{"ACPTEST_RAWWRITE=../escape.txt=x|ok.txt=y"}}, nil), nil)
+	turn, _ := c.Prompt(context.Background(), open(t, c, sub), "x")
+	if turn.StopReason == "end_turn" || exists(filepath.Join(r.repo, "escape.txt")) || exists(filepath.Join(sub, "ok.txt")) {
+		t.Fatalf("a change outside the session folder was applied: %+v", turn)
+	}
+}

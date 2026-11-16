@@ -65,6 +65,12 @@ type RunOptions struct {
 	// Self is the path to this refraktal binary, for the refraktal harness (a
 	// child Refraktal over ACP). The CLI passes its own path. Empty: none.
 	Self string
+	// Confine keeps the run to Dir's subtree of the repository (the acp
+	// server sets it for a session's folder): each harness works in that
+	// subfolder of its worktree, its edits are allowed only there, and a
+	// result that changes anything outside it is refused. Without it, the
+	// run covers the whole repository whatever Dir is.
+	Confine bool
 	// Ledger, if set, is a ledger shared with other runs (an acp server's,
 	// seeded from the parent's grant): Budget is then only its limits.
 	Ledger *budget.Ledger
@@ -435,6 +441,12 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		return res, nil
 	}
 	env := &runEnv{ctx: ctx, o: o, root: root, cfg: cfg, ledger: ledger, prices: prices, run: run, log: log, base: base, notice: notice}
+	if o.Confine {
+		if env.subtree, err = subtreeOf(root, o.Dir); err != nil {
+			res.Error = err.Error()
+			return res, nil
+		}
+	}
 	if len(hs) > 1 {
 		env.fanOut(hs, scoreKey, &res)
 		res.Budget = ledger.Summary()
@@ -491,6 +503,38 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		"allowed": res.Allowed, "denied": res.Denied, "error": runlog.ErrorField(res.Outcome, res.Error), "budget": res.Budget,
 		"settlement": res.Settlement, "swept": c.swept, "left_running": res.LeftRunning, "unknown": res.Unknown})
 	return res, nil
+}
+
+// subtreeOf is dir relative to the repository root, slash-separated, or ""
+// for the root itself.
+func subtreeOf(root, dir string) (string, error) {
+	r, err1 := filepath.EvalSymlinks(root)
+	d, err2 := filepath.EvalSymlinks(dir)
+	if err1 != nil || err2 != nil {
+		return "", errors.New("cannot resolve the session folder inside the repository")
+	}
+	rel, err := filepath.Rel(r, d)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", errors.New("the session folder is not inside the repository")
+	}
+	if rel == "." {
+		return "", nil
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+// outside returns the files not under the subtree ("" is the whole tree).
+func outside(subtree string, files []string) []string {
+	if subtree == "" {
+		return nil
+	}
+	var out []string
+	for _, f := range files {
+		if !strings.HasPrefix(f, subtree+"/") {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func chunkText(u acp.Update) string {

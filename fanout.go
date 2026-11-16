@@ -70,16 +70,17 @@ type Candidate struct {
 
 // runEnv is what every child of one run shares.
 type runEnv struct {
-	ctx    context.Context
-	o      RunOptions
-	root   string
-	cfg    config.Config
-	ledger *budget.Ledger
-	prices price.Table
-	run    runlog.Run
-	log    *runlog.Log
-	base   string
-	notice func(string)
+	ctx     context.Context
+	o       RunOptions
+	root    string
+	cfg     config.Config
+	ledger  *budget.Ledger
+	prices  price.Table
+	run     runlog.Run
+	log     *runlog.Log
+	base    string
+	notice  func(string)
+	subtree string // Confine: the session's folder in the repository, or "" for all of it
 
 	amu      sync.Mutex // this run's own figures (the ledger may be shared)
 	charged  float64
@@ -194,14 +195,26 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 		runlog.AppendRaw(scratchRoot, "stderr", code, raw)
 		return runlog.ErrorField(code, raw)
 	}
-	pol := policy.Policy{Worktree: wt.Dir, ReadOnly: sp.judge}
+	// Confined: the harness works in the session's subfolder of its
+	// worktree, and its edits are allowed only there.
+	cwd := wt.Dir
+	if e.subtree != "" {
+		cwd = filepath.Join(wt.Dir, filepath.FromSlash(e.subtree))
+		if err := os.MkdirAll(cwd, 0o755); err != nil {
+			settle(false)
+			removeWT()
+			c.Error = err.Error()
+			return c
+		}
+	}
+	pol := policy.Policy{Worktree: cwd, ReadOnly: sp.judge}
 	var mu sync.Mutex
 	var reply strings.Builder
 	// The prompt about to be sent counts as one of the turns: a child
 	// Refraktal has the rest.
 	childBudget, _ := json.Marshal(map[string]any{"usd": grant.USD, "turns": max(0, grant.Turns-1),
 		"deadline": grant.Deadline.UTC().Format(time.RFC3339), "depth": grant.Depth})
-	s, err := openSession(sctx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, scratchRoot: scratchRoot, cwd: wt.Dir, tmpDir: tmp,
+	s, err := openSession(sctx, sessionSpec{h: h, hcfg: hcfg, scratch: scratch, scratchRoot: scratchRoot, cwd: cwd, tmpDir: tmp,
 		liveDir: e.o.LiveDir, labels: map[string]string{"run": e.run.ID, "harness": name}, log: e.log, timeout: 2 * time.Minute,
 		readOnly: sp.judge,
 		// REFRAKTAL_RUN tags the child's processes for logs only (the session
@@ -352,6 +365,10 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 	switch {
 	case cerr != nil:
 		c.Outcome, c.Error = candFailed, cerr.Error()
+	case len(outside(e.subtree, r.Files)) > 0:
+		// Confined to the session's folder: a change outside it is refused.
+		c.Outcome = candFailed
+		c.Error = fmt.Sprintf("the result changes %d files outside the session folder %s: refused", len(outside(e.subtree, r.Files)), e.subtree)
 	case c.Outcome == candNoChanges && len(r.Files) > 0:
 		c.Outcome = candChanges
 	}
@@ -389,6 +406,9 @@ func (e *runEnv) apply(c *Candidate) (string, error) {
 	// atomic, so this is the last point to stop.
 	if !time.Now().Before(e.ledger.Deadline()) {
 		return "", errMinsExpired
+	}
+	if out := outside(e.subtree, c.result.Files); len(out) > 0 {
+		return "", fmt.Errorf("the result changes %d files outside the session folder %s: refused", len(out), e.subtree)
 	}
 	ctx, cancel := e.opCtx()
 	defer cancel()
