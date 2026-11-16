@@ -98,15 +98,22 @@ No product code was changed by the pull request that added this package. Each
 finding was first reproduced as a failing Go test against production
 functions. A reproduction whose finding is not fixed yet requires
 `REFRAKTAL_VERIFY_FINDINGS=1`, and ordinary CI skips it; once a fix lands, its
-reproduction loses the opt-in and CI enforces it (findings 3 and 4 below).
-The model tests always explore and assert the known counterexamples. A green
-test run therefore does **not** mean all requested safety invariants hold.
+reproduction loses the opt-in and CI enforces it. All four findings below are
+now fixed. The model tests always explore and assert the known counterexamples
+of the modelled behaviour. A green test run therefore does **not** mean all
+requested safety invariants hold.
 
 1. **PID reuse after recheck.** `proc.Kill` calls `recheckPID` and `signal`
    separately. A tracked process can exit and have its PID reused between them.
    `internal/proc/verify_findings_test.go:TestVerifyFindingPIDReuseAfterRecheck`
    intercepts both operations and demonstrates one signal to an unrelated
    identity. It does not rely on the same-second identity alias.
+   **Status: fixed on Linux** by commit `32ddb68`: `Kill` now obtains a pidfd
+   (via `os.FindProcess`) before the identity re-check and signals through
+   it, so a PID reused after the check cannot be signalled. The reproduction
+   runs in CI without the opt-in on Linux. On macOS it skips: there is no
+   pidfd, and the one-syscall window remains a known limit documented in
+   `docs/DESIGN.md`, as does the process-group signal.
 2. **Recorded session reuse between polls.** A tool session can empty, be reused,
    and lose its replacement leader before the next poll. Its unrelated surviving
    member then passes the sweep's current-identity check. This is the residual
@@ -114,6 +121,15 @@ test run therefore does **not** mean all requested safety invariants hold.
    `TestVerifyFindingRecordedSessionReusedBetweenPolls` in the same file
    demonstrates one unrelated signal. Both process reproductions intercept all
    signals; neither sends an OS signal.
+   **Status: fixed** by commits `be6157b` and `e2e7160`: the sweep signals only
+   members proved to be ours (recorded while the session was ours, or a
+   descendant of a tracked or recorded process); any other member is reported
+   as unknown and the live record is kept. The reproduction runs in CI without
+   the opt-in on every platform.
+
+   The kill-safety model above still describes the behaviour before these
+   fixes, so its tests keep asserting those counterexamples. Updating the model
+   to the fixed code is a follow-up.
 3. **Oversized nested turn report.** The ACP response accepts
    `ChildReport.Turns` without comparing it to the child's allowance;
    `runEnv.child` forwards it to `Ledger.AddTurns`, which deliberately counts
@@ -140,8 +156,8 @@ test run therefore does **not** mean all requested safety invariants hold.
    `TestFailedApplyIsRolledBackViaSeam` injects the failure through a seam so
    the same invariant is checked as root and on CI.
 
-Reproduce the findings without any harness or network access (3 and 4 now
-pass: they are fixed):
+Reproduce the findings without any harness or network access (all four are
+fixed, so these now pass; their reproductions also run in ordinary CI):
 
 ```sh
 REFRAKTAL_VERIFY_FINDINGS=1 GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
@@ -185,6 +201,7 @@ Verified on the pull request that added this package:
 - **CI**: all seven checks passed (Go on ubuntu-latest and macos-latest for the
   root module and both spike modules, and the release dry-run build).
 
-Findings 3 and 4 are fixed and their reproductions are enforced by CI.
-Findings 1 and 2 remain unfixed until their fix pull requests land; each one
-removes the opt-in for its own reproduction, so CI then enforces it.
+All four findings are fixed and their reproductions are enforced by CI:
+findings 1 and 2 by #26, findings 3 and 4 by #25. The kill-safety model still
+describes the behaviour before the fixes for findings 1 and 2; updating it is a
+follow-up.
