@@ -565,8 +565,10 @@ process-group kill does not reach them.
 - **Budgets** as in Budgets above; `--mins` covers the whole run, from
   start-up to the end of the turn: during the turn, `session/cancel`, then
   shutdown, the tree kill and the session sweep (`timed_out`); during any
-  setup step (price fetch, worktree, starting the harness),
-  `budget_exhausted`. Both exit 2. Writes to a harness are bounded (10 s, the
+  setup step (repository discovery, loading the config, the price fetch,
+  the worktree, starting the harness), `budget_exhausted`. The deadline is
+  set when `run` starts, before any setup step, and each step runs under it:
+  a slow repository discovery counts against `--mins` (`--dry` included). Both exit 2. Writes to a harness are bounded (10 s, the
   cancel 2 s), including waiting for the writer lock, so one that stopped
   reading cannot hold up the stop.
 - **Exit codes:** 0 applied, kept or no changes; 1 the turn failed or the

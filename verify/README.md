@@ -301,6 +301,13 @@ limit.
    `TestCreateHonorsContextWhileRepositoryLocked` (`internal/worktree`) is
    enforced.
 
+12. **Setup ran before the `--mins` clock started** (Astra run 7 #4):
+   repository discovery and config loading ran before the ledger, and with
+   it the deadline, was created, so a 30 ms dry run whose discovery took
+   200 ms exited 0. Fixed by creating the ledger at `Run` entry and running
+   every setup step under its deadline. Outside the models (setup is not
+   modeled). `TestSetupCountsAgainstMins` (root package) is enforced.
+
 The new production
 tracker reproduction runs in this sandbox because all signals are intercepted;
 the older process-level reproductions still need the orchestrator.
@@ -315,7 +322,7 @@ GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
   -count=1 -v
 GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
   go test . ./internal/acp \
-  -run '^(TestCollectFailureNeverOverridesExhaustion|TestMalformedNestedCostForfeitsTheGrant|TestCostInvalidMarksAPresentUnusableCost|TestUndecodableChildReportForfeitsTheGrant|TestDecodePromptResultFlagsAPresentUndecodableReport|TestRefraktalChildWithoutReportForfeits|TestFailedRefraktalChildKeepsItsGrant)$' \
+  -run '^(TestCollectFailureNeverOverridesExhaustion|TestMalformedNestedCostForfeitsTheGrant|TestCostInvalidMarksAPresentUnusableCost|TestUndecodableChildReportForfeitsTheGrant|TestDecodePromptResultFlagsAPresentUndecodableReport|TestRefraktalChildWithoutReportForfeits|TestFailedRefraktalChildKeepsItsGrant|TestSetupCountsAgainstMins)$' \
   -count=1 -v
 ```
 
