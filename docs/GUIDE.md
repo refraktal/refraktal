@@ -45,12 +45,15 @@ Harness names are `claude`, `codex`, `agy` and `refraktal`.
 | `--mins N` | wall-clock minutes for the whole run, setup included. The only hard stop inside a turn: when it runs out, the turn is cancelled, the harness shut down, and its process tree killed. Never unlimited; at most 1440. | 30 |
 | `--depth N` | how many levels of Refraktal may nest below this run | 2 |
 
-Each budget only shrinks down the tree. Parallel candidates split `--usd`:
-each takes what is left divided by the children still to start. Costs are
+Each budget only shrinks down the tree. Parallel candidates split `--usd`
+and `--turns`: each takes what is left divided by the children still to
+start, and what it does not use comes back when it finishes. Costs are
 tagged `reported` (the harness said so, as Claude does), `computed` (tokens
-priced from the table, for Codex and Antigravity), `unpriced` (no price: counts
-as $0, with a warning) or `estimated` (a call a cancel cut off; reporting
-only). `refraktal show` lists them by source.
+priced from the table, for Codex and Antigravity), `unpriced` (no price:
+counts as $0, with a warning), `estimated` (a call a cancel cut off;
+reporting only) or `retained` (money a child Refraktal's cancelled children
+keep reserved: held against `--usd`, not spent). `refraktal show` lists them
+by source.
 
 ## Routing and your data
 
@@ -95,10 +98,17 @@ whether it judged its own candidate.
 ## A child Refraktal
 
 `refraktal run --harness refraktal` starts `refraktal acp` as a child, which
-routes the task itself. Its budgets are the parent's grant, its prompts count
-against the parent's `--turns`, its run folder nests in the parent's, and
-`refraktal show` renders the tree. `--depth` and a nesting guard stop
-recursion. Any ACP client can drive `refraktal acp` the same way.
+routes the task itself. Its budgets are the parent's grant (one grant for the
+child's whole life, however many prompts it gets), its prompts count against
+the parent's `--turns`, its run folder nests in the parent's, and `refraktal
+show` renders the tree. `--depth` and a nesting guard stop recursion.
+
+Any ACP client, such as an editor, can drive `refraktal acp [--usd --turns
+--mins --depth]` the same way: each prompt is a run in the session's folder,
+budgeted afresh from the flags. A session opened in a subfolder of a
+repository stays there: a result that changes anything outside that folder
+is refused. Only Refraktal's own summary and safe notices reach the client,
+never a harness's error text, auth messages or local paths.
 
 ## Known limits
 
