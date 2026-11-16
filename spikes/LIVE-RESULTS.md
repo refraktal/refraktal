@@ -38,7 +38,7 @@ end_turn`. No run timed out or was killed. `t_ms` is milliseconds after `session
 | Turn wall time, plain / tool | 3,087 / 5,512 ms | 5,808 / 9,252 ms | 8,123 / 34,139 ms |
 | `session/new` ready after spawn, 1st / 2nd run | 3,593 / 669 ms | 3,039 / 654 ms | 3,853 / 2,817 ms |
 | Model, as configured by the session | `opus`, effort high | `gpt-6.1-sol`, reasoning `xhigh` | `gemini-4-carbon`, thought medium |
-| Login reported | Claude subscription (Max) | ChatGPT subscription (Pro) | none reported over ACP |
+| Login reported | Claude subscription | ChatGPT subscription | none reported over ACP |
 
 ### 1. How far each run got
 
