@@ -47,6 +47,21 @@ type lifecycleState struct {
 	Outcome      uint8 // 0 pending, 1 applied, 2 kept winner, 3 failure, 4 no changes/no winner, 5 budget or --mins (exit 2)
 	RunBudget    bool  // the run took the budget/--mins row of the precedence table
 	EarlyCollect bool
+	// Cleanup confirmation (run 7 #1): each child's last shutdown step may
+	// leave a process running, fail to confirm one, or report an error.
+	Unconfirmed      [2]bool // candidate i's shutdown
+	CheckUnconfirmed [2]bool // candidate i's check
+	JudgeUnconfirmed bool
+	UnconfirmedStop  bool // the run stopped for unconfirmed cleanup
+	// CollectedUnconfirmed, AdmittedUnconfirmed: a collect ran, or an
+	// apply was admitted, after some child's cleanup was unconfirmed.
+	CollectedUnconfirmed bool
+	AdmittedUnconfirmed  bool
+}
+
+// unconfirmed reports whether any child's cleanup is unconfirmed so far.
+func (s lifecycleState) unconfirmed() bool {
+	return s.Unconfirmed[0] || s.Unconfirmed[1] || s.CheckUnconfirmed[0] || s.CheckUnconfirmed[1] || s.JudgeUnconfirmed
 }
 
 type lifecycleMutation string
@@ -68,6 +83,12 @@ const (
 	// Pre-run-5: Worktree.Apply cleared its snapshot before the post-apply
 	// LFS attribute check, so that check's failure left the patch applied.
 	lifecycleClearBeforeLFS lifecycleMutation = "clear snapshot before the post-apply check"
+	// Pre-run-7: a candidate whose cleanup was unconfirmed was collected
+	// (runEnv.collect had no cleanup precondition).
+	lifecycleCollectUnconfirmed lifecycleMutation = "collect despite unconfirmed cleanup"
+	// Pre-run-7: a check's or the judge's unconfirmed cleanup was only a
+	// notice; the winner was still applied.
+	lifecycleApplyUnconfirmed lifecycleMutation = "apply despite unconfirmed cleanup"
 )
 
 // budgetStop reports whether candidate i still counts as stopped for budget
@@ -89,6 +110,27 @@ func lifecycleModel(mutation lifecycleMutation, filesystemErrors bool) model[lif
 		Invariant: func(s lifecycleState) error {
 			if s.EarlyCollect {
 				return fmt.Errorf("collected before every candidate stopped and was swept")
+			}
+			// Collect and apply run git in the shared repository: never
+			// while a process of ours may still be changing it.
+			if s.CollectedUnconfirmed {
+				return fmt.Errorf("collected after a child's cleanup was unconfirmed")
+			}
+			if s.AdmittedUnconfirmed {
+				return fmt.Errorf("apply admitted after a child's cleanup was unconfirmed")
+			}
+			if s.JudgeUnconfirmed && s.Winner != 0 {
+				return fmt.Errorf("the judge's answer used after its cleanup was unconfirmed")
+			}
+			if s.Stage == 8 && s.unconfirmed() {
+				if s.Tree != 0 || s.Outcome != 3 && s.Outcome != 5 {
+					return fmt.Errorf("unconfirmed cleanup did not stop the run: outcome=%d tree=%d", s.Outcome, s.Tree)
+				}
+				for i := 0; i < int(s.Count); i++ {
+					if !s.Kept[i] {
+						return fmt.Errorf("candidate %d's worktree deleted after unconfirmed cleanup", i)
+					}
+				}
 			}
 			if s.Admitted && !s.AdmissionOK {
 				return fmt.Errorf("apply admitted without winner, applicable checks, live deadline, or no cancel")
@@ -163,13 +205,33 @@ func lifecycleModel(mutation lifecycleMutation, filesystemErrors bool) model[lif
 				if s.Child[i] < 2 {
 					// runEnv.child (fanout.go), session.close (session.go), and
 					// Child.shutdown (internal/proc/child.go): stop, then sweep.
-					n := s
-					n.Child[i]++
-					add(fmt.Sprintf("child %d shutdown step %d", i, n.Child[i]), n)
+					// The sweep's report may leave cleanup unconfirmed
+					// (left_running, unknown or an error): closeSession records it.
+					for _, unconf := range []bool{false, true} {
+						if unconf && s.Child[i] != 1 {
+							continue
+						}
+						n := s
+						n.Child[i]++
+						n.Unconfirmed[i] = unconf
+						add(fmt.Sprintf("child %d shutdown step %d unconfirmed=%t", i, n.Child[i], unconf), n)
+					}
 				}
 			}
 			switch s.Stage {
 			case 1:
+				if allSwept && s.unconfirmed() && mutation != lifecycleCollectUnconfirmed {
+					// runEnv.collect skips every candidate; fanOut's
+					// stopUnconfirmed and Run's unconfirmedStop end the run:
+					// exit 2 if a candidate stopped for budget or --mins.
+					for _, budget := range []bool{false, true} {
+						n := s
+						n.Stage, n.UnconfirmedStop, n.Budget[0] = 7, true, budget
+						n.RunBudget = budget || s.Expired
+						add(fmt.Sprintf("unconfirmed cleanup stops the run before collecting budget_stop=%t", budget), n)
+					}
+					return out
+				}
 				for i := 0; i < int(s.Count); i++ {
 					if s.Collect[i] != 0 || s.Child[i] != 2 || (!allSwept && mutation != lifecycleNoWait) {
 						continue
@@ -187,6 +249,7 @@ func lifecycleModel(mutation lifecycleMutation, filesystemErrors bool) model[lif
 							}
 							n := s
 							n.Collect[i], n.Budget[i], n.EarlyCollect = result, budget, !allSwept
+							n.CollectedUnconfirmed = s.unconfirmed()
 							add(fmt.Sprintf("collect candidate %d result=%d budget_stop=%t", i, result, budget), n)
 						}
 					}
@@ -213,16 +276,31 @@ func lifecycleModel(mutation lifecycleMutation, filesystemErrors bool) model[lif
 					add("collection barrier complete", n)
 				}
 			case 2:
+				if s.unconfirmed() && mutation != lifecycleApplyUnconfirmed {
+					// runEnv.fanOut: the remaining checks are skipped, then
+					// stopUnconfirmed ends the run after the check barrier.
+					n := s
+					n.Stage, n.UnconfirmedStop, n.RunBudget = 7, true, s.Expired
+					add("unconfirmed check cleanup stops the run", n)
+					break
+				}
 				for i := 0; i < int(s.Count); i++ {
 					if s.Collect[i] != 1 || s.Check[i] != 0 {
 						continue
 					}
 					// runEnv.fanOut (fanout.go), Worktree.CheckApply
 					// (internal/worktree/worktree.go), runCheck (judge.go).
+					// A check that ran may leave its cleanup unconfirmed.
 					for _, result := range []uint8{1, 2, 3} {
-						n := s
-						n.Check[i] = result // 3: no repository check detected
-						add(fmt.Sprintf("candidate %d checks result=%d", i, result), n)
+						for _, unconf := range []bool{false, true} {
+							if unconf && result == 3 {
+								continue // no check ran
+							}
+							n := s
+							n.Check[i] = result // 3: no repository check detected
+							n.CheckUnconfirmed[i] = unconf
+							add(fmt.Sprintf("candidate %d checks result=%d unconfirmed=%t", i, result, unconf), n)
+						}
 					}
 				}
 				if allChecked {
@@ -240,10 +318,25 @@ func lifecycleModel(mutation lifecycleMutation, filesystemErrors bool) model[lif
 				}
 				if len(eligible) > 1 && s.Judge < 3 {
 					// runEnv.fanOut invokes runEnv.child(judge=true)
-					// (fanout.go), whose session.close (session.go) sweeps it.
+					// (fanout.go), whose session.close (session.go) sweeps it;
+					// the sweep may leave its cleanup unconfirmed.
+					for _, unconf := range []bool{false, true} {
+						if unconf && s.Judge != 2 {
+							continue
+						}
+						n := s
+						n.Judge++
+						n.JudgeUnconfirmed = unconf
+						add(fmt.Sprintf("judge start/stop/sweep step %d unconfirmed=%t", n.Judge, unconf), n)
+					}
+					break
+				}
+				if s.unconfirmed() && mutation != lifecycleApplyUnconfirmed {
+					// runEnv.fanOut's stopUnconfirmed after the judge: its
+					// answer is not used and nothing is applied.
 					n := s
-					n.Judge++
-					add(fmt.Sprintf("judge start/stop/sweep step %d", n.Judge), n)
+					n.Stage, n.UnconfirmedStop, n.RunBudget = 7, true, s.Expired
+					add("unconfirmed judge cleanup stops the run", n)
 					break
 				}
 				// choose and parseWinner (judge.go), plus runEnv.fanOut's
@@ -260,6 +353,14 @@ func lifecycleModel(mutation lifecycleMutation, filesystemErrors bool) model[lif
 					add("no winner", n)
 				}
 			case 4:
+				if s.unconfirmed() && mutation != lifecycleApplyUnconfirmed {
+					// runEnv.fanOut's stopUnconfirmed before the apply (no
+					// child runs after the judge, so this is a backstop).
+					n := s
+					n.Stage, n.UnconfirmedStop, n.RunBudget = 7, true, s.Expired
+					add("unconfirmed cleanup refuses the apply", n)
+					break
+				}
 				// Run and runEnv.fanOut (run.go, fanout.go): --no-apply keeps work.
 				if s.NoApply {
 					n := s
@@ -277,6 +378,7 @@ func lifecycleModel(mutation lifecycleMutation, filesystemErrors bool) model[lif
 				}
 				n := s
 				n.Admitted, n.Stage = true, 5
+				n.AdmittedUnconfirmed = s.unconfirmed()
 				i := int(s.Winner) - 1
 				n.AdmissionOK = i >= 0 && !s.Cancelled && !s.Expired && (s.Check[i] == 1 || s.Check[i] == 3)
 				add("admit winner apply", n)
@@ -398,6 +500,16 @@ func lifecycleModel(mutation lifecycleMutation, filesystemErrors bool) model[lif
 						n.Kept[i], n.Deleted[i] = keep, !keep
 					}
 				}
+				if s.UnconfirmedStop {
+					// fanOut's stopUnconfirmed (keepEvery) and Run: every
+					// worktree kept; failed (exit 1) below the exit-2 rows.
+					if !s.RunBudget {
+						n.Outcome = 3
+					}
+					for i := 0; i < int(s.Count); i++ {
+						n.Kept[i], n.Deleted[i] = true, false
+					}
+				}
 				add("retain work and classify final run outcome", n)
 			}
 			return out
@@ -410,6 +522,7 @@ func TestRunLifecycleFaithful(t *testing.T) {
 		t.Run(fmt.Sprintf("filesystem_errors=%t", filesystemErrors), func(t *testing.T) {
 			m := lifecycleModel(lifecycleFaithful, filesystemErrors)
 			var budgetOverCollect, postCheckRollback bool
+			var unconfSingle, unconfFan, unconfCheck, unconfJudge, unconfBudget bool
 			var applied, failedCollectKept, failedTurnKept, unusedFailed, cancelDuringApply, judged, single, fan, noApply, rollback bool
 			next := m.Next
 			m.Next = func(s lifecycleState) []transition[lifecycleState] {
@@ -417,6 +530,13 @@ func TestRunLifecycleFaithful(t *testing.T) {
 				cancelDuringApply = cancelDuringApply || s.Tree == 3 && (s.Cancelled || s.Expired)
 				judged = judged || s.Judge == 3
 				single, fan = single || s.Count == 1, fan || s.Count == 2
+				if s.Stage == 8 && s.UnconfirmedStop {
+					unconfSingle = unconfSingle || s.Count == 1 && s.Unconfirmed[0] && s.Outcome == 3
+					unconfFan = unconfFan || s.Count == 2 && s.Unconfirmed[1] && !s.Unconfirmed[0] && s.Outcome == 3 && s.Kept[0]
+					unconfCheck = unconfCheck || (s.CheckUnconfirmed[0] || s.CheckUnconfirmed[1]) && s.Outcome == 3
+					unconfJudge = unconfJudge || s.JudgeUnconfirmed && s.Outcome == 3 && s.Winner == 0
+					unconfBudget = unconfBudget || s.Budget[0] && s.Outcome == 5
+				}
 				noApply = noApply || s.Stage == 8 && s.NoApply && s.Winner != 0 && s.Tree == 0
 				rollback = rollback || s.RolledBack && s.Tree == 0
 				postCheckRollback = postCheckRollback || s.RolledBack && s.Tree == 0 && !filesystemErrors
@@ -432,6 +552,9 @@ func TestRunLifecycleFaithful(t *testing.T) {
 			t.Log(r.String())
 			if r.Violation != nil {
 				t.Fatal(r.String())
+			}
+			if !unconfSingle || !unconfFan || !unconfCheck || !unconfJudge || !unconfBudget {
+				t.Fatalf("missing unconfirmed-cleanup witness: single=%t fan=%t check=%t judge=%t budget=%t", unconfSingle, unconfFan, unconfCheck, unconfJudge, unconfBudget)
 			}
 			if !applied || !failedCollectKept || !failedTurnKept || !unusedFailed || !cancelDuringApply || !judged || !single || !fan || !noApply || filesystemErrors && !rollback || !budgetOverCollect || !filesystemErrors && !postCheckRollback {
 				t.Fatalf("missing witness: post_check_rollback=%t budget_over_collect=%t apply=%t collect_keep=%t failed_turn_keep=%t unused_failure=%t during_apply=%t judge=%t single=%t fan=%t no_apply=%t rollback=%t", postCheckRollback, budgetOverCollect, applied, failedCollectKept, failedTurnKept, unusedFailed, cancelDuringApply, judged, single, fan, noApply, rollback)
@@ -456,6 +579,8 @@ func TestRunLifecycleMutations(t *testing.T) {
 		{lifecycleNoFailedOutcome, "unused failed changes did not make run fail"},
 		{lifecycleCollectErasesBudget, "budget exhaustion or --mins expiry overridden by a collect failure"},
 		{lifecycleClearBeforeLFS, "apply reported failure over a changed tree"},
+		{lifecycleCollectUnconfirmed, "collected after a child's cleanup was unconfirmed"},
+		{lifecycleApplyUnconfirmed, "apply admitted after a child's cleanup was unconfirmed"},
 	} {
 		t.Run(string(tc.mutation), func(t *testing.T) {
 			r := check(lifecycleModel(tc.mutation, true))

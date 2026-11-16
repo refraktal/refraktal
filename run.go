@@ -487,23 +487,28 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 
 	// One candidate: nothing to choose, so it is applied as in M3.
 	c := env.child(hs[0], childSpec{prompt: o.Task})
-	env.collect(c) // the only child, and it has stopped
+	env.collect(c) // the only child, and it has stopped (skipped if its cleanup is unconfirmed)
 	res.Harness, res.MCP, res.Allowed, res.Denied = c.Harness, c.MCP, c.Allowed, c.Denied
 	res.Model, res.Reply, res.StopReason, res.Usage, res.Cost = c.Model, c.Reply, c.StopReason, c.Usage, c.Cost
 	res.Settlement, res.Files, res.Error = c.Settlement, c.Files, c.Error
 	res.LeftRunning, res.Unknown = c.LeftRunning, c.Unknown
-	switch c.Outcome {
-	case candUnusable:
+	outcome, why, unconfirmed := env.unconfirmedStop(c.Outcome == candTimedOut, c.Outcome == candExhausted)
+	switch {
+	case unconfirmed:
+		// Not collected, never applied: the worktree is kept.
+		notice(why)
+		res.Outcome, res.Error = outcome, strings.TrimPrefix(c.Error+"; "+why, "; ")
+	case c.Outcome == candUnusable:
 		res.Outcome = RunUnusable
-	case candExhausted:
+	case c.Outcome == candExhausted:
 		res.Outcome = RunExhausted
-	case candTimedOut:
+	case c.Outcome == candTimedOut:
 		res.Outcome = RunTimedOut
-	case candFailed:
+	case c.Outcome == candFailed:
 		res.Outcome = RunFailed
-	case candNoChanges:
+	case c.Outcome == candNoChanges:
 		res.Outcome = RunNoChanges
-	case candChanges:
+	case c.Outcome == candChanges:
 		switch {
 		case o.NoApply:
 			res.Outcome = RunKept
@@ -524,7 +529,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 	// --no-apply always leaves the worktree; so do a failed apply and a
 	// failed or timed-out turn that changed something.
-	if c.wt != nil && (o.NoApply || c.collectFailed || (len(c.Files) > 0 && res.Outcome != RunApplied)) {
+	if c.wt != nil && (unconfirmed || o.NoApply || c.collectFailed || (len(c.Files) > 0 && res.Outcome != RunApplied)) {
 		c.keep()
 		res.Branch, res.Worktree = c.Branch, c.Worktree
 	}
