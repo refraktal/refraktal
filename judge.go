@@ -109,6 +109,11 @@ func planChecks(ctx context.Context, root, base string, cfg config.Config, confi
 	return p
 }
 
+// testDefinitions are files that can define how a repository's tests run,
+// flagged whatever the check command is.
+var testDefinitions = []string{"package.json", "pyproject.toml", "setup.cfg", "setup.py", "tox.ini", "pytest.ini", "noxfile.py",
+	"conftest.py", "Cargo.toml", "Rakefile", "Gemfile", "build.gradle", "build.gradle.kts", "pom.xml", "CMakeLists.txt", "justfile", "Taskfile.yml"}
+
 // makefiles are the names make looks for, in its order.
 var makefiles = []string{"GNUmakefile", "makefile", "Makefile"}
 
@@ -169,13 +174,15 @@ func (p checkPlan) touchesDefinition(files []string, diff []byte) string {
 			return "changes CI files (" + f + ")"
 		case p.config != "" && f == p.config:
 			return "changes the config file that defines the check"
-		case slices.Contains(makefiles, f) && (tools["make"] || p.Source == "make"):
+		case slices.Contains(makefiles, f):
 			return "changes a makefile (" + f + ")"
+		case slices.Contains(testDefinitions, f):
+			// Whatever the check command is: make test may run npm test,
+			// pytest or cargo test, which read these.
+			return "changes " + f + ", which can define how tests run"
 		case testFile(f):
 			return "changes test files (" + f + ")"
-		case f == "package.json" && (tools["npm"] || tools["yarn"] || tools["pnpm"]):
-			return "changes package.json, which defines the test script"
-		case f == "go.mod" && tools["go"] && goModToolchainChanged(diff):
+		case f == "go.mod" && goModToolchainChanged(diff):
 			return "changes the go or toolchain line of go.mod"
 		}
 	}

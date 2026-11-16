@@ -7,7 +7,7 @@
 #   bash scripts/m7check.sh          nest, depth and guard
 #     nest   the child drives a harness; show renders the tree
 #     depth  --depth 0: the child's depth is spent, it runs nothing
-#     guard  REFRAKTAL_NEST high, --depth generous: the nesting guard stops it
+#     guard  at an ancestor's nesting ceiling, --depth generous: the guard stops the child
 #
 # Prints a summary only. Output stays in .live: never commit it.
 set -u
@@ -60,10 +60,10 @@ one() { # one <name> <extra env...> -- <run flags...>
 case ${1:-all} in
   nest) one nest -- --usd 1 --mins 4 --turns 6 --depth 1 ;;
   depth) one depth -- --usd 1 --mins 2 --turns 6 --depth 0 ;;
-  guard) one guard REFRAKTAL_NEST=6 -- --usd 1 --mins 2 --turns 6 --depth 5 ;;
+  guard) one guard REFRAKTAL_NEST=6 REFRAKTAL_NEST_CEILING=6 -- --usd 1 --mins 2 --turns 6 --depth 5 ;;
   all)
     one nest -- --usd 1 --mins 4 --turns 6 --depth 1
     one depth -- --usd 1 --mins 2 --turns 6 --depth 0
-    one guard REFRAKTAL_NEST=6 -- --usd 1 --mins 2 --turns 6 --depth 5 ;;
+    one guard REFRAKTAL_NEST=6 REFRAKTAL_NEST_CEILING=6 -- --usd 1 --mins 2 --turns 6 --depth 5 ;;
   *) sed -n '2,12p' "$0"; exit 2 ;;
 esac

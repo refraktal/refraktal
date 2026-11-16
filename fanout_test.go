@@ -227,7 +227,7 @@ func TestFanOutBudgetExhaustedMidway(t *testing.T) {
 			n++
 		}
 	}
-	if n != 1 || res.Outcome != RunExhausted || res.ExitCode() != ExitBudget || !strings.Contains(res.Error, "judge") {
+	if n != 1 || res.Outcome != RunExhausted || res.ExitCode() != ExitBudget || !strings.Contains(res.Error, "every candidate") || res.Judge != nil {
 		t.Fatalf("exhausted children %d: %+v", n, res)
 	}
 	if res.Budget.Turns != 2 {
@@ -235,7 +235,7 @@ func TestFanOutBudgetExhaustedMidway(t *testing.T) {
 	}
 	// E2E finding: a judge that never started is not named in the verdict,
 	// and a run with no winner names no harness (not the pinned list).
-	if res.Verdict == nil || res.Verdict.Judge != "" || res.Verdict.JudgedOwn || res.Harness != "" {
+	if (res.Verdict != nil && (res.Verdict.Judge != "" || res.Verdict.JudgedOwn)) || res.Harness != "" {
 		t.Fatalf("verdict %+v, harness %q: no judge ran and nothing won", res.Verdict, res.Harness)
 	}
 }
@@ -295,6 +295,13 @@ func TestChecksRunSandboxed(t *testing.T) {
 		b, err := os.ReadFile(filepath.Join(r.repo, res.Run, name, "check-test.log"))
 		if err != nil {
 			t.Fatal(err)
+		}
+		// The seeded secrets are absent, checked on their own (not through
+		// the production allow-list, which would make this circular).
+		for _, secret := range []string{"GIT_REFRAKTAL_PROBE", "GEMINI_API_KEY", "OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY", "SOME_TOKEN"} {
+			if strings.Contains(string(b), "var "+secret+"\n") {
+				t.Errorf("%s: the check got the seeded secret %s", name, secret)
+			}
 		}
 		// Review (3): an allow-listed environment, nothing else.
 		for _, l := range strings.Split(string(b), "\n") {

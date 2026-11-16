@@ -220,6 +220,9 @@ func (o *DoctorOptions) defaults() error {
 		o.Neutral = filepath.Join(cache, "refraktal", "doctor")
 	}
 	if o.Harnesses == nil {
+		if err := noRealHarnessesInTests(); err != nil {
+			return err
+		}
 		cache, err := harness.DefaultCacheDir()
 		if err != nil {
 			return err

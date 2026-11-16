@@ -350,9 +350,16 @@ process-group kill does not reach them.
   live scripts set. In a test, the shell prefix may only be the test binary,
   whose `TestMain` calls `proc.MaybeShellPrefix` first.
 - **Nesting guard, independent of budgets.** Every child gets
-  `REFRAKTAL_NEST` one higher than its parent; `run` and `doctor` refuse to
-  start past `--depth` + 1 levels, so no recursion can fan out without bound
-  even if budgets are lost.
+  `REFRAKTAL_NEST` one higher than its parent, and every run passes down
+  `REFRAKTAL_NEST_CEILING`: the top run's own nest plus its `--depth`, only
+  ever lowered. A run past the inherited ceiling refuses to start, whatever
+  its remaining `--depth` (so `--depth 2` allows a grandchild, which may run
+  harnesses but not another Refraktal). A run with no inherited ceiling (a
+  top run, or one started by hand inside another) refuses past `--depth` + 1
+  levels. No recursion can fan out without bound even if budgets are lost.
+- **No test touches a real harness.** In a test binary, `run` and `doctor`
+  refuse to fall back to the real default harnesses (preparing them can
+  install adapters and run their CLIs) unless `REFRAKTAL_LIVE=1`.
 - Scrub the child's environment of the parent's session markers
   (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`).
 
@@ -519,10 +526,15 @@ changes. In order:
    `HEAD`), never a candidate's files, and the same command runs in every
    candidate. When more than one kind is detected, or none, there is no check
    (a notice says so).
-   - A candidate whose diff touches the check's own definition (any of the
-     three makefiles, `package.json`, the `go` or `toolchain` line of
-     `go.mod`, the config file when it is inside the repository, or CI files
-     under `.github/`) or the tests it runs (`*_test.go`, `test_*.py`,
+   - A candidate whose diff touches the check's own definition, whatever the
+     check command is (a `make test` can run `npm test`, `pytest` or `cargo
+     test`): any of the three makefiles; a test-definition file
+     (`package.json`, `pyproject.toml`, `setup.cfg`, `setup.py`, `tox.ini`,
+     `pytest.ini`, `noxfile.py`, `conftest.py`, `Cargo.toml`, `Rakefile`,
+     `Gemfile`, `build.gradle`, `build.gradle.kts`, `pom.xml`,
+     `CMakeLists.txt`, `justfile`, `Taskfile.yml`); the `go` or `toolchain`
+     line of `go.mod`; the config file when it is inside the repository; or
+     CI files under `.github/` or the tests it runs (`*_test.go`, `test_*.py`,
      `*_test.py`, `*.test.*`, `*.spec.*`, or anything under `test/`,
      `tests/` or `__tests__/`) is **flagged** in the verdict and cannot win
      on checks alone (with no check, nothing is flagged): its checks still run and a failure still rules it out, but a
@@ -598,7 +610,20 @@ marked. No winner (every candidate failed, or the judge said none or could
 not answer) exits 1 with the candidates kept. `--mins` running out during
 the candidates or the judge exits 2 (`timed_out`) with the candidates kept;
 a budget spent before the judge could start, or before every candidate
-could run, exits 2 (`budget_exhausted`), reported ahead of `no_changes`.
+could run, exits 2 (`budget_exhausted`) with the candidates kept: when a
+planned candidate could not run, nothing is chosen or applied, even from the
+candidates that did. This is reported ahead of `no_changes`.
+
+- **Collect after every child has stopped.** No candidate is collected until
+  every child of the run (each candidate harness) has stopped and been swept:
+  a still-running harness shares the repository's `.git` and could add a
+  filter to its configuration between driver discovery and the collect.
+- **A failed collect keeps the work.** If collecting a candidate fails (a
+  stale `index.lock`, say), its worktree and branch are kept and reported,
+  whatever the run's outcome; a failed collect never deletes work.
+- **A cancel stops before apply.** A cancel (Ctrl-C, or an ACP client's
+  `session/cancel`) that arrives during judging or collection stops before
+  the apply: the run fails (exit 1) and the result stays on its branch.
 
 ## ACP server and show (M7)
 
@@ -653,8 +678,8 @@ client, including a parent Refraktal, can drive it.
   prompts are added to the parent's `--turns`, so `--turns` covers the
   whole tree. `--depth` shrinks by one per level (a grant of depth 0 lets
   the child run harnesses but not another Refraktal), and the nesting
-  guard (`REFRAKTAL_NEST`) refuses any run past `--depth` + 1 levels,
-  whatever its grant says.
+  guard refuses any run past the ceiling the top run set
+  (`REFRAKTAL_NEST_CEILING`; see Processes), whatever its grant says.
 - **Nested run folders:** every child is given `REFRAKTAL_PARENT_RUN`, its
   scratch folder in the parent's run folder; a child Refraktal makes its
   run folder there (`<parent run>/refraktal/runs/<id>`), through pinned
@@ -774,7 +799,9 @@ A System 1 decision model chooses; harnesses are System 2.
   Safegit queries and post-turn Git operations have short timeouts, and
   worktree setup runs under the run's deadline.
   A nested Refraktal that should route with Gemini gets the key only when the
-  user sets `REFRAKTAL_PASS_GEMINI_KEY=1`.
+  user sets `REFRAKTAL_PASS_GEMINI_KEY=1`, and then only the `refraktal`
+  harness gets it: never an ordinary harness (its `pass_env` is the way to
+  give one a key).
 - Decision log: `.refraktal/decisions.jsonl` in the repository (gitignored),
   one record per decision with the run ID, the request input, every
   probability, the thresholds, the outcome and the provider's response; the
