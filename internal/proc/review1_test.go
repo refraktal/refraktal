@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"refraktal.dev/refraktal/internal/acp/acptest"
 )
 
 // startSessionWithMember starts a new session whose leader exits at once and
@@ -67,6 +69,7 @@ func appendRecord(t *testing.T, path string, p Proc) {
 // 1a. A recorded session seen empty during the run is dropped for good: if
 // its ID is later reused, the new session's processes are strangers.
 func TestASessionSeenEmptyIsNeverSwept(t *testing.T) {
+	acptest.StartSentinel(t)
 	const reused = 999999 // the recorded leader's PID; no such process exists
 	stranger := startSleep(t, &syscall.SysProcAttr{Setsid: true})
 	var reusedNow atomic.Bool // written by the test, read by the session poller
@@ -91,9 +94,13 @@ func TestASessionSeenEmptyIsNeverSwept(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gc := readPID(t, bufio.NewReader(c.Stdout))
-	defer syscall.Kill(gc, syscall.SIGKILL)
-	time.Sleep(300 * time.Millisecond) // several session polls see it empty
+	defer c.Shutdown(time.Second) // keep the lookup hook installed through cleanup
+	readPID(t, bufio.NewReader(c.Stdout))
+	acptest.WaitFor(t, 5*time.Second, "session permanently dropped after two empty observations", func() bool {
+		c.smu.Lock()
+		defer c.smu.Unlock()
+		return c.dropped[sessionKey(Proc{PID: reused, Start: "Mon Jan 1 00:00:00 2001"})]
+	})
 	reusedNow.Store(true)
 	c.Shutdown(time.Second)
 	if !running(stranger) {

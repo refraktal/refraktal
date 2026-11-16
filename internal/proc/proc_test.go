@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"refraktal.dev/refraktal/internal/acp/acptest"
 )
 
 const helperEnv = "PROC_TEST_HELPER"
@@ -21,6 +23,11 @@ const helperEnv = "PROC_TEST_HELPER"
 // set, it runs that helper instead of the tests.
 func TestMain(m *testing.M) {
 	MaybeShellPrefix()
+	acptest.RunIfTorture()
+	if os.Getenv(helperEnv) != "" {
+		// Old helpers are bounded too, even if a failed assertion skips shutdown.
+		time.AfterFunc(40*time.Second, func() { os.Exit(124) })
+	}
 	switch os.Getenv(helperEnv) {
 	case "":
 		os.Exit(m.Run())
