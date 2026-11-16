@@ -61,11 +61,16 @@ type Candidate struct {
 	LeftRunning    int                `json:"left_running"` // processes still running after shutdown
 	Unknown        int                `json:"unknown"`      // processes whose cleanup could not be confirmed
 
-	wt       *worktree.Worktree
-	root     *os.Root // the candidate's scratch folder in the run folder
-	result   worktree.Result
-	timedOut bool
-	swept    int
+	wt      *worktree.Worktree
+	pending bool // stopped, not collected yet
+	// collectFailed: the collect failed, so the worktree is kept whatever
+	// else happens (its work is never deleted).
+	collectFailed    bool
+	id, suffix, name string
+	root             *os.Root // the candidate's scratch folder in the run folder
+	result           worktree.Result
+	timedOut         bool
+	swept            int
 }
 
 // runEnv is what every child of one run shares.
@@ -83,6 +88,9 @@ type runEnv struct {
 	// rawNotice: a notice with a raw error or path, and its safe wording.
 	rawNotice func(raw, safe string)
 	subtree   string // Confine: the session's folder in the repository, or "" for all of it
+	// nestCeiling is the deepest REFRAKTAL_NEST any descendant may run at,
+	// passed down unchanged (REFRAKTAL_NEST_CEILING).
+	nestCeiling int
 
 	amu      sync.Mutex // this run's own figures (the ledger may be shared)
 	charged  float64
@@ -224,7 +232,7 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 		// may use.
 		// REFRAKTAL_PARENT_RUN: a child Refraktal makes its run folder here,
 		// inside this run's.
-		env:       append(childEnv(e.root, e.o, hcfg, e.run.ID+"-"+name, string(childBudget)), ParentRunEnv+"="+scratch),
+		env:       append(childEnv(e.root, e.o, hcfg, h.Name(), e.nestCeiling, e.run.ID+"-"+name, string(childBudget)), ParentRunEnv+"="+scratch),
 		prefixExe: e.o.ShellPrefix,
 		onPermission: func(_ context.Context, req acp.PermissionRequest) string {
 			d := pol.Decide(req)
@@ -356,17 +364,42 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 			"changed": len(c.Files), "allowed": c.Allowed, "denied": c.Denied})
 		return c
 	}
+	// Collected later (collect), once every child of the run has stopped.
+	c.id, c.suffix, c.name = id, sp.suffix, name
+	c.pending = true
+	return c
+}
+
+// collect commits what a candidate changed and classifies it. It runs only
+// once every child of the run has stopped and been swept: a still-running
+// harness shares the repository's .git and could change its configuration
+// (a filter, say) between driver discovery and the collect. A failed collect
+// keeps the candidate's worktree and branch: its work is never deleted.
+func (e *runEnv) collect(c *Candidate) {
+	if !c.pending || c.wt == nil {
+		return
+	}
+	c.pending = false
+	errEvent := func(code, raw string) map[string]any {
+		if c.root != nil {
+			runlog.AppendRaw(c.root, "stderr", code, raw)
+		}
+		return runlog.ErrorField(code, raw)
+	}
+	if testBeforeCollect != nil {
+		testBeforeCollect(c.wt.Dir)
+	}
 	// Retain the result even after cancellation, with a bounded collection.
 	collectCtx, cancelCollect := e.opCtx()
-	r, cerr := wt.Collect(collectCtx, "refraktal "+id+": "+firstLine(e.o.Task))
+	r, cerr := c.wt.Collect(collectCtx, "refraktal "+c.id+": "+firstLine(e.o.Task))
 	cancelCollect()
 	c.result, c.Files = r, r.Files
 	if len(r.Diff) > 0 {
-		e.run.WriteFile(resultName(sp.suffix), r.Diff, 0o600)
+		e.run.WriteFile(resultName(c.suffix), r.Diff, 0o600)
 	}
 	switch {
 	case cerr != nil:
-		c.Outcome, c.Error = candFailed, cerr.Error()
+		c.Outcome, c.Error, c.collectFailed = candFailed, cerr.Error(), true
 	case len(outside(e.subtree, r.Files)) > 0:
 		// Confined to the session's folder: a change outside it is refused.
 		c.Outcome = candFailed
@@ -374,9 +407,9 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 	case c.Outcome == candNoChanges && len(r.Files) > 0:
 		c.Outcome = candChanges
 	}
-	e.log.Event("child_end", map[string]any{"harness": name, "outcome": c.Outcome, "files": c.Files, "allowed": c.Allowed,
+	e.log.Event("collected", map[string]any{"harness": c.name, "files": len(c.Files), "failed": c.collectFailed})
+	e.log.Event("child_end", map[string]any{"harness": c.name, "outcome": c.Outcome, "files": c.Files, "allowed": c.Allowed,
 		"denied": c.Denied, "error": errEvent(c.Outcome, c.Error), "settlement": c.Settlement, "swept": c.swept})
-	return c
 }
 
 func resultName(suffix string) string {
@@ -409,6 +442,11 @@ func (e *runEnv) apply(c *Candidate) (string, error) {
 	if !time.Now().Before(e.ledger.Deadline()) {
 		return "", errMinsExpired
 	}
+	// A cancel (Ctrl-C, or the ACP client's session/cancel) that arrived
+	// during judging or collection stops here: nothing reaches the tree.
+	if e.ctx.Err() != nil {
+		return "", errCancelled
+	}
 	if out := outside(e.subtree, c.result.Files); len(out) > 0 {
 		return "", fmt.Errorf("the result changes %d files outside the session folder %s: refused", len(out), e.subtree)
 	}
@@ -419,6 +457,13 @@ func (e *runEnv) apply(c *Candidate) (string, error) {
 
 // errMinsExpired: --mins ran out before the winner could be applied.
 var errMinsExpired = errors.New("--mins ran out before the result could be applied; it is kept on its branch")
+
+// testBeforeCollect, set by tests, runs just before a candidate is collected
+// (with its worktree folder).
+var testBeforeCollect func(dir string)
+
+// errCancelled: the run was cancelled before the result could be applied.
+var errCancelled = errors.New("cancelled before the result could be applied; it is kept on its branch")
 
 // testBeforeApply, set by tests, runs just before the apply's deadline check.
 var testBeforeApply func(deadline time.Time)
@@ -488,6 +533,10 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 		}()
 	}
 	wg.Wait()
+	// Every child has stopped and been swept: only now is anything collected.
+	for _, c := range cands {
+		e.collect(c)
+	}
 	for i, c := range cands {
 		c.Label = string(rune('A' + i))
 	}
@@ -499,7 +548,7 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 			res.Error = why
 		}
 		for _, c := range cands {
-			if keepAll && (len(c.Files) > 0 || e.o.NoApply) {
+			if c.collectFailed || keepAll && (len(c.Files) > 0 || e.o.NoApply) {
 				c.keep()
 			}
 			e.drop(c)
@@ -532,9 +581,10 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 	case changed == 0 && unusable == len(cands):
 		finish(RunUnusable, "no harness could be started", false)
 		return
-	case changed == 0 && exhausted > 0:
-		// A spent budget is reported before "no changes": the run did not
-		// get to try everything it planned.
+	case exhausted > 0:
+		// A planned candidate could not run for budget: the run did not get
+		// to try everything it planned, so nothing is chosen or applied, even
+		// from the candidates that ran. Exit 2, candidates kept.
 		finish(RunExhausted, "budget exhausted before every candidate could run", true)
 		return
 	case changed == 0 && nochange > 0:
@@ -578,6 +628,9 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 				r := runCheck(cctx, c.wt.Dir, env, c.root, "check-"+s.Name+".log", e.o.LiveDir,
 					map[string]string{"run": e.run.ID, "harness": c.Harness, "check": s.Name}, s, plan.Timeout)
 				c.Checks = append(c.Checks, r)
+				if raw, safe, ok := r.cleanupNotice(c.Harness); ok {
+					e.rawNotice(raw, safe)
+				}
 				if r.Status != CheckPassed {
 					break
 				}
@@ -733,6 +786,11 @@ func (e *runEnv) fanOut(hs []harness.Harness, scoreKey string, res *RunResult) {
 		n, err := e.apply(winner)
 		if errors.Is(err, errMinsExpired) {
 			finish(RunTimedOut, err.Error(), true)
+			res.Branch, res.Worktree = winner.wtKept(res.Candidates)
+			return
+		}
+		if errors.Is(err, errCancelled) {
+			finish(RunFailed, err.Error(), true)
 			res.Branch, res.Worktree = winner.wtKept(res.Candidates)
 			return
 		}

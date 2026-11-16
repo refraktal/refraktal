@@ -94,6 +94,9 @@ func newRig(t *testing.T) rig {
 
 func (r rig) doctor(t *testing.T, hs ...harness.Harness) DoctorReport {
 	t.Helper()
+	if hs == nil {
+		hs = []harness.Harness{} // never the real defaults (nil) in a test
+	}
 	os.MkdirAll(r.root, 0o755)
 	rep, err := Doctor(context.Background(), DoctorOptions{Root: r.root, LiveDir: r.live, Harnesses: hs,
 		Getenv: func(string) string { return "" }, Timeout: 10 * time.Second, Neutral: r.neutral,

@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"testing"
 
 	"refraktal.dev/refraktal/internal/acp"
 	"refraktal.dev/refraktal/internal/budget"
@@ -192,6 +194,9 @@ func (o *RunOptions) defaults(ctx context.Context) (root string, err error) {
 		}
 	}
 	if o.Harnesses == nil {
+		if err := noRealHarnessesInTests(); err != nil {
+			return "", err
+		}
 		cache, err := harness.DefaultCacheDir()
 		if err != nil {
 			return "", err
@@ -252,9 +257,9 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	if err != nil {
 		return res, err
 	}
-	if n := proc.Nest(); n > o.Budget.Depth+1 {
-		res.Outcome = RunExhausted
-		res.Error = fmt.Sprintf("refusing to start: nested %d levels deep (%s), past --depth %d + 1", n, proc.NestEnv, o.Budget.Depth)
+	ceiling, err := nestCeiling(proc.Nest(), o.Budget.Depth)
+	if err != nil {
+		res.Outcome, res.Error = RunExhausted, err.Error()
 		return res, nil
 	}
 	ledger, err := o.Ledger, error(nil)
@@ -455,7 +460,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		return res, nil
 	}
 	env := &runEnv{ctx: ctx, o: o, root: root, cfg: cfg, ledger: ledger, prices: prices, run: run, log: log, base: base, notice: notice,
-		rawNotice: rawNotice}
+		rawNotice: rawNotice, nestCeiling: ceiling}
 	if o.Confine {
 		if env.subtree, err = subtreeOf(root, o.Dir); err != nil {
 			res.Error = err.Error()
@@ -473,6 +478,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 
 	// One candidate: nothing to choose, so it is applied as in M3.
 	c := env.child(hs[0], childSpec{prompt: o.Task})
+	env.collect(c) // the only child, and it has stopped
 	res.Harness, res.MCP, res.Allowed, res.Denied = c.Harness, c.MCP, c.Allowed, c.Denied
 	res.Model, res.Reply, res.StopReason, res.Usage, res.Cost = c.Model, c.Reply, c.StopReason, c.Usage, c.Cost
 	res.Settlement, res.Files, res.Error = c.Settlement, c.Files, c.Error
@@ -495,6 +501,8 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 		default:
 			if n, err := env.apply(c); errors.Is(err, errMinsExpired) {
 				res.Outcome, res.Error = RunTimedOut, err.Error()
+			} else if errors.Is(err, errCancelled) {
+				res.Outcome, res.Error = RunFailed, err.Error()
 			} else if err != nil {
 				res.Outcome, res.Error = RunApplyFailed, err.Error()
 			} else {
@@ -507,7 +515,7 @@ func Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 	// --no-apply always leaves the worktree; so do a failed apply and a
 	// failed or timed-out turn that changed something.
-	if c.wt != nil && (o.NoApply || (len(c.Files) > 0 && res.Outcome != RunApplied)) {
+	if c.wt != nil && (o.NoApply || c.collectFailed || (len(c.Files) > 0 && res.Outcome != RunApplied)) {
 		c.keep()
 		res.Branch, res.Worktree = c.Branch, c.Worktree
 	}
@@ -696,13 +704,47 @@ func RepoInput(root, task string) route.Input {
 	return in
 }
 
+// NestCeilingEnv is the deepest REFRAKTAL_NEST any run below may start at:
+// set by the top run (its own nest plus --depth) and only ever lowered.
+const NestCeilingEnv = "REFRAKTAL_NEST_CEILING"
+
+// nestCeiling applies the nesting guard and returns the ceiling to pass
+// down. With an inherited ceiling, a run past it refuses to start, whatever
+// its remaining --depth (a grandchild with depth 0 left is still allowed: it
+// may run harnesses, not another Refraktal). Without one (a top run, or a
+// Refraktal started by hand inside another), the old bound applies: refuse
+// past --depth + 1 levels.
+func nestCeiling(nest, depth int) (int, error) {
+	own := nest + depth
+	if c, err := strconv.Atoi(os.Getenv(NestCeilingEnv)); err == nil {
+		if nest > c {
+			return 0, fmt.Errorf("refusing to start: nested %d levels deep (%s), past the ceiling %d the top run set (%s)", nest, proc.NestEnv, c, NestCeilingEnv)
+		}
+		return min(own, c), nil
+	}
+	if nest > depth+1 {
+		return 0, fmt.Errorf("refusing to start: nested %d levels deep (%s), past --depth %d + 1", nest, proc.NestEnv, depth)
+	}
+	return own, nil
+}
+
+// noRealHarnessesInTests refuses, inside a test binary, to fall back to the
+// real harnesses (preparing them can install adapters and run their CLIs),
+// unless REFRAKTAL_LIVE=1: a test must name its harnesses.
+func noRealHarnessesInTests() error {
+	if testing.Testing() && os.Getenv("REFRAKTAL_LIVE") != "1" {
+		return errors.New("a test must name its harnesses: the real ones are never used in go test (REFRAKTAL_LIVE=1 allows them)")
+	}
+	return nil
+}
+
 // PassKeyEnv, set to 1 by the user, opts in to giving harness children the
 // routing key, for a nested Refraktal that should route with Gemini. Without
 // it no child gets an API key (proc.ScrubEnv).
 const PassKeyEnv = "REFRAKTAL_PASS_GEMINI_KEY"
 
-func childEnv(root string, o RunOptions, hcfg config.Harness, tag, budgetJSON string) []string {
-	env := []string{"REFRAKTAL_RUN=" + tag, "REFRAKTAL_BUDGET=" + budgetJSON}
+func childEnv(root string, o RunOptions, hcfg config.Harness, harnessName string, ceiling int, tag, budgetJSON string) []string {
+	env := []string{"REFRAKTAL_RUN=" + tag, "REFRAKTAL_BUDGET=" + budgetJSON, NestCeilingEnv + "=" + strconv.Itoa(ceiling)}
 	// Provider keys are scrubbed from every child (proc.ScrubEnv); the
 	// config's pass_env opts one harness in to a named key.
 	for _, k := range hcfg.PassEnv {
@@ -714,7 +756,9 @@ func childEnv(root string, o RunOptions, hcfg config.Harness, tag, budgetJSON st
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	if getenv(PassKeyEnv) == "1" {
+	// The opt-in passes the routing key to a nested Refraktal only: never to
+	// an ordinary harness (pass_env is the way to give one a key).
+	if getenv(PassKeyEnv) == "1" && harnessName == "refraktal" {
 		if key, _ := route.LoadKey(root, o.Getenv); key != "" {
 			env = append(env, route.KeyEnv+"="+key)
 		}

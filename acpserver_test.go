@@ -381,7 +381,8 @@ func TestNestingGuardStopsAChild(t *testing.T) {
 	r := newRunRig(t)
 	marker := filepath.Join(t.TempDir(), "child-prompts")
 	child := r.refraktal(r.acpChildSpec("claude", fakeSpec{Name: "claude", Env: []string{"ACPTEST_PROMPTS=" + marker}}))
-	t.Setenv("REFRAKTAL_NEST", "6") // the parent may start (6 <= 5 + 1); its child is at 7
+	t.Setenv("REFRAKTAL_NEST", "6") // the parent runs six levels deep...
+	t.Setenv(NestCeilingEnv, "6")   // ...at the ceiling an ancestor set: its child (7) is past it
 	res := r.run(t, fake{}, func(o *RunOptions) {
 		o.Harness, o.Harnesses = "refraktal", []harness.Harness{child}
 		o.Budget.Depth = 5 // the child's grant: depth 4, so only the guard stops it
