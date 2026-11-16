@@ -156,14 +156,18 @@ func Doctor(ctx context.Context, o DoctorOptions) (DoctorReport, error) {
 	}
 	log.Procs("cleanup_killed", cr.Kill.Killed)
 
-	rep.Decider = checkDecider(ctx, o)
-
 	cfg, err := config.Load(o.ConfigPath)
 	if err != nil {
+		rep.Decider = checkDecider(ctx, o)
 		return rep, err
 	}
 	rep.Harnesses = make([]HarnessCheck, len(o.Harnesses))
 	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		rep.Decider = checkDecider(ctx, o)
+	}()
 	for i, h := range o.Harnesses {
 		wg.Add(1)
 		go func() {
