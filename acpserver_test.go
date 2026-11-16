@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -670,5 +671,58 @@ func TestServeACPNoticesCarryNoRawErrors(t *testing.T) {
 		if strings.Contains(got, raw) {
 			t.Errorf("the client got %q in a notice", raw)
 		}
+	}
+}
+
+// Review M7 (6): show walks the run tree through pinned handles and refuses
+// a symlink at every component, .refraktal itself included.
+func TestShowRefusesASymlinkedRefraktalFolder(t *testing.T) {
+	root, other := t.TempDir(), t.TempDir()
+	run := filepath.Join(other, "runs", "20260101-000000-cccccc")
+	os.MkdirAll(run, 0o755)
+	os.WriteFile(filepath.Join(run, "events.jsonl"), []byte(`{"event":"run_end","outcome":"applied"}`+"\n"), 0o644)
+	os.Symlink(other, filepath.Join(root, ".refraktal"))
+	if sr, err := Show(root, ""); err == nil {
+		t.Fatalf("followed a symlinked .refraktal: %+v", sr)
+	}
+}
+
+// Review M7 (8): show's walk has global caps (bytes, events, directory
+// entries, depth); past one it stops and says the output is truncated.
+func TestShowHasGlobalCaps(t *testing.T) {
+	root := t.TempDir()
+	run := filepath.Join(root, ".refraktal", "runs", "20260101-000000-dddddd")
+	os.MkdirAll(run, 0o755)
+	var log strings.Builder
+	for i := 0; i < 50; i++ {
+		log.WriteString(`{"event":"child_end","harness":"h` + strconv.Itoa(i) + `","outcome":"failed"}` + "\n")
+	}
+	os.WriteFile(filepath.Join(run, "events.jsonl"), []byte(log.String()), 0o644)
+	for i := 0; i < 6; i++ {
+		sub := filepath.Join(run, "refraktal", "runs", "n"+strconv.Itoa(i))
+		os.MkdirAll(sub, 0o755)
+		os.WriteFile(filepath.Join(sub, "events.jsonl"), []byte(`{"event":"run_end","outcome":"applied"}`+"\n"), 0o644)
+	}
+	defer func(e, n int) { showMaxEvents, showMaxEntries = e, n }(showMaxEvents, showMaxEntries)
+	showMaxEvents, showMaxEntries = 10, 3
+	sr, err := Show(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sr.Truncated || len(sr.Child) > 10 || len(sr.Nested) > 3 {
+		t.Fatalf("caps not applied: truncated=%v children=%d nested=%d", sr.Truncated, len(sr.Child), len(sr.Nested))
+	}
+	var text strings.Builder
+	WriteShowText(&text, sr)
+	if !strings.Contains(text.String(), "truncated") {
+		t.Fatalf("no truncation note:\n%s", text.String())
+	}
+}
+
+// Review M7 (11): an error names a run only after cleaning it.
+func TestShowErrorsAreClean(t *testing.T) {
+	_, err := Show(t.TempDir(), "x\x1b[31mred")
+	if err == nil || strings.ContainsRune(err.Error(), 0x1b) {
+		t.Fatalf("error %q", err)
 	}
 }

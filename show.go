@@ -33,7 +33,17 @@ type ShowRun struct {
 	Branch  string         `json:"branch,omitempty"`
 	Costs   ShowCosts      `json:"costs"`
 	Nested  []ShowRun      `json:"nested,omitempty"`
+	// Truncated: one of show's limits (bytes, events, directory entries,
+	// nesting) was reached, so this run, or the tree below it, is cut short.
+	Truncated bool `json:"truncated,omitempty"`
 }
+
+// show's limits across one whole walk (variables for tests).
+var (
+	showMaxBytes   int64 = 64 << 20 // run-log bytes read
+	showMaxEvents        = 200_000  // events parsed
+	showMaxEntries       = 10_000   // directory entries listed
+)
 
 // ShowRoute is the routing decision, when the router chose.
 type ShowRoute struct {
@@ -68,56 +78,155 @@ var ErrNoRun = errors.New("no run found")
 
 // Show reads a run from the repository at root: the run with ID id, or the
 // latest. It renders child runs nested in it.
+//
+// Run logs are untrusted (a child process wrote the nested ones). The walk
+// opens every folder through its parent's pinned handle, refuses a symlink
+// at every component (.refraktal itself included) and checks that what it
+// opened is what it inspected, and it stops at global limits on bytes,
+// events, directory entries and depth.
 func Show(root, id string) (ShowRun, error) {
-	runs := filepath.Join(root, ".refraktal", "runs")
+	if id != "" && (id != filepath.Base(id) || strings.HasPrefix(id, ".")) {
+		return ShowRun{}, fmt.Errorf("%q is not a run ID", clean(id))
+	}
+	repo, err := os.OpenRoot(root)
+	if err != nil {
+		return ShowRun{}, ErrNoRun
+	}
+	defer repo.Close()
+	base, err := openDir(repo, ".refraktal")
+	if err != nil {
+		return ShowRun{}, ErrNoRun
+	}
+	defer base.Close()
+	runs, err := openDir(base, "runs")
+	if err != nil {
+		return ShowRun{}, ErrNoRun
+	}
+	defer runs.Close()
+	w := &walk{bytes: showMaxBytes, events: showMaxEvents, entries: showMaxEntries}
 	if id == "" {
-		entries, err := os.ReadDir(runs)
-		if err != nil {
-			return ShowRun{}, ErrNoRun
-		}
-		var ids []string
-		for _, e := range entries {
-			if e.IsDir() {
-				ids = append(ids, e.Name())
-			}
-		}
+		ids := w.dirs(runs)
 		if len(ids) == 0 {
 			return ShowRun{}, ErrNoRun
 		}
-		sort.Strings(ids)
 		id = ids[len(ids)-1]
 	}
-	if id != filepath.Base(id) || strings.HasPrefix(id, ".") {
-		return ShowRun{}, fmt.Errorf("%q is not a run ID", id)
-	}
-	dir := filepath.Join(runs, id)
-	if !realDir(dir) || !realDir(runs) {
-		return ShowRun{}, fmt.Errorf("%w: %s", ErrNoRun, id)
-	}
-	r, err := readRun(dir, 0)
+	d, err := openDir(runs, id)
 	if err != nil {
-		return r, err
+		return ShowRun{}, fmt.Errorf("%w: %s", ErrNoRun, clean(id))
 	}
-	r.Dir = filepath.Join(".refraktal", "runs", id)
-	return r, nil
+	defer d.Close()
+	return readRun(d, id, filepath.Join(".refraktal", "runs", id), 0, w)
 }
 
 // maxNesting bounds how deep show follows nested runs.
 const maxNesting = 8
 
-func readRun(dir string, depth int) (ShowRun, error) {
-	r := ShowRun{ID: clean(filepath.Base(dir)), Dir: dir, Costs: ShowCosts{BySource: map[string]float64{}}}
-	if fi, err := os.Lstat(filepath.Join(dir, "events.jsonl")); err != nil || !fi.Mode().IsRegular() {
-		return r, fmt.Errorf("%w: %s has no run log", ErrNoRun, r.ID)
+// walk is what is left of show's limits for one whole walk.
+type walk struct {
+	bytes     int64
+	events    int
+	entries   int
+	truncated bool // a limit was reached while reading the current run
+}
+
+// dirs lists the real directories in d, sorted, within the entry limit.
+func (w *walk) dirs(d *os.Root) []string {
+	if w.entries <= 0 {
+		w.truncated = true
+		return nil
 	}
-	f, err := os.Open(filepath.Join(dir, "events.jsonl"))
+	f, err := d.Open(".")
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	entries, _ := f.ReadDir(w.entries + 1)
+	if len(entries) > w.entries {
+		entries, w.truncated = entries[:w.entries], true
+	}
+	w.entries -= len(entries)
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() { // a symlink is not a directory entry here
+			out = append(out, e.Name())
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// openDir opens name in parent only if it is a real directory (not a
+// symlink) and the folder opened is the one inspected.
+func openDir(parent *os.Root, name string) (*os.Root, error) {
+	fi, err := parent.Lstat(name)
+	if err != nil || !fi.IsDir() {
+		return nil, ErrNoRun
+	}
+	d, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, ErrNoRun
+	}
+	if st, err := d.Stat("."); err != nil || !os.SameFile(fi, st) {
+		d.Close()
+		return nil, ErrNoRun
+	}
+	return d, nil
+}
+
+// openFile opens name in parent only if it is a regular file (not a
+// symlink) and the file opened is the one inspected.
+func openFile(parent *os.Root, name string) (*os.File, error) {
+	fi, err := parent.Lstat(name)
+	if err != nil || !fi.Mode().IsRegular() {
+		return nil, ErrNoRun
+	}
+	f, err := parent.Open(name)
+	if err != nil {
+		return nil, ErrNoRun
+	}
+	if st, err := f.Stat(); err != nil || !os.SameFile(fi, st) {
+		f.Close()
+		return nil, ErrNoRun
+	}
+	return f, nil
+}
+
+// budgeted reads at most the walk's remaining bytes.
+type budgeted struct {
+	r io.Reader
+	w *walk
+}
+
+func (b *budgeted) Read(p []byte) (int, error) {
+	if b.w.bytes <= 0 {
+		b.w.truncated = true
+		return 0, io.EOF
+	}
+	if int64(len(p)) > b.w.bytes {
+		p = p[:b.w.bytes]
+	}
+	n, err := b.r.Read(p)
+	b.w.bytes -= int64(n)
+	return n, err
+}
+
+func readRun(d *os.Root, name, dir string, depth int, w *walk) (ShowRun, error) {
+	r := ShowRun{ID: clean(name), Dir: dir, Costs: ShowCosts{BySource: map[string]float64{}}}
+	f, err := openFile(d, "events.jsonl")
 	if err != nil {
 		return r, fmt.Errorf("%w: %s has no run log", ErrNoRun, r.ID)
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
+	w.truncated = false
+	sc := bufio.NewScanner(&budgeted{r: f, w: w})
 	sc.Buffer(make([]byte, 64<<10), 16<<20)
 	for sc.Scan() {
+		if w.events <= 0 {
+			w.truncated = true
+			break
+		}
+		w.events--
 		var e map[string]json.RawMessage
 		if json.Unmarshal(sc.Bytes(), &e) != nil {
 			continue
@@ -185,37 +294,41 @@ func readRun(dir string, depth int) (ShowRun, error) {
 			}
 		}
 	}
+	r.Truncated = w.truncated // this run's own log was cut short
 	// A child that ran but logged no child_end (it failed to start) still
 	// shows through its turn; fold child_run-only entries into their child.
 	r.Child = mergeChildren(r.Child)
-	if depth < maxNesting {
-		// Nested runs: <dir>/refraktal/runs/<id>, made by a child Refraktal in
-		// the refraktal harness's scratch folder. Nothing else is followed (a
-		// harness writes its own scratch folder), and never a symlink.
-		base := filepath.Join(dir, "refraktal", "runs")
-		if realDir(filepath.Join(dir, "refraktal")) && realDir(base) {
-			entries, _ := os.ReadDir(base)
-			for _, e := range entries {
-				sub := filepath.Join(base, e.Name())
-				if !realDir(sub) {
-					continue
+	// Nested runs: <dir>/refraktal/runs/<id>, made by a child Refraktal in
+	// the refraktal harness's scratch folder. Nothing else is followed (a
+	// harness writes its own scratch folder), never through a symlink.
+	if rr, err := openDir(d, "refraktal"); err == nil {
+		defer rr.Close()
+		if runs, err := openDir(rr, "runs"); err == nil {
+			defer runs.Close()
+			if depth >= maxNesting {
+				r.Truncated = true
+			} else {
+				w.truncated = false
+				names := w.dirs(runs)
+				r.Truncated = r.Truncated || w.truncated
+				for _, n := range names {
+					sub, err := openDir(runs, n)
+					if err != nil {
+						continue
+					}
+					nr, err := readRun(sub, n, filepath.Join(dir, "refraktal", "runs", n), depth+1, w)
+					sub.Close()
+					if err != nil {
+						continue
+					}
+					nr.Via = "refraktal"
+					r.Truncated = r.Truncated || nr.Truncated
+					r.Nested = append(r.Nested, nr)
 				}
-				n, err := readRun(sub, depth+1)
-				if err != nil {
-					continue
-				}
-				n.Via, n.Dir = "refraktal", sub
-				r.Nested = append(r.Nested, n)
 			}
 		}
 	}
 	return r, sc.Err()
-}
-
-// realDir reports whether path is a directory and not a symlink.
-func realDir(path string) bool {
-	fi, err := os.Lstat(path)
-	return err == nil && fi.IsDir()
 }
 
 // clean drops, from a value read from a run log, every control character
@@ -384,6 +497,9 @@ func writeShow(w io.Writer, r ShowRun, in string) {
 	}
 	if r.Branch != "" {
 		fmt.Fprintf(w, "%sbranch: %s\n", in2, r.Branch)
+	}
+	if r.Truncated {
+		fmt.Fprintf(w, "%s(truncated: show's limits on log size, events, folder entries or nesting were reached)\n", in2)
 	}
 	for _, n := range r.Nested {
 		writeShow(w, n, in2)
