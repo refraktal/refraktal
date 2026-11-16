@@ -65,6 +65,9 @@ const (
 	// Pre-run-5: runEnv.collect overwrote a budget-stopped candidate's
 	// outcome with failed when its collect failed.
 	lifecycleCollectErasesBudget lifecycleMutation = "collect failure erases budget exhaustion"
+	// Pre-run-5: Worktree.Apply cleared its snapshot before the post-apply
+	// LFS attribute check, so that check's failure left the patch applied.
+	lifecycleClearBeforeLFS lifecycleMutation = "clear snapshot before the post-apply check"
 )
 
 // budgetStop reports whether candidate i still counts as stopped for budget
@@ -92,6 +95,9 @@ func lifecycleModel(mutation lifecycleMutation, filesystemErrors bool) model[lif
 			}
 			if s.Stage >= 7 && s.Tree != 0 && s.Tree != 3 {
 				return fmt.Errorf("tree half-applied")
+			}
+			if s.Stage >= 7 && s.ApplyFailed && s.Tree != 0 {
+				return fmt.Errorf("apply reported failure over a changed tree")
 			}
 			if s.Interrupted {
 				return fmt.Errorf("parent cancellation interrupted an admitted apply")
@@ -325,12 +331,18 @@ func lifecycleModel(mutation lifecycleMutation, filesystemErrors bool) model[lif
 						}
 						add("second file write fails", n)
 					}
-					// Worktree.Apply (internal/worktree/worktree.go) clears its
-					// snapshot after successful git apply. A later LFS lookup may
-					// fail, but the whole patch is already applied in that case.
+					// Worktree.Apply (internal/worktree/worktree.go) keeps its
+					// snapshot through the post-apply LFS attribute check and
+					// clears it only once that passes; its failure rolls back.
 					for _, postCheck := range []bool{false, true} {
 						n := s
-						n.Tree, n.Stage, n.ApplyFailed = 3, 7, !postCheck
+						n.Tree, n.Stage = 3, 7
+						if !postCheck {
+							n.ApplyFailed = true
+							if mutation != lifecycleClearBeforeLFS {
+								n.Stage, n.WritePhase = 6, 3
+							}
+						}
 						add(fmt.Sprintf("write complete patch; LFS lookup succeeds=%t", postCheck), n)
 					}
 				case 3:
@@ -397,7 +409,7 @@ func TestRunLifecycleFaithful(t *testing.T) {
 	for _, filesystemErrors := range []bool{false, true} {
 		t.Run(fmt.Sprintf("filesystem_errors=%t", filesystemErrors), func(t *testing.T) {
 			m := lifecycleModel(lifecycleFaithful, filesystemErrors)
-			var budgetOverCollect bool
+			var budgetOverCollect, postCheckRollback bool
 			var applied, failedCollectKept, failedTurnKept, unusedFailed, cancelDuringApply, judged, single, fan, noApply, rollback bool
 			next := m.Next
 			m.Next = func(s lifecycleState) []transition[lifecycleState] {
@@ -407,6 +419,7 @@ func TestRunLifecycleFaithful(t *testing.T) {
 				single, fan = single || s.Count == 1, fan || s.Count == 2
 				noApply = noApply || s.Stage == 8 && s.NoApply && s.Winner != 0 && s.Tree == 0
 				rollback = rollback || s.RolledBack && s.Tree == 0
+				postCheckRollback = postCheckRollback || s.RolledBack && s.Tree == 0 && !filesystemErrors
 				for i := range s.Collect {
 					budgetOverCollect = budgetOverCollect || s.Stage == 8 && s.Count == 2 && s.Budget[i] && s.Collect[i] == 2 && s.Outcome == 5 && s.Kept[i]
 					failedCollectKept = failedCollectKept || s.Collect[i] == 2 && s.Kept[i]
@@ -420,8 +433,8 @@ func TestRunLifecycleFaithful(t *testing.T) {
 			if r.Violation != nil {
 				t.Fatal(r.String())
 			}
-			if !applied || !failedCollectKept || !failedTurnKept || !unusedFailed || !cancelDuringApply || !judged || !single || !fan || !noApply || filesystemErrors && !rollback || !budgetOverCollect {
-				t.Fatalf("missing witness: budget_over_collect=%t apply=%t collect_keep=%t failed_turn_keep=%t unused_failure=%t during_apply=%t judge=%t single=%t fan=%t no_apply=%t rollback=%t", budgetOverCollect, applied, failedCollectKept, failedTurnKept, unusedFailed, cancelDuringApply, judged, single, fan, noApply, rollback)
+			if !applied || !failedCollectKept || !failedTurnKept || !unusedFailed || !cancelDuringApply || !judged || !single || !fan || !noApply || filesystemErrors && !rollback || !budgetOverCollect || !filesystemErrors && !postCheckRollback {
+				t.Fatalf("missing witness: post_check_rollback=%t budget_over_collect=%t apply=%t collect_keep=%t failed_turn_keep=%t unused_failure=%t during_apply=%t judge=%t single=%t fan=%t no_apply=%t rollback=%t", postCheckRollback, budgetOverCollect, applied, failedCollectKept, failedTurnKept, unusedFailed, cancelDuringApply, judged, single, fan, noApply, rollback)
 			}
 		})
 	}
@@ -442,6 +455,7 @@ func TestRunLifecycleMutations(t *testing.T) {
 		{lifecycleDeleteFailed, "deleted after failed turn with changes"},
 		{lifecycleNoFailedOutcome, "unused failed changes did not make run fail"},
 		{lifecycleCollectErasesBudget, "budget exhaustion or --mins expiry overridden by a collect failure"},
+		{lifecycleClearBeforeLFS, "apply reported failure over a changed tree"},
 	} {
 		t.Run(string(tc.mutation), func(t *testing.T) {
 			r := check(lifecycleModel(tc.mutation, true))

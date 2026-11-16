@@ -687,8 +687,10 @@ candidates that did. This is reported ahead of `no_changes`.
   the user's tree half-applied. Before the apply, every path the patch
   touches is snapshotted into `apply-snapshot[-<harness>]/` in the run
   folder, through its pinned root: content, permissions, link target, file
-  or folder or absent, and the permissions of the folders above. On any
-  apply failure every path is restored byte for byte, the files and folders
+  or folder or absent, and the permissions of the folders above. The
+  snapshot is kept until every step after the apply (the LFS attribute
+  check) has also passed. On any failure of the apply or of those steps
+  every path is restored byte for byte, the files and folders
   the apply created are removed, and each path is checked against the
   snapshot; the run is `apply_failed` (exit 1) and the result stays on its
   branch. The restore works through `os.Root` and never through a symlink

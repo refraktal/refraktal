@@ -247,3 +247,30 @@ func TestRestoreNeverFollowsALinkOut(t *testing.T) {
 		t.Fatalf("not restored:\n%s\n(%v)", strings.Join(d, "\n"), err)
 	}
 }
+
+// Run-5 #5: a step after git apply (the LFS attribute check, here failing
+// because the context is cancelled) keeps the snapshot until it passes, and
+// its failure rolls back like an apply failure.
+func TestPostApplyFailureIsRolledBack(t *testing.T) {
+	r, w, res := richResult(t)
+	before := treeState(t, r)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	testAfterGitApply = func(string) error { cancel(); return nil }
+	defer func() { testAfterGitApply = nil }()
+	store := snapStore(t)
+	_, err := w.Apply(ctx, res, store)
+	if err == nil {
+		t.Fatal("the post-apply check succeeded on a cancelled context")
+	}
+	if d := diffStates(before, treeState(t, r)); len(d) > 0 {
+		t.Fatalf("the failed post-apply step left the tree changed:\n%s\n(error: %v)", strings.Join(d, "\n"), err)
+	}
+	var ae *ApplyError
+	if !errors.As(err, &ae) || !ae.Restored {
+		t.Fatalf("want a restored ApplyError, got %v", err)
+	}
+	if !empty(store.Name()) {
+		t.Error("the snapshot was left after a complete restore")
+	}
+}

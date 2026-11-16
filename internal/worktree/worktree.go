@@ -240,7 +240,8 @@ func (w Worktree) Collect(ctx context.Context, message string) (Result, error) {
 // it. It checks first, so a diff that does not apply cleanly changes nothing,
 // and it is never left half-applied: every path the patch touches is
 // snapshotted into snapshot (an empty folder, pinned; the caller puts it in
-// the run folder) and restored if the apply fails (*ApplyError). The folder
+// the run folder) and restored if the apply, or any step after it (the LFS
+// attribute check), fails (*ApplyError). The folder
 // is emptied unless a restore failed, when it holds the originals.
 // It returns a notice naming LFS paths left as pointers, or an empty string.
 func (w Worktree) Apply(ctx context.Context, r Result, snapshot *os.Root) (string, error) {
@@ -279,15 +280,17 @@ func (w Worktree) Apply(ctx context.Context, r Result, snapshot *os.Root) (strin
 	if err == nil && testAfterGitApply != nil {
 		err = testAfterGitApply(w.Repo)
 	}
+	if err == nil {
+		// Include both the user's attributes and attributes added by the
+		// patch; removing an attribute must not suppress the notice either.
+		err = checkLFS()
+	}
+	// The snapshot is kept until every step after the apply has passed: a
+	// failure of any of them rolls back like a failed apply.
 	if err != nil {
 		return "", snap.rollback(w.Repo, err)
 	}
 	snap.clear()
-	// Include both the user's attributes and attributes added by the patch;
-	// removing an attribute must not suppress the notice either.
-	if err := checkLFS(); err != nil {
-		return "", err
-	}
 	if len(lfs) > 0 {
 		// git lfs checkout does not help here: it works from the index, and the
 		// patch is applied to the working tree only. The objects are local.
