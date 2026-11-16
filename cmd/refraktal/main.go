@@ -5,19 +5,24 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"math"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"refraktal.dev/refraktal"
 	"refraktal.dev/refraktal/internal/budget"
 	"refraktal.dev/refraktal/internal/proc"
 )
+
+const exitInterrupted = 130
 
 const usage = `usage: refraktal <command> [flags]        task comes from the arg, stdin, or both
   run [task]      plan, dispatch, collect, judge; apply the winner to the tree
@@ -189,16 +194,9 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 	turns := fs.Int("turns", d.Turns, "prompts Refraktal may send to harnesses")
 	mins := fs.Float64("mins", d.Wall.Minutes(), "wall-clock minutes; never unlimited")
 	depth := fs.Int("depth", d.Depth, "levels of Refraktal that may nest below this run")
-	var words []string
-	for {
-		if err := fs.Parse(args); err != nil {
-			return refraktal.ExitNothingUsable
-		}
-		if fs.NArg() == 0 {
-			break
-		}
-		words = append(words, fs.Arg(0))
-		args = fs.Args()[1:]
+	words, err := parseTaskArgs(fs, args)
+	if err != nil {
+		return refraktal.ExitNothingUsable
 	}
 	switch {
 	case *fan < 0:
@@ -214,9 +212,12 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 		fmt.Fprintln(stderr, "refraktal run: --usd and --turns must not be negative, and --mins must be more than 0")
 		return refraktal.ExitNothingUsable
 	}
-	task, err := readTask(words, stdin)
+	task, err := readTask(ctx, words, stdin)
 	if err != nil {
 		fmt.Fprintf(stderr, "refraktal run: reading stdin: %v\n", err)
+		if errors.Is(err, context.Canceled) {
+			return exitInterrupted
+		}
 		return refraktal.ExitNothingUsable
 	}
 	enc := json.NewEncoder(stdout)
@@ -312,10 +313,33 @@ func runCmd(ctx context.Context, args []string, stdin *os.File, stdout, stderr i
 	return res.ExitCode()
 }
 
+// parseTaskArgs accepts flags between task words, up to the first --. The
+// remaining arguments are task words, even when they look like known flags.
+func parseTaskArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+	var literal []string
+	if i := slices.Index(args, "--"); i >= 0 {
+		args, literal = args[:i], args[i+1:]
+	}
+	var words []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		if fs.NArg() == 0 {
+			return append(words, literal...), nil
+		}
+		words = append(words, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+}
+
 // readTask joins the task words and, when stdin is a pipe or a file, what it
 // holds. A terminal or a socket is never read: an IDE or agent tool may hand
 // over a socket that never closes, and reading it would hang.
-func readTask(words []string, stdin *os.File) (string, error) {
+func readTask(ctx context.Context, words []string, stdin *os.File) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	task := strings.Join(words, " ")
 	if stdin == nil {
 		return task, nil
@@ -324,7 +348,15 @@ func readTask(words []string, stdin *os.File) (string, error) {
 	if err != nil || (fi.Mode()&os.ModeNamedPipe == 0 && !fi.Mode().IsRegular()) {
 		return task, nil
 	}
-	b, err := io.ReadAll(stdin)
+	var b []byte
+	if fi.Mode()&os.ModeNamedPipe != 0 {
+		b, err = readTaskPipe(ctx, stdin)
+	} else {
+		b, err = io.ReadAll(stdin)
+	}
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
 	if err != nil {
 		return "", err
 	}
@@ -332,6 +364,57 @@ func readTask(words []string, stdin *os.File) (string, error) {
 		task = strings.TrimSpace(task + "\n\n" + in)
 	}
 	return task, nil
+}
+
+// readTaskPipe uses a private, pollable descriptor so cancellation can close
+// the read without closing the caller's stdin or leaving a blocked goroutine.
+// Inherited stdin can be a blocking descriptor, unlike an os.Pipe reader.
+func readTaskPipe(ctx context.Context, stdin *os.File) ([]byte, error) {
+	raw, err := stdin.SyscallConn()
+	if err != nil {
+		return nil, err
+	}
+	fd := -1
+	var flags uintptr
+	var dupErr error
+	syscall.ForkLock.RLock()
+	err = raw.Control(func(original uintptr) {
+		var errno syscall.Errno
+		flags, _, errno = syscall.Syscall(syscall.SYS_FCNTL, original, syscall.F_GETFL, 0)
+		if errno != 0 {
+			dupErr = errno
+			return
+		}
+		fd, dupErr = syscall.Dup(int(original))
+		if dupErr == nil {
+			syscall.CloseOnExec(fd)
+			dupErr = syscall.SetNonblock(fd, true)
+		}
+	})
+	syscall.ForkLock.RUnlock()
+	if err != nil || dupErr != nil {
+		if fd >= 0 {
+			_ = syscall.Close(fd)
+		}
+		return nil, errors.Join(err, dupErr)
+	}
+	// Dup shares file status flags. Restore the caller's original mode after
+	// our reader and cancellation callback have both finished.
+	defer raw.Control(func(original uintptr) {
+		_ = syscall.SetNonblock(int(original), flags&syscall.O_NONBLOCK != 0)
+	})
+	reader := os.NewFile(uintptr(fd), stdin.Name())
+	defer reader.Close()
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = reader.Close()
+		close(closed)
+	})
+	b, err := io.ReadAll(reader)
+	if !stop() {
+		<-closed
+	}
+	return b, err
 }
 
 // selfPath is this binary, which handles the shell-prefix helper mode in

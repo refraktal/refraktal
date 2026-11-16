@@ -80,14 +80,21 @@ fi
 [ "$got" = "$want" ] || fail "checksum mismatch for $archive: refusing to install"
 
 tar -xzf "$tmp/$archive" -C "$tmp" refraktal || fail "cannot unpack $archive"
-mkdir -p "$dir"
+mkdir -p "$dir" || fail "cannot create install directory $dir"
+dest="$dir/refraktal"
+[ ! -d "$dest" ] || fail "destination $dest is a directory"
+[ -w "$dir" ] || fail "install directory $dir is not writable"
+if [ -e "$dest" ] && [ ! -w "$dest" ]; then
+  fail "destination $dest is not writable"
+fi
 # A fresh staging file in the target folder (never a fixed name, which a
 # planted symlink could redirect), then an atomic rename: a running
 # refraktal keeps its old file.
 stage=$(mktemp "$dir/.refraktal.XXXXXX") || fail "cannot write to $dir"
 cat "$tmp/refraktal" > "$stage"
 chmod 0755 "$stage"
-mv -f "$stage" "$dir/refraktal"
+mv -f "$stage" "$dest" || fail "cannot install $dest"
+[ -f "$dest" ] && [ -x "$dest" ] || fail "destination $dest is not an executable file"
 stage=""
 echo "refraktal install: installed $dir/refraktal"
 case ":$PATH:" in

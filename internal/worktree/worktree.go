@@ -88,17 +88,26 @@ func readGitfile(dir string) (string, error) {
 // parallel, one can read another's half-written administrative folder and
 // fail ("failed to read .git/worktrees/<id>/commondir"). Within one
 // process only: two Refraktal runs on one repository are not serialised.
-var repoLocks sync.Map // canonical repository path -> *sync.Mutex
+var repoLocks sync.Map // canonical repository path -> chan struct{}
 
 func lockRepo(repo string) (unlock func()) {
+	unlock, _ = lockRepoContext(context.Background(), repo)
+	return unlock
+}
+
+func lockRepoContext(ctx context.Context, repo string) (func(), error) {
 	key := repo
 	if r, err := filepath.EvalSymlinks(repo); err == nil {
 		key = r
 	}
-	m, _ := repoLocks.LoadOrStore(key, &sync.Mutex{})
-	mu := m.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+	m, _ := repoLocks.LoadOrStore(key, make(chan struct{}, 1))
+	lock := m.(chan struct{})
+	select {
+	case lock <- struct{}{}:
+		return func() { <-lock }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // Root returns the top level of the git repository containing dir.
@@ -137,6 +146,8 @@ func Create(ctx context.Context, repo, dir, branch string) (Worktree, error) {
 
 // CreateAt adds a worktree at dir on a new branch, from the commit base, so
 // every candidate of a run starts from the same commit.
+// If setup fails, it rolls back the checkout and branch. A failed rollback
+// returns their handle as well as an error identifying what remains.
 func CreateAt(ctx context.Context, repo, dir, branch, base string) (Worktree, error) {
 	g := gitOperation(repo, "", false)
 	// Read both in one command: --verify still requires exactly one commit.
@@ -160,21 +171,32 @@ func CreateAt(ctx context.Context, repo, dir, branch, base string) (Worktree, er
 	if err != nil {
 		return Worktree{}, err
 	}
+	rollback := func(cause error) (Worktree, error) {
+		// Setup may have exhausted or cancelled the run's context. Cleanup
+		// gets its own short deadline, so that cancellation cannot leave an
+		// otherwise removable worktree and branch behind.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), safegit.Timeout)
+		defer cancel()
+		if err := w.Remove(cleanupCtx); err != nil {
+			return w, fmt.Errorf("%w; rollback of worktree %q on branch %q failed: %v", cause, w.Dir, w.Branch, err)
+		}
+		return Worktree{}, cause
+	}
 	// Git chooses the administrative id (including a suffix on collisions).
 	// Read its newly created gitfile once, before handing the tree to a child,
 	// and accept only an administrative directory in this repository.
 	w.gitDir, err = readGitfile(dir)
 	if err != nil {
-		return Worktree{}, err
+		return rollback(err)
 	}
 	if filepath.Dir(w.gitDir) != filepath.Join(commonDir, "worktrees") {
-		return Worktree{}, errors.New("worktree: gitfile points outside the repository's worktree directories")
+		return rollback(errors.New("worktree: gitfile points outside the repository's worktree directories"))
 	}
 	// Discover in the new branch and git directory before any checkout can
 	// invoke a filter selected by an onbranch: or gitdir: conditional include.
 	g = gitOperation(dir, w.gitDir, false)
 	if _, err := g.Run(ctx, nil, "reset", "--hard", "--quiet", "HEAD"); err != nil {
-		return Worktree{}, err
+		return rollback(err)
 	}
 	return w, nil
 }
@@ -265,14 +287,24 @@ func (w Worktree) Apply(ctx context.Context, r Result) (string, error) {
 	return "", nil
 }
 
-// Changed lists every path that differs from the worktree's HEAD: modified,
-// deleted, untracked and ignored files alike. A judge's worktree must have
-// none.
+// Changed lists modified, deleted, untracked and ignored paths, including
+// committed changes from Base. A HEAD other than the recorded base is an
+// integrity error even when the commit has the same tree. A judge's worktree
+// must have neither changes nor an integrity error.
 func (w Worktree) Changed(ctx context.Context) ([]string, error) {
 	if w.gitDir == "" {
 		return nil, errors.New("worktree: missing recorded git directory")
 	}
-	out, err := gitOperation(w.Dir, w.gitDir, true).Run(ctx, nil, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--no-renames")
+	if w.Base == "" {
+		return nil, errors.New("worktree: missing recorded base commit")
+	}
+	g := gitOperation(w.Dir, w.gitDir, true)
+	head, err := g.Run(ctx, nil, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return nil, err
+	}
+	commit := strings.TrimSpace(string(head))
+	out, err := g.Run(ctx, nil, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--no-renames")
 	if err != nil {
 		return nil, err
 	}
@@ -281,6 +313,20 @@ func (w Worktree) Changed(ctx context.Context) ([]string, error) {
 		if len(rec) > 3 {
 			paths = append(paths, rec[3:])
 		}
+	}
+	if commit != w.Base {
+		integrityErr := errors.New("worktree: HEAD differs from the recorded base commit")
+		out, err := g.Run(ctx, nil, "diff", "--no-color", "--no-renames", "--no-ext-diff", "--no-textconv", "--name-only", "-z", w.Base, commit)
+		if err != nil {
+			return paths, errors.Join(integrityErr, err)
+		}
+		for _, path := range strings.Split(string(out), "\x00") {
+			if path != "" {
+				paths = append(paths, path)
+			}
+		}
+		slices.Sort(paths)
+		return slices.Compact(paths), integrityErr
 	}
 	return paths, nil
 }
@@ -297,11 +343,15 @@ func (w Worktree) CheckApply(ctx context.Context, r Result) error {
 
 // Remove deletes the worktree and its branch.
 func (w Worktree) Remove(ctx context.Context) error {
-	defer lockRepo(w.Repo)()
+	unlock, err := lockRepoContext(ctx, w.Repo)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	g := gitOperation(w.Repo, "", false)
 	if _, err := g.Run(ctx, nil, "worktree", "remove", "--force", w.Dir); err != nil {
 		return err
 	}
-	_, err := g.Run(ctx, nil, "branch", "-D", w.Branch)
+	_, err = g.Run(ctx, nil, "branch", "-D", w.Branch)
 	return err
 }

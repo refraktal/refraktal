@@ -20,6 +20,7 @@ package policy
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -221,28 +222,76 @@ func pathFields(m map[string]any, keys []string) []string {
 
 func (p Policy) inside(path, cwd string) bool {
 	if !filepath.IsAbs(path) {
-		path = filepath.Join(cwd, path)
+		// Join would clean away .. before the preceding symlink is followed.
+		path = cwd + string(filepath.Separator) + path
 	}
-	path = resolve(filepath.Clean(path))
-	root := resolve(p.Worktree)
+	path, err := resolve(path)
+	if err != nil {
+		return false
+	}
+	root, err := resolve(p.Worktree)
+	if err != nil {
+		return false
+	}
 	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
 }
 
-// resolve follows symlinks in the longest existing prefix of path, so a link
-// inside the worktree that points out of it is seen for what it is.
-func resolve(path string) string {
-	dir, rest := path, ""
-	for {
-		if r, err := filepath.EvalSymlinks(dir); err == nil {
-			return filepath.Join(r, rest)
+// resolve walks components in filesystem order, including a symlink whose
+// target does not exist yet. Parent components apply to the resolved target,
+// never to the spelling of the link. Missing components remain valid for new
+// files, but other lookup errors and symlink loops fail closed.
+func resolve(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return path
-		}
-		rest = filepath.Join(filepath.Base(dir), rest)
-		dir = parent
+		path = cwd + string(filepath.Separator) + path
 	}
+	sep := string(filepath.Separator)
+	volume := filepath.VolumeName(path)
+	resolved := volume + sep
+	pending := strings.Split(path[len(volume):], sep)
+	links := 0
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			resolved = filepath.Dir(resolved)
+			continue
+		}
+		next := filepath.Join(resolved, part)
+		info, err := os.Lstat(next)
+		if os.IsNotExist(err) {
+			resolved = next
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			resolved = next
+			continue
+		}
+		links++
+		if links > 255 {
+			return "", errors.New("too many symlinks")
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			return "", err
+		}
+		if filepath.IsAbs(target) {
+			volume = filepath.VolumeName(target)
+			resolved = volume + sep
+			target = target[len(volume):]
+		}
+		pending = append(strings.Split(target, sep), pending...)
+	}
+	return resolved, nil
 }
 
 func (p Policy) filesInside(paths []string) (bool, string) {
@@ -460,7 +509,8 @@ func (p Policy) outside(s, cwd string) bool {
 	// Exempt only if the path as written and the path it resolves to are
 	// both in allowed system folders (not necessarily the same one: on some
 	// systems /usr/bin/env links into /usr/lib).
-	return !(systemPath(s) && systemPath(resolve(s)))
+	resolved, err := resolve(s)
+	return err != nil || !(systemPath(s) && systemPath(resolved))
 }
 
 func systemPath(p string) bool {

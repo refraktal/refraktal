@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"refraktal.dev/refraktal/internal/budget"
 )
@@ -36,6 +37,9 @@ type ShowRun struct {
 	// Truncated: one of show's limits (bytes, events, directory entries,
 	// nesting) was reached, so this run, or the tree below it, is cut short.
 	Truncated bool `json:"truncated,omitempty"`
+	// LatestIncomplete means the limits prevented examining every run, so
+	// the default selection may have missed a newer run.
+	LatestIncomplete bool `json:"latest_incomplete,omitempty"`
 }
 
 // show's limits across one whole walk (variables for tests).
@@ -63,10 +67,11 @@ type ShowChild struct {
 	Turns   int      `json:"child_turns,omitempty"` // prompts a child Refraktal sent
 }
 
-// ShowCosts are the run's charges by source, and its turns.
+// ShowCosts are the run's actual spend, retained reservations and turns.
 type ShowCosts struct {
 	BySource map[string]float64 `json:"by_source"`
 	Charged  float64            `json:"charged_usd"`
+	Retained float64            `json:"retained_usd"`
 	Limit    float64            `json:"limit_usd"`
 	Turns    int                `json:"turns"`
 	TurnsMax int                `json:"turns_limit"`
@@ -107,11 +112,15 @@ func Show(root, id string) (ShowRun, error) {
 	if id == "" {
 		// The latest run: doctor writes folders here too, which are skipped.
 		ids := w.dirs(runs)
+		w.orderRuns(runs, ids)
+		incomplete := w.truncated
 		for i := len(ids) - 1; i >= 0; i-- {
 			r, err := showOne(runs, ids[i], w)
 			if errors.Is(err, errDoctorCheck) {
 				continue
 			}
+			r.Truncated = r.Truncated || incomplete
+			r.LatestIncomplete = incomplete
 			return r, err
 		}
 		return ShowRun{}, ErrNoRun
@@ -170,6 +179,50 @@ func (w *walk) dirs(d *os.Root) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// orderRuns orders runs by their recorded start, not the random suffix in
+// their IDs. Old or incomplete logs without a timestamp fall back to ID order.
+func (w *walk) orderRuns(d *os.Root, ids []string) {
+	starts := make(map[string]time.Time, len(ids))
+	for _, id := range ids {
+		run, err := openDir(d, id)
+		if err != nil {
+			continue
+		}
+		f, err := openFile(run, "events.jsonl")
+		run.Close()
+		if err != nil {
+			continue
+		}
+		if w.events <= 0 {
+			w.truncated = true
+			f.Close()
+			break
+		}
+		sc := bufio.NewScanner(&budgeted{r: f, w: w})
+		sc.Buffer(make([]byte, 4096), 16<<20)
+		if sc.Scan() {
+			w.events--
+			var first struct {
+				Time time.Time `json:"t"`
+			}
+			if json.Unmarshal(sc.Bytes(), &first) == nil {
+				starts[id] = first.Time
+			}
+		}
+		if sc.Err() != nil {
+			w.truncated = true
+		}
+		f.Close()
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		a, b := starts[ids[i]], starts[ids[j]]
+		if !a.Equal(b) {
+			return a.Before(b)
+		}
+		return ids[i] < ids[j]
+	})
 }
 
 // openDir opens name in parent only if it is a real directory (not a
@@ -234,6 +287,7 @@ func readRun(d *os.Root, name, dir string, depth int, w *walk) (ShowRun, error) 
 		return r, fmt.Errorf("%w: %s has no run log", ErrNoRun, r.ID)
 	}
 	defer f.Close()
+	r.Truncated = w.truncated
 	w.truncated = false
 	sawRun, sawDoctor := false, false
 	sc := bufio.NewScanner(&budgeted{r: f, w: w})
@@ -302,7 +356,10 @@ func readRun(d *os.Root, name, dir string, depth int, w *walk) (ShowRun, error) 
 			cleanAll(r.Files)
 			var b budget.Summary
 			if json.Unmarshal(e["budget"], &b) == nil {
-				r.Costs.Charged, r.Costs.Limit, r.Costs.Turns, r.Costs.TurnsMax = b.Spent, b.Limits.USD, b.Turns, b.Limits.Turns
+				r.Costs.Charged, r.Costs.Limit, r.Costs.Turns, r.Costs.TurnsMax = b.Reported, b.Limits.USD, b.Turns, b.Limits.Turns
+				// Cancelled grants retain their unused allowance without a
+				// charge entry; nested reservations also count toward Spent.
+				r.Costs.Retained = max(0, b.Spent-b.Reported)
 				r.Costs.Unpriced = cleanAll(b.Unpriced)
 				for _, c := range b.Charges {
 					r.Costs.BySource[clean(string(c.Source))] += c.USD
@@ -317,7 +374,7 @@ func readRun(d *os.Root, name, dir string, depth int, w *walk) (ShowRun, error) 
 	if sawDoctor && !sawRun {
 		return r, errDoctorCheck
 	}
-	r.Truncated = w.truncated // this run's own log was cut short
+	r.Truncated = r.Truncated || w.truncated // this run's own log was cut short
 	// A child that ran but logged no child_end (it failed to start) still
 	// shows through its turn; fold child_run-only entries into their child.
 	r.Child = mergeChildren(r.Child)
@@ -333,6 +390,7 @@ func readRun(d *os.Root, name, dir string, depth int, w *walk) (ShowRun, error) 
 			} else {
 				w.truncated = false
 				names := w.dirs(runs)
+				w.orderRuns(runs, names)
 				r.Truncated = r.Truncated || w.truncated
 				for _, n := range names {
 					sub, err := openDir(runs, n)
@@ -511,6 +569,7 @@ func writeShow(w io.Writer, r ShowRun, in string) {
 	if len(c.Unpriced) > 0 {
 		fmt.Fprintf(w, "; unpriced: %s", strings.Join(c.Unpriced, ", "))
 	}
+	fmt.Fprintf(w, "; retained reservations: $%.4f", c.Retained)
 	fmt.Fprintf(w, "; turns %d of %d\n", c.Turns, c.TurnsMax)
 	if r.Winner != "" {
 		fmt.Fprintf(w, "%sresult from: %s\n", in2, r.Winner)
@@ -523,6 +582,9 @@ func writeShow(w io.Writer, r ShowRun, in string) {
 	}
 	if r.Truncated {
 		fmt.Fprintf(w, "%s(truncated: show's limits on log size, events, folder entries or nesting were reached)\n", in2)
+	}
+	if r.LatestIncomplete {
+		fmt.Fprintf(w, "%s(latest run selection may be incomplete: show could not examine every run)\n", in2)
 	}
 	for _, n := range r.Nested {
 		writeShow(w, n, in2)
