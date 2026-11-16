@@ -319,23 +319,31 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 			e.notice(fmt.Sprintf("warning: no price for model %q; its tokens count as $0 against --usd", ch.Model))
 		}
 	}
-	// A child Refraktal's report is untrusted: its turns must be within its
-	// remaining allowance, its cost (if present at all) well-formed, finite
-	// and not negative, its retained amount finite, not negative and within
-	// the grant. Anything else charges the child
-	// its whole grant (dollars and turns) and marks it exhausted.
+	// A child Refraktal's report is untrusted: it must decode (a number
+	// outside its field's range or of the wrong type is not an absent
+	// report), its turns must be within its remaining allowance, its cost
+	// and usage (if present at all) well-formed, the cost finite and not
+	// negative, its retained amount finite, not negative and within the
+	// grant. Anything else charges the child its whole grant (dollars and
+	// turns) and marks it exhausted.
 	untrusted := ""
 	mu.Lock()
 	malformedCost := costInvalid
 	mu.Unlock()
-	if ch := turn.Child; ch != nil {
+	if ch := turn.Child; ch != nil || turn.ChildInvalid {
 		switch {
+		case turn.ChildInvalid:
+			// Present on the wire but undecodable: never read as absent,
+			// which would return the unused grant.
+			untrusted = "an undecodable report"
 		case malformedCost:
 			// Present on the wire but unusable: not an absent cost, so
 			// never priced from tokens instead.
 			untrusted = "a malformed cost"
 		case turn.Cost != nil && !validCost(turn.Cost):
 			untrusted = "an invalid cost"
+		case turn.UsageInvalid:
+			untrusted = "malformed usage"
 		case math.IsNaN(ch.Retained) || math.IsInf(ch.Retained, 0) || ch.Retained < 0 || ch.Retained > grant.USD:
 			untrusted = "an invalid retained amount"
 		default:
@@ -354,7 +362,31 @@ func (e *runEnv) child(h harness.Harness, sp childSpec) *Candidate {
 				childRetained = ch.Retained
 			}
 		}
-		e.log.Event("child_run", map[string]any{"harness": name, "turns": ch.Turns, "outcome": ch.Outcome, "exit": ch.Exit, "untrusted": untrusted})
+		ev := map[string]any{"harness": name, "untrusted": untrusted}
+		if ch != nil {
+			ev["turns"], ev["outcome"], ev["exit"] = ch.Turns, ch.Outcome, ch.Exit
+		}
+		e.log.Event("child_run", ev)
+	}
+	// A refraktal child that sent no valid report, for any reason, may have
+	// spent its whole grant on its own harnesses without telling us: its
+	// whole grant (dollars and turns) is kept, as for a cancelled child. A
+	// turn that otherwise ended normally makes the missing report untrusted;
+	// a failed or cancelled turn keeps its outcome.
+	noReport := ""
+	if h.Name() == "refraktal" && turn.Child == nil && untrusted == "" {
+		if turn.StopReason == "end_turn" && !turn.Cancelled {
+			untrusted = "no report"
+		} else {
+			noReport = cmp.Or(errString(perr), "stop reason "+cmp.Or(turn.StopReason, "none"))
+		}
+		e.log.Event("child_run", map[string]any{"harness": name, "untrusted": untrusted, "no_report": noReport})
+	}
+	if noReport != "" {
+		charged += e.ledger.Forfeit(grant, "a child Refraktal ended without a report: its whole grant kept")
+		e.account(0, 0, max(0, grant.Turns-1)) // its whole allowance
+		e.notice(fmt.Sprintf("%s: the turn ended without a report (%s): its whole grant kept ($%.4f, %d turns)",
+			name, noReport, grant.USD, grant.Turns))
 	}
 	if untrusted != "" {
 		// AddTurns may already have forfeited; Forfeit returns the amount

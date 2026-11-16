@@ -20,6 +20,10 @@ func TestCostInvalidMarksAPresentUnusableCost(t *testing.T) {
 		{`{"sessionUpdate":"usage_update","cost":{"amount":1e999,"currency":"USD"}}`, true, false},
 		// All or nothing: a malformed used drops a well-formed cost too.
 		{`{"sessionUpdate":"usage_update","used":-1,"cost":{"amount":0.5,"currency":"USD"}}`, true, false},
+		// Run 6: presence matches keys as the decode does (case-insensitive).
+		{`{"sessionUpdate":"usage_update","Cost":{"amount":-1,"currency":"USD"}}`, true, false},
+		{`{"sessionUpdate":"usage_update","COST":"malformed"}`, true, false},
+		{`{"sessionUpdate":"usage_update","Cost":{"amount":0.5,"currency":"USD"}}`, false, true},
 	} {
 		u := parseUpdate([]byte(`{"sessionId":"s","update":` + tc.update + `}`))
 		if u.Kind != "usage_update" || u.CostInvalid != tc.invalid || (u.Cost != nil) != tc.appliedCost {

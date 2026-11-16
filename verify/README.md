@@ -80,7 +80,13 @@ dollars and turns; genuine costs are charged first and an overrun is not capped.
 The exploration includes the wire forms `acp.parseUpdate`
 (`internal/acp/types.go`) sees: a cost that is present but not a number, not an
 object or negative must reach validation as invalid (`CostInvalid`), never as
-absent. An absent cost is valid and priced from tokens.
+absent. An absent cost is valid and priced from tokens. It also includes the
+forms `acp.decodePromptResult` sees: a report with a field that cannot be
+decoded (a number outside its field's range or of the wrong type) and an
+undecodable usage beside a report must reach validation as untrusted
+(`ChildInvalid`, `UsageInvalid`), never as no report. A refraktal child that
+ends without a valid report keeps its whole grant: untrusted after `end_turn`,
+kept with its failed outcome after an ACP error or crash.
 The mapping is `Ledger` in `internal/budget/budget.go` and `runEnv.child` in
 `fanout.go`; report values correspond to `server.prompt`/`finish` in
 `acpserver.go`. Repeated ACP prompts sharing an inherited ledger are not
@@ -129,7 +135,7 @@ intersects flags with grants. Lost grants cannot bypass the ceiling.
 | Kill snapshot provenance | Three rows: absent leader, parent outside session, child in session; current and recorded births 1..2; child record absent/1/2; parent presence and PPID link independent | Stale parent identity, child older than replacement parent, direct historical identity and ancestry. |
 | Kill tracker enrollment | Three PID rows with separate PGIDs; root birth 1..3; parent/child birth 0 (invalid) or 1..3; historical parent absent/1..3; root/parent presence and child PPID link independent: 1,536 input snapshots | Current verified parent, missing/invalid births, equal births, stale PPID after parent reuse, then handle acquisition, successful recheck and signal. |
 | Concurrent ledger | Two candidates plus later judge; four USD units/four turns; turn costs `{0,1,3}` | Overlapping reservations, returned shares, cumulative reports, duplicate settlement, cancellation and per-grant final-turn crossing of at most two units. |
-| Child-report boundary | USD/turn grants 1..4; report turns -1..5; costs `{0,1,3,6}` or negative/NaN/infinite/non-USD classes; retained `{0,1,3,5}` or negative/NaN/infinite classes; non-numeric and absent wire costs; cancelled or normal | Every validation branch, a malformed wire cost, grant forfeiture and idempotence, valid retained charges, real costs above the grant. Invalid-cost token pricing uses the zero-cost fallback. |
+| Child-report boundary | USD/turn grants 1..4; report turns -1..5; costs `{0,1,3,6}` or negative/NaN/infinite/non-USD classes; retained `{0,1,3,5}` or negative/NaN/infinite classes; non-numeric and absent wire costs; decodable, undecodable-report and undecodable-usage responses, and a child ending without a report after `end_turn` or a failed turn; cancelled or normal | Every validation branch, a malformed wire cost, an undecodable report or usage, a missing report forfeited or kept, grant forfeiture and idempotence, valid retained charges, real costs above the grant. Invalid-cost token pricing uses the zero-cost fallback. |
 | Lifecycle | One/two candidates, each optionally stopped for budget or `--mins`; optional judge; one collect/check result each; two touched files; monotonic cancel/deadline | Failed turn with work versus failed collect, a budget stop with a failed collect, snapshot refusal, sequential writes, later write error, rollback, and a post-apply LFS error that rolls back. |
 | Nesting | Nest invalid/negative/0..3; depth/child flags 0..3; ceilings absent/malformed/-1..4; shrinking/lost/malformed grants | Equality/refusal, ceiling lowering and grant loss; at most four admitted runs per chain. |
 
@@ -183,6 +189,8 @@ unresolved live records may remain indefinitely.
 | Budget | Charge cumulative total rather than delta | Charge differs from actual cost | 5 |
 | Budget | Accept unvalidated child report | Five turns accepted against limit four | 4 |
 | Budget | Parser drops a malformed cost as absent | Malformed nested cost accepted | 3 |
+| Budget | Client reads an undecodable report as absent | Undecodable nested report's grant returned | 3 |
+| Budget | Child without a report returns its unused grant | Refraktal child's unreported spending escapes `--usd` | 3 |
 | Lifecycle | Remove cancel guard | Invalid apply admission | 9 |
 | Lifecycle | Remove deadline guard | Invalid apply admission | 9 |
 | Lifecycle | Remove all-children barrier | Collection before every shutdown returned | 4 |
@@ -196,7 +204,7 @@ unresolved live records may remain indefinitely.
 | Lifecycle | Clear snapshot before the post-apply check | Failure reported over a changed tree | 12 |
 | Nesting | Remove inherited-ceiling refusal | Ceiling exceeded after grant loss/reset flags | 5 |
 
-All 26 checks reproduce the stated counterexample. Trace lengths count
+All 28 checks reproduce the stated counterexample. Trace lengths count
 transitions, excluding the initial state. The legacy retirement fixture retains
 the original mutation under explicitly restricted pre-fix membership selection;
 its guarded baseline passes only that fixture and is not a FAITHFUL claim about
@@ -209,7 +217,7 @@ The no-pidfd limit is reported separately from mutation results.
 
 ## Findings and production reproductions
 
-Findings 1–4 are fixed on main and findings 5–7 on this branch. Their former
+Findings 1–8 are fixed on main and finding 9 on this branch. Their former
 faithful counterexamples now live in mutations, while updated FAITHFUL models
 must pass exhaustive exploration. PR D also fixes the production tracker
 enrollment guard and adds its model (finding 8).
@@ -266,6 +274,25 @@ limit.
    handle signalling retained. `TestTrackerPPIDEnrollmentNeedsBirthOrder`
    also covers root/tracked parents, absent rows and invalid births.
 
+9. **An undecodable child report was read as absent** (Astra run 6 #1):
+   turns one past the largest 64-bit integer failed the client's single
+   decode of the prompt response, so the parent returned the unused grant.
+   Fixed by decoding field by field and forfeiting a present but
+   undecodable report or usage. The undecodable-report mutation reproduces
+   the returned grant. `TestUndecodableChildReportForfeitsTheGrant` (root
+   package) sends each form over the wire;
+   `TestDecodePromptResultFlagsAPresentUndecodableReport` (`internal/acp`)
+   covers the decoder. Both are enforced. The report model had no response
+   class: it assumed every report it validated had decoded.
+   In the same class, a refraktal child whose turn ended without a valid
+   report (no `_meta`, no report, a `_meta` that is not an object, an ACP
+   error, a crash) settled like a plain harness and returned its unused
+   grant, though it may have spent it on its own harnesses. Now its whole
+   grant is kept: untrusted (exit 2) after `end_turn`, failed with a notice
+   otherwise. The no-report mutation reproduces the returned grant.
+   `TestRefraktalChildWithoutReportForfeits` and
+   `TestFailedRefraktalChildKeepsItsGrant` (root package) are enforced.
+
 The new production
 tracker reproduction runs in this sandbox because all signals are intercepted;
 the older process-level reproductions still need the orchestrator.
@@ -280,7 +307,7 @@ GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
   -count=1 -v
 GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
   go test . ./internal/acp \
-  -run '^(TestCollectFailureNeverOverridesExhaustion|TestMalformedNestedCostForfeitsTheGrant|TestCostInvalidMarksAPresentUnusableCost)$' \
+  -run '^(TestCollectFailureNeverOverridesExhaustion|TestMalformedNestedCostForfeitsTheGrant|TestCostInvalidMarksAPresentUnusableCost|TestUndecodableChildReportForfeitsTheGrant|TestDecodePromptResultFlagsAPresentUndecodableReport|TestRefraktalChildWithoutReportForfeits|TestFailedRefraktalChildKeepsItsGrant)$' \
   -count=1 -v
 ```
 
@@ -293,7 +320,9 @@ lifecycle rows were measured again after findings 5–7 (default cache, same
 machine): the complete suite then passed in **36.427 s** (package time),
 **36.93 s wall time**. After PR D's tracker model was
 added and rebased onto #28 (`4f7c5be`), the complete suite passed in
-**36.662 s** (package time), **38 s wall time**. Timings are observations,
+**36.662 s** (package time), **38 s wall time**. After finding 9 and its follow-up added the response classes, the report
+validation row was measured again (default cache, same machine) and the
+complete suite passed in **48.814 s** (package time), **49.31 s wall time**. Timings are observations,
 not performance guarantees. Every faithful row below exhausted the full graph;
 the platform-limit row stopped at its expected counterexample.
 
@@ -305,14 +334,14 @@ the platform-limit row stopped at its expected counterexample.
 | Kill, exact stale-PPID fixture | 5 | 4 | 0.00021 s | Exhaustive, no violation |
 | Kill, fixed retirement fixture | 8 | 3 | 0.00036 s | Exhaustive, no violation |
 | Budget, FAITHFUL concurrent ledger | 185,881 | 24 | 12.577 s | Exhaustive, no violation |
-| Budget, FAITHFUL report validation | 109,761 | 6 | 1.332 s | Exhaustive, no violation |
+| Budget, FAITHFUL report validation | 548,801 | 6 | 7.639 s | Exhaustive, no violation |
 | Lifecycle, FAITHFUL control flow | 5,675 | 24 | 0.220 s | Exhaustive, no violation |
 | Lifecycle, FAITHFUL filesystem errors | 5,791 | 24 | 0.249 s | Exhaustive, no violation |
 | Nesting, FAITHFUL | 1,654 | 10 | 0.030 s | Exhaustive, no violation |
 | Kill, no pidfd platform limit | 21,941 | 12 | 1.991 s | Expected unrelated-signal counterexample |
 | Restricted legacy retirement fixture, guard retained | 8 | 3 | 0.00035 s | Exhaustive only for this pre-fix fixture |
 
-All 26 mutation checks passed by reproducing their intended violations; their
+All 28 mutation checks passed by reproducing their intended violations; their
 trace lengths are in the mutation table. The real ledger witnesses and the
 production dependency isolation check passed in the complete suite. The real
 `TestVerifyNestingSourceWitness` also passed separately with race detection.

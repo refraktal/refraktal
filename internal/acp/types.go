@@ -2,6 +2,7 @@ package acp
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"time"
 )
@@ -110,9 +111,13 @@ func parseUpdate(params json.RawMessage) Update {
 			Currency string   `json:"currency"`
 		} `json:"cost"`
 	}
-	var present map[string]json.RawMessage
-	json.Unmarshal(p.Update, &present) // an object: its kind parsed above
-	hasCost := present["cost"] != nil && string(present["cost"]) != "null"
+	// Presence uses encoding/json's own key matching, as the decode does: a
+	// "Cost" is as present as a "cost".
+	var raw struct {
+		Cost json.RawMessage `json:"cost"`
+	}
+	json.Unmarshal(p.Update, &raw) // an object: its kind parsed above
+	hasCost := present(raw.Cost)
 	if json.Unmarshal(p.Update, &a) != nil ||
 		(a.Used != nil && *a.Used < 0) || (a.Size != nil && *a.Size < 0) ||
 		(a.Cost != nil && (a.Cost.Amount == nil || *a.Cost.Amount < 0 || math.IsNaN(*a.Cost.Amount) || math.IsInf(*a.Cost.Amount, 0))) {
@@ -174,7 +179,82 @@ type Turn struct {
 	Permissions int           // permission requests received during the turn
 	Wall        time.Duration // prompt sent to response
 	Child       *ChildReport  // a child Refraktal's report in the response's _meta, if any
+	// ChildInvalid: the response has a _meta.refraktal report (not null)
+	// that could not be decoded: a number outside its field's range, a
+	// wrong type, not an object. Child is then nil. A present but
+	// undecodable report is not an absent one: the child is untrusted.
+	ChildInvalid bool
+	// UsageInvalid: the response has a usage field (not null) that could
+	// not be decoded. Usage is then nil.
+	UsageInvalid bool
 }
+
+// promptResult is a session/prompt response, decoded field by field so that
+// one undecodable field neither hides another nor hides that it was sent.
+type promptResult struct {
+	StopReason   string
+	Usage        *Usage
+	Child        *ChildReport
+	ChildInvalid bool
+	UsageInvalid bool
+}
+
+// decodePromptResult decodes a prompt response. A usage or _meta.refraktal
+// that is present (not null) but undecodable is flagged, never read as
+// absent. The error is the first field that did not decode; what did decode
+// is returned with it. A response that is not an object, or whose _meta is
+// not an object, carries no report that can be seen: only the error.
+func decodePromptResult(res json.RawMessage) (promptResult, error) {
+	var out promptResult
+	// RawMessage fields, not a map: presence uses encoding/json's own key
+	// matching (case-insensitive), the same as the decode itself.
+	var top struct {
+		StopReason json.RawMessage `json:"stopReason"`
+		Usage      json.RawMessage `json:"usage"`
+		Meta       json.RawMessage `json:"_meta"`
+	}
+	if err := json.Unmarshal(res, &top); err != nil {
+		return out, err
+	}
+	var errs []error
+	if present(top.StopReason) {
+		errs = append(errs, json.Unmarshal(top.StopReason, &out.StopReason))
+	}
+	if present(top.Usage) {
+		var u Usage
+		if err := json.Unmarshal(top.Usage, &u); err != nil {
+			out.UsageInvalid = true
+			errs = append(errs, fmt.Errorf("usage: %w", err))
+		} else {
+			out.Usage = &u
+		}
+	}
+	if present(top.Meta) {
+		var meta struct {
+			Refraktal json.RawMessage `json:"refraktal"`
+		}
+		if err := json.Unmarshal(top.Meta, &meta); err != nil {
+			errs = append(errs, fmt.Errorf("_meta: %w", err))
+		} else if present(meta.Refraktal) {
+			var ch ChildReport
+			if err := json.Unmarshal(meta.Refraktal, &ch); err != nil {
+				out.ChildInvalid = true
+				errs = append(errs, fmt.Errorf("_meta.refraktal: %w", err))
+			} else {
+				out.Child = &ch
+			}
+		}
+	}
+	for _, err := range errs {
+		if err != nil {
+			return out, err
+		}
+	}
+	return out, nil
+}
+
+// present reports whether a field was sent with a value other than null.
+func present(raw json.RawMessage) bool { return raw != nil && string(raw) != "null" }
 
 // ChildReport is what a child Refraktal adds to its prompt response, under
 // _meta.refraktal, so the parent can count its prompts across the tree.

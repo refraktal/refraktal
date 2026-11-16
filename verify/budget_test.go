@@ -383,8 +383,13 @@ func TestBudgetUntrustedTurnsFindingReproduction(t *testing.T) {
 // USD and turn grants 1..4, report turns -1..5, finite costs {0,1,3,6},
 // retained amounts {0,1,3,5}, and negative/NaN/infinite/non-USD cost classes,
 // plus the wire forms acp.parseUpdate sees: a non-numeric or non-object cost
-// and an absent cost (priced from tokens, abstracted here as $0). The parse
-// step maps the wire class to what runEnv.child sees.
+// and an absent cost (priced from tokens, abstracted here as $0), and the
+// forms acp.decodePromptResult sees: a decodable report, a report with a
+// field it cannot decode (a number outside the field's range, a wrong type,
+// not an object) and an undecodable usage beside a report. A refraktal child
+// may also end without a valid report at all: after end_turn, or after a
+// failed turn (an ACP error, a crash). The parse step maps the wire classes
+// to what runEnv.child sees.
 // A child gets allowance-1 turns after the parent's prompt (runEnv.child,
 // fanout.go; childLimits and server.prompt/finish, acpserver.go). Costs larger
 // than the grant remain valid: final-turn overrun is never clamped. Classes
@@ -392,7 +397,10 @@ func TestBudgetUntrustedTurnsFindingReproduction(t *testing.T) {
 // This is a bounded response-boundary check, not arbitrary wire/protocol input.
 type reportState struct {
 	Phase                                    uint8
-	WireCost                                 int // the cost class as sent; CostClass is what the parser hands on
+	WireCost                                 int  // the cost class as sent; CostClass is what the parser hands on
+	WireReport                               int  // a response class below
+	NoReport                                 bool // the parse step handed on no report at all
+	Kept                                     bool // whole grant kept without a forfeit outcome (a failed turn)
 	USD, Allowance, ReportTurns              int
 	CostClass, RetainedClass                 int
 	Turns, Held, Charged, Retained           int
@@ -406,6 +414,16 @@ const (
 	costNonNumeric = 8
 	costAbsent     = 9
 	costClasses    = 10
+)
+
+// Response classes: what the prompt response carries besides the cost.
+const (
+	reportDecodable   = 0
+	reportUndecodable = 1 // _meta.refraktal present, a field not decodable
+	usageUndecodable  = 2 // usage present and not decodable, beside a report
+	noReportNormal    = 3 // a refraktal child ended its turn (end_turn) without a valid report
+	noReportFailed    = 4 // a refraktal child's turn failed (ACP error, crash) without a report
+	reportWires       = 5
 )
 
 func reportCost(class int) (int, bool) {
@@ -426,6 +444,13 @@ const (
 	// Pre-run-5 acp.parseUpdate: a negative or non-numeric cost was dropped
 	// as if absent, so the child's report was priced from tokens.
 	reportDropMalformedCost reportMutation = "parser drops a malformed cost as absent"
+	// Pre-run-6 acp.Client.Prompt: one json.Unmarshal over the whole
+	// response, so an undecodable report or usage failed it and the report
+	// was read as absent: no validation, the unused grant returned.
+	reportDropUndecodable reportMutation = "client reads an undecodable report as absent"
+	// Pre-run-6 runEnv.child: a refraktal child that sent no report settled
+	// like a plain harness and returned its unused grant.
+	reportReturnUnusedGrant reportMutation = "child without a report returns its unused grant"
 )
 
 func reportRetained(class int) (int, bool) {
@@ -456,11 +481,17 @@ func reportModel(mutation reportMutation) model[reportState] {
 						for turns := -1; turns <= ledgerTurns+1; turns++ {
 							for costClass := 0; costClass < costClasses; costClass++ {
 								for retainedClass := 0; retainedClass < 7; retainedClass++ {
-									for _, cancelled := range []bool{false, true} {
-										n := reportState{Phase: 1, USD: usd, Allowance: allowance, WireCost: costClass,
-											ReportTurns: turns, CostClass: costClass, RetainedClass: retainedClass,
-											Cancelled: cancelled, Turns: 1, Held: allowance - 1, Reserved: usd}
-										add("reserve, begin prompt and receive child response", n)
+									for wire := 0; wire < reportWires; wire++ {
+										for _, cancelled := range []bool{false, true} {
+											n := reportState{Phase: 1, USD: usd, Allowance: allowance, WireCost: costClass, WireReport: wire,
+												ReportTurns: turns, CostClass: costClass, RetainedClass: retainedClass,
+												Cancelled: cancelled, Turns: 1, Held: allowance - 1, Reserved: usd}
+											action := "reserve, begin prompt and receive child response"
+											if wire == noReportNormal || wire == noReportFailed {
+												action = "reserve, begin prompt and child ends without report"
+											}
+											add(action, n)
+										}
 									}
 								}
 							}
@@ -479,8 +510,17 @@ func reportModel(mutation reportMutation) model[reportState] {
 				if mutation == reportDropMalformedCost && (s.WireCost == 4 || s.WireCost == costNonNumeric) {
 					n.CostClass = costAbsent
 				}
+				// acp.decodePromptResult (internal/acp/types.go) decodes the
+				// response field by field and flags an undecodable report or
+				// usage (Turn.ChildInvalid, Turn.UsageInvalid).
+				if mutation == reportDropUndecodable && (s.WireReport == reportUndecodable || s.WireReport == usageUndecodable) {
+					n.NoReport = true
+				}
+				if mutation == reportReturnUnusedGrant && (s.WireReport == noReportNormal || s.WireReport == noReportFailed) {
+					n.NoReport = true
+				}
 				n.Charged, _ = reportCost(n.CostClass)
-				add("parse the wire cost, then charge a valid cost in full before validating report", n)
+				add("parse the wire cost and response, then charge a valid cost in full before validating report", n)
 			case 2:
 				// runEnv.child (fanout.go), validCost (run.go), Ledger.AddTurns
 				// and Ledger.forfeit (internal/budget/budget.go): validate first,
@@ -488,15 +528,39 @@ func reportModel(mutation reportMutation) model[reportState] {
 				// forfeit immediately without incrementing by the invalid value.
 				n := s
 				n.Phase = 3
+				if s.NoReport {
+					// No report: a plain harness's turn, nothing to validate.
+					add("validate child cost, retained amount and turn count", n)
+					break
+				}
+				switch s.WireReport {
+				case noReportNormal:
+					// runEnv.child (fanout.go): end_turn without a report is
+					// untrusted; forfeiture follows.
+					n.Untrusted = true
+					add("validate child cost, retained amount and turn count", n)
+					return out
+				case noReportFailed:
+					// runEnv.child (fanout.go) and Ledger.Forfeit: the turn
+					// failed and stays failed, the whole grant is kept,
+					// whatever its cost (an invalid one charged as $0).
+					n.Kept = true
+					n.ForfeitedUSD = max(0, s.USD-s.Charged)
+					n.Charged += n.ForfeitedUSD
+					n.Turns, n.Held = s.Allowance, 0
+					add("validate child cost, retained amount and turn count", n)
+					return out
+				}
 				_, validCost := reportCost(s.CostClass)
 				retained, validRetained := reportRetained(s.RetainedClass)
-				n.Untrusted = !validCost || !validRetained || retained > s.USD || s.ReportTurns < 0 || s.ReportTurns > s.Allowance-s.Turns
+				decodable := s.WireReport == reportDecodable
+				n.Untrusted = !decodable || !validCost || !validRetained || retained > s.USD || s.ReportTurns < 0 || s.ReportTurns > s.Allowance-s.Turns
 				if !n.Untrusted {
 					n.Turns += s.ReportTurns
 					n.Held -= s.ReportTurns
 					n.Retained = retained
 					n.Charged += retained
-				} else if validCost && validRetained && retained <= s.USD {
+				} else if decodable && validCost && validRetained && retained <= s.USD {
 					// Ledger.AddTurns invokes forfeit on an invalid count;
 					// the later runEnv.child Forfeit must be idempotent.
 					n.ForfeitedUSD = max(0, s.USD-s.Charged)
@@ -540,8 +604,18 @@ func reportModel(mutation reportMutation) model[reportState] {
 			if s.Phase == 0 {
 				return nil
 			}
-			if _, ok := reportCost(s.WireCost); s.Phase >= 3 && !ok && !s.Untrusted {
+			// Kept charges the whole grant, so nothing is returned on that cost.
+			if _, ok := reportCost(s.WireCost); s.Phase >= 3 && !ok && !s.Untrusted && !s.Kept {
 				return fmt.Errorf("a present but malformed cost was accepted as absent: wire class %d", s.WireCost)
+			}
+			if s.Phase >= 3 && (s.WireReport == reportUndecodable || s.WireReport == usageUndecodable) && !s.Untrusted {
+				return fmt.Errorf("a present but undecodable report was read as absent: response class %d", s.WireReport)
+			}
+			if s.Phase >= 3 && (s.WireReport == noReportNormal || s.WireReport == noReportFailed) && !s.Untrusted && !s.Kept {
+				return fmt.Errorf("a refraktal child without a report returned its unused grant: response class %d", s.WireReport)
+			}
+			if s.Kept && (s.Untrusted || s.Exhausted || s.Turns != s.Allowance || s.Charged < s.USD) {
+				return fmt.Errorf("a failed child without a report did not keep its whole grant, or was marked exhausted")
 			}
 			if s.Turns < 1 || s.Turns > s.Allowance || s.Held < 0 || s.Phase < 5 && s.Turns+s.Held != s.Allowance {
 				return fmt.Errorf("reported turns escaped grant: turns=%d held=%d allowance=%d", s.Turns, s.Held, s.Allowance)
@@ -554,7 +628,7 @@ func reportModel(mutation reportMutation) model[reportState] {
 				return fmt.Errorf("untrusted report did not forfeit its whole grant")
 			}
 			retained, _ := reportRetained(s.RetainedClass)
-			if s.Phase >= 3 && !s.Untrusted && (s.Turns != 1+s.ReportTurns || s.ForfeitedUSD != 0 || s.Retained != retained) {
+			if s.Phase >= 3 && !s.Untrusted && !s.Kept && (s.Turns != 1+s.ReportTurns || s.ForfeitedUSD != 0 || s.Retained != retained) {
 				return fmt.Errorf("valid report was not counted exactly")
 			}
 			if s.Phase == 5 {
@@ -574,12 +648,12 @@ func reportModel(mutation reportMutation) model[reportState] {
 func TestBudgetChildReportValidation(t *testing.T) {
 	m := reportModel(reportFaithful)
 	next := m.Next
-	var valid, invalidTurns, invalidCost, invalidRetained, overrunForfeited, retained, nonNumeric, absent bool
+	var valid, invalidTurns, invalidCost, invalidRetained, overrunForfeited, retained, nonNumeric, absent, undecodable, usage, noReportForfeit, noReportKept bool
 	m.Next = func(s reportState) []transition[reportState] {
 		if s.Phase == 5 {
 			_, costOK := reportCost(s.CostClass)
 			r, retainedOK := reportRetained(s.RetainedClass)
-			valid = valid || !s.Untrusted
+			valid = valid || !s.Untrusted && !s.Kept
 			invalidTurns = invalidTurns || s.Untrusted && (s.ReportTurns < 0 || s.ReportTurns >= s.Allowance)
 			invalidCost = invalidCost || s.Untrusted && !costOK
 			invalidRetained = invalidRetained || s.Untrusted && (!retainedOK || r > s.USD)
@@ -587,6 +661,12 @@ func TestBudgetChildReportValidation(t *testing.T) {
 			retained = retained || !s.Untrusted && s.Retained > 0
 			nonNumeric = nonNumeric || s.Untrusted && s.WireCost == costNonNumeric
 			absent = absent || !s.Untrusted && s.WireCost == costAbsent
+			// Undecodable alone: cost, retained amount and turns all in range.
+			inRange := costOK && retainedOK && r <= s.USD && s.ReportTurns >= 0 && s.ReportTurns < s.Allowance
+			undecodable = undecodable || s.Untrusted && s.Exhausted && s.ForfeitedUSD > 0 && s.WireReport == reportUndecodable && inRange
+			usage = usage || s.Untrusted && s.WireReport == usageUndecodable
+			noReportForfeit = noReportForfeit || s.Untrusted && s.Exhausted && s.WireReport == noReportNormal && costOK && s.ForfeitedUSD > 0
+			noReportKept = noReportKept || s.Kept && !s.Exhausted && !s.Cancelled && s.WireReport == noReportFailed && s.Spent == max(s.USD, s.Charged) && s.ForfeitedUSD > 0
 		}
 		return next(s)
 	}
@@ -595,8 +675,9 @@ func TestBudgetChildReportValidation(t *testing.T) {
 	if r.Violation != nil {
 		t.Fatal(r.String())
 	}
-	if !valid || !invalidTurns || !invalidCost || !invalidRetained || !overrunForfeited || !retained || !nonNumeric || !absent {
-		t.Fatalf("missing report witness: valid=%v invalidTurns=%v invalidCost=%v invalidRetained=%v overrunForfeited=%v retained=%v nonNumeric=%v absent=%v", valid, invalidTurns, invalidCost, invalidRetained, overrunForfeited, retained, nonNumeric, absent)
+	if !valid || !invalidTurns || !invalidCost || !invalidRetained || !overrunForfeited || !retained || !nonNumeric || !absent || !undecodable || !usage || !noReportForfeit || !noReportKept {
+		t.Fatalf("missing report witness: valid=%v invalidTurns=%v invalidCost=%v invalidRetained=%v overrunForfeited=%v retained=%v nonNumeric=%v absent=%v undecodable=%v usage=%v noReportForfeit=%v noReportKept=%v",
+			valid, invalidTurns, invalidCost, invalidRetained, overrunForfeited, retained, nonNumeric, absent, undecodable, usage, noReportForfeit, noReportKept)
 	}
 }
 
@@ -607,5 +688,28 @@ func TestBudgetChildReportMalformedCostMutation(t *testing.T) {
 	t.Log(r.String())
 	if r.Violation == nil || !strings.Contains(r.Violation.Error(), "a present but malformed cost was accepted as absent") {
 		t.Fatalf("want the malformed-cost counterexample: %s", r.String())
+	}
+}
+
+// Run-6 #1: the old client decoded the prompt response in one step, so a
+// child report with turns one past MaxInt64 (or any undecodable field, or an
+// undecodable usage beside it) was read as absent and its grant returned.
+func TestBudgetChildReportUndecodableMutation(t *testing.T) {
+	r := check(reportModel(reportDropUndecodable))
+	t.Log(r.String())
+	if r.Violation == nil || !strings.Contains(r.Violation.Error(), "a present but undecodable report was read as absent") {
+		t.Fatalf("want the undecodable-report counterexample: %s", r.String())
+	}
+}
+
+// Run-6 #1 follow-up: a refraktal child that ended without a report (after
+// end_turn, an ACP error or a crash) settled like a plain harness and
+// returned its unused grant, though it may have spent it on its own
+// harnesses.
+func TestBudgetChildReportNoReportMutation(t *testing.T) {
+	r := check(reportModel(reportReturnUnusedGrant))
+	t.Log(r.String())
+	if r.Violation == nil || !strings.Contains(r.Violation.Error(), "a refraktal child without a report returned its unused grant") {
+		t.Fatalf("want the no-report counterexample: %s", r.String())
 	}
 }

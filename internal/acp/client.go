@@ -510,19 +510,17 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string) (Turn, erro
 	if err != nil {
 		return finish(), fmt.Errorf("session/prompt: %w", err)
 	}
-	var pr struct {
-		StopReason string `json:"stopReason"`
-		Usage      *Usage `json:"usage"`
-		Meta       struct {
-			Refraktal *ChildReport `json:"refraktal"`
-		} `json:"_meta"`
-	}
-	if err := json.Unmarshal(res, &pr); err != nil {
-		return finish(), fmt.Errorf("session/prompt: %w", err)
-	}
+	// Field by field: an undecodable report or usage is flagged for the
+	// caller (a child Refraktal that sends one is untrusted), never lost
+	// with the rest of the response.
+	pr, derr := decodePromptResult(res)
 	c.mu.Lock()
-	ts.turn.StopReason, ts.turn.Usage, ts.turn.Child = pr.StopReason, pr.Usage, pr.Meta.Refraktal
+	ts.turn.StopReason, ts.turn.Usage, ts.turn.Child = pr.StopReason, pr.Usage, pr.Child
+	ts.turn.ChildInvalid, ts.turn.UsageInvalid = pr.ChildInvalid, pr.UsageInvalid
 	c.mu.Unlock()
+	if derr != nil {
+		return finish(), fmt.Errorf("session/prompt: %w", derr)
+	}
 	return finish(), nil
 }
 
